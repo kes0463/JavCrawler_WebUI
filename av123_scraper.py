@@ -1,0 +1,258 @@
+"""
+123av.com 動画詳細ページ ( /ja/v/{product_id} ) から
+품번·제목·説明·ポスター·女優·ジャンル·発売日·メーカーを HTML から抽出する。
+"""
+from __future__ import annotations
+
+import re
+from dataclasses import asdict, dataclass, field
+from typing import Any, Dict, List, Optional
+from urllib.parse import urljoin
+
+import requests
+from bs4 import BeautifulSoup
+
+BASE_URL = "https://123av.com"
+VIDEO_PATH_TEMPLATE = "/ja/v/{product_id}"
+
+# テストスナップと同じ DOM（ page-video 配下 ）
+SELECTORS = {
+    "page_root": "#page-video",
+    "title": "#page-video h1",
+    "player": "#player",
+    "description": "#details .description.short p",
+    "detail_item": "#details .detail-item",
+    "favourite": "button.btn-action.favourite[data-code]",
+}
+
+# to_dict(한국어 키) 출력用 — 내부 dataclass 필드명은 그대로 둔다
+# actresses → to_dict(한국어) 시 "여배우"에 이름만 문자열 리스트로 넣는다(링크는 .actresses 참고)
+_OUTPUT_KEY_KO = {
+    "code": "품번",
+    "title": "제목",
+    "description": "설명",
+    "poster_url": "포스터",
+    "genres": "장르",
+    "release_date": "출시일",
+    "maker": "메이커",
+}
+
+# to_text() 필드 출력 순서
+_TEXT_FIELD_ORDER = [
+    "품번",
+    "제목",
+    "설명",
+    "포스터",
+    "여배우",
+    "장르",
+    "출시일",
+    "메이커",
+]
+
+
+@dataclass
+class VideoInfo:
+    code: str = ""
+    title: str = ""
+    description: str = ""
+    poster_url: str = ""
+    actresses: List[Dict[str, str]] = field(
+        default_factory=list
+    )  # 내부: {"name", "href"} — to_dict 시 "이름", "링크"
+    genres: List[str] = field(default_factory=list)
+    release_date: str = ""
+    maker: str = ""
+
+    def to_dict(self, *, korean_keys: bool = True) -> Dict[str, Any]:
+        raw = asdict(self)
+        if not korean_keys:
+            return raw
+        out: Dict[str, Any] = {}
+        for k, v in raw.items():
+            if k == "actresses" and isinstance(v, list):
+                names = []
+                for item in v:
+                    n = (item.get("name") or item.get("이름") or "").strip()
+                    if n:
+                        names.append(n)
+                out["여배우"] = names
+                continue
+            out_key = _OUTPUT_KEY_KO.get(k, k)
+            out[out_key] = v
+        return out
+
+    def to_text(self) -> str:
+        """JSON 이 아닌, 라벨 + 값 형태의 일반 텍스트(한국어 키)."""
+        d = self.to_dict(korean_keys=True)
+        blocks: List[str] = []
+        for key in _TEXT_FIELD_ORDER:
+            if key not in d:
+                continue
+            value = d[key]
+            if isinstance(value, list):
+                if value and all(isinstance(x, str) for x in value):
+                    text = ", ".join(value)
+                else:
+                    text = str(value) if value else ""
+            else:
+                text = "" if value is None else str(value)
+            if key == "설명" and text:
+                blocks.append(f"{key}:\n{text}")
+            else:
+                blocks.append(f"{key}: {text}")
+        return "\n\n".join(blocks) + "\n" if blocks else "\n"
+
+
+def _text(el: Any) -> str:
+    if el is None:
+        return ""
+    return re.sub(r"\s+", " ", el.get_text(" ", strip=True) or "").strip()
+
+
+def _iter_detail_rows(soup: BeautifulSoup) -> List[Any]:
+    node = soup.select_one(SELECTORS["detail_item"])
+    if not node:
+        return []
+    return node.find_all("div", recursive=False)
+
+
+def _row_label_and_value_container(row: Any) -> tuple[str, Any]:
+    spans = row.find_all("span", recursive=False)
+    if len(spans) < 2:
+        return "", None
+    label = _text(spans[0]).rstrip("：:").strip()
+    value_node = spans[1]
+    return label, value_node
+
+
+def _parse_actresses(value_node: Any) -> List[Dict[str, str]]:
+    out: List[Dict[str, str]] = []
+    if not value_node:
+        return out
+    for a in value_node.find_all("a", href=True):
+        href = (a.get("href") or "").strip()
+        if "actresses" not in href:
+            continue
+        name = _text(a)
+        if name:
+            out.append({"name": name, "href": href})
+    return out
+
+
+def _parse_genre_span(value_node: Any) -> List[str]:
+    if not value_node:
+        return []
+    genre = value_node.find("span", class_="genre")
+    target = genre or value_node
+    names: List[str] = []
+    for a in target.find_all("a", href=True):
+        t = _text(a)
+        if t:
+            names.append(t)
+    return names
+
+
+def _parse_maker(value_node: Any) -> str:
+    if not value_node:
+        return ""
+    a = value_node.find("a", href=re.compile(r"^makers/"))
+    if a:
+        return _text(a)
+    return _text(value_node)
+
+
+def _code_from_favourite(soup: BeautifulSoup) -> str:
+    btn = soup.select_one(SELECTORS["favourite"])
+    if not btn:
+        return ""
+    return (btn.get("data-code") or "").strip()
+
+
+def parse_video_html(
+    html: str,
+    *,
+    base_url: str = BASE_URL,
+) -> VideoInfo:
+    soup = BeautifulSoup(html, "lxml")
+    info = VideoInfo()
+    h1 = soup.select_one(SELECTORS["title"])
+    if h1:
+        info.title = _text(h1)
+
+    player = soup.select_one(SELECTORS["player"])
+    if player:
+        info.poster_url = (player.get("data-poster") or "").strip()
+        if info.poster_url and info.poster_url.startswith("/"):
+            info.poster_url = urljoin(base_url, info.poster_url)
+
+    desc = soup.select_one(SELECTORS["description"])
+    if desc:
+        info.description = _text(desc)
+
+    info.code = _code_from_favourite(soup)
+
+    for row in _iter_detail_rows(soup):
+        label, value_node = _row_label_and_value_container(row)
+        if not label or value_node is None:
+            continue
+        if label in ("コード",):
+            t = _text(value_node)
+            if t and not info.code:
+                info.code = t
+        if label in ("リリース日",):
+            info.release_date = _text(value_node)
+        if label in ("女優",):
+            info.actresses = _parse_actresses(value_node)
+        if label in ("ジャンル",):
+            info.genres = _parse_genre_span(value_node)
+        if label in ("メーカー",):
+            info.maker = _parse_maker(value_node)
+
+    return info
+
+
+def fetch_video_info(
+    product_id: str,
+    *,
+    base_url: str = BASE_URL,
+    path_template: str = VIDEO_PATH_TEMPLATE,
+    timeout: float = 30.0,
+    session: Optional[requests.Session] = None,
+) -> VideoInfo:
+    product_id = product_id.strip()
+    if not product_id:
+        raise ValueError("product_id is empty")
+    path = path_template.format(product_id=product_id)
+    url = base_url.rstrip("/") + path
+    sess = session or requests.Session()
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/120.0.0.0 Safari/537.36"
+        ),
+        "Accept-Language": "ja,en-US;q=0.9,en;q=0.8",
+    }
+    r = sess.get(url, headers=headers, timeout=timeout)
+    r.raise_for_status()
+    r.encoding = r.apparent_encoding or "utf-8"
+    return parse_video_html(r.text, base_url=base_url)
+
+
+if __name__ == "__main__":
+    import sys
+    from pathlib import Path
+
+    if hasattr(sys.stdout, "reconfigure"):
+        try:
+            sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+
+    for name in ("test_dazd-264.txt", "test_cjod-515.txt"):
+        p = Path(__file__).resolve().parent / name
+        if not p.exists():
+            continue
+        data = parse_video_html(p.read_text(encoding="utf-8"))
+        print("===", name, "===")
+        print(data.to_text(), end="")

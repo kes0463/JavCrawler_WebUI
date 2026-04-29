@@ -1,0 +1,36 @@
+PySide6
+psutil
+win32mica
+darkdetect
+scenedetect[opencv]
+faster-whisper
+stable-ts
+# Py3.12: pip 격리 빌드 실패 시 — pip install "setuptools>=69,<81" 후:
+# pip install "openai-whisper==20240930" --no-build-isolation
+openai-whisper==20240930
+tenacity
+openai
+requests
+jinja2
+python-dotenv
+keyring
+rich
+tqdm
+DrissionPage
+playwright
+undetected-chromedriver
+cloudscraper
+curl-cffi
+beautifulsoup4
+SQLAlchemy
+pysrt
+ffmpeg-python
+httpx
+ollama
+nvidia-cublas-cu11
+nvidia-cudnn-cu11
+nvidia-cublas-cu12
+numpy<2.0
+torch
+torchaudio
+torchvision

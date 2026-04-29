@@ -1,0 +1,90 @@
+# Environments
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Logs
+logs/
+*.log
+
+# Databases
+*.sqlite3
+*.db
+*.sqlite
+*.sqlite3-journal
+*.db-journal
+*.db-wal
+*.db-shm
+
+# Media & app data (`core.app_config`: DATA_ROOT, DB_PATH, MEDIA_ROOT, DERIVED_DATA_DIR, caches)
+# DB 파일은 상단 `*.db` 규칙으로 제외. 캐시·산출 JSON은 아래로 제외.
+output/
+data/media/
+data/cache/
+data/derived/
+data/folder_binding_inbox.json
+screenshots/
+
+# generated web/search artifacts (rebuildable)
+
+# test
+test_assets/
+tools/goodbyedpi/**/*.exe
+tools/goodbyedpi/**/*.dll
+tools/goodbyedpi/**/*.sys
+tools/lada/
+
+# venv
+venv/
+venv.bak/
+env/
+env.bak/
+.venv/
+.venv.bak/
+.env/
+.env.bak/
+
+# JAVSTORY Data/Processing Folders
+01_INBOX/
+02_PROCESSING/
+03_COMPLETED/
+04_ERROR/
+_archive/
+tmp/
+
+# Root-level generated artifacts (test/debug outputs)
+*.srt
+*.wav
+*.mp4
+*.ja.corrected.txt
+master_db.js
+models.txt
+*_story_context.json
+*_translation_hints*.txt
+
+# Transcription caches (regeneratable)
+Transcription/reference_cache/
+Transcription/story_context_cache/
+
+# Library state (per-user editable, not shared)
+library_state.json
+
+# pytest
+.pytest_cache/
+
+node_modules/
+__pycache__/
+dist/
+build/
+*.exe
+*.log
+claude/ 

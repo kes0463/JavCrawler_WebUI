@@ -1,0 +1,41 @@
+{
+    "Model_Settings": {
+        "model_size_or_path": "large-v2",
+        "device": "cuda",
+        "compute_type": "float16"
+    },
+    "Decoding_Settings": {
+        "beam_size": 8,
+        "best_of": 8,
+        "patience": 2.0,
+        "temperature": 0.0,
+        "word_timestamps": true
+    },
+    "Quality_Thresholds_and_Advanced": {
+        "condition_on_previous_text": false,
+        "logprob_threshold": -1.2,
+        "no_speech_threshold": 0.4,
+        "repetition_penalty": 1.5,
+        "no_repeat_ngram_size": 2,
+        "initial_prompt": ""
+    },
+    "VAD_Settings": {
+        "vad_filter": true,
+        "vad_threshold": 0.02,
+        "vad_min_speech_duration_ms": 100,
+        "vad_max_speech_duration_s": 11,
+        "vad_min_silence_duration_ms": 300,
+        "vad_speech_pad_ms": 400
+    },
+    "SceneDetect_Settings": {
+        "adaptive_threshold": 32,
+        "min_scene_len_seconds": 10.0
+    },
+    "LLM_Settings": {
+        "primary_model": "deepseek/deepseek-r1",
+        "fallback_model_1": "nousresearch/hermes-3-llama-3.1-405b",
+        "fallback_model_2": "anthropic/claude-3-5-haiku",
+        "local_model": "dolphin-2.9.2-qwen2-14b",
+        "max_retries": 3
+    }
+}

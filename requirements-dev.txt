@@ -1,0 +1,3 @@
+# 개발·CI용 — 프로젝트 루트에서: pip install -r requirements-dev.txt
+-r requirements.txt
+pytest>=8.0

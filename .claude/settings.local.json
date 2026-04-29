@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python *)",
+      "Bash(npm install *)",
+      "Bash(xargs -I{} sh -c 'echo \"=== {} ===\"; cat \"{}\"')",
+      "Bash(npx tsc *)",
+      "Bash(grep \"\\\\.py$\")",
+      "Bash(/d/App/JAVSTORY/venv/Scripts/pip install *)",
+      "Bash(/d/App/JAVSTORY/venv/Scripts/python *)",
+      "Bash(npm run *)",
+      "Bash(xargs wc *)"
+    ]
+  }
+}

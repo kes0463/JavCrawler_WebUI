@@ -1,0 +1,184 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>JAV Story Analyzer - Timeline</title>
+
+    <!-- Tailwind (CDN) -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+      tailwind.config = {
+        theme: {
+          extend: {
+            colors: {
+              netflix: {
+                bg: "#0b0b0f",
+                panel: "#111118",
+                card: "#171721",
+                border: "rgba(255,255,255,0.08)",
+                text: "#e6e6e6",
+                muted: "#a3a3a3",
+                red: "#e50914",
+              },
+            },
+            boxShadow: {
+              glow: "0 0 0 1px rgba(255,255,255,0.08), 0 12px 40px rgba(0,0,0,0.55)",
+            },
+          },
+        },
+      };
+    </script>
+
+    <!-- Lucide Icons -->
+    <script src="https://unpkg.com/lucide@0.469.0/dist/umd/lucide.min.js"></script>
+
+    <!-- Fuse.js (CDN) -->
+    <script src="https://cdn.jsdelivr.net/npm/fuse.js/dist/fuse.js"></script>
+
+    <link rel="stylesheet" href="./css/custom.css" />
+  </head>
+  <body class="bg-netflix-bg text-netflix-text">
+    <div class="min-h-screen">
+      <header class="sticky top-0 z-30 backdrop-blur bg-black/30 border-b border-netflix-border">
+        <div class="px-4 py-3 flex flex-col gap-3">
+          <div class="flex items-center gap-3">
+            <div class="w-2.5 h-2.5 rounded-full bg-netflix-red"></div>
+            <div class="font-semibold tracking-wide">JAV Story Analyzer</div>
+            <div class="text-netflix-muted text-sm">Ultimate Metadata Search Engine (Local)</div>
+            <div class="ml-auto flex items-center gap-2 text-netflix-muted text-xs">
+              <span id="statusText">데이터 로딩 중...</span>
+            </div>
+          </div>
+
+          <!-- Search & Filters -->
+          <div class="grid grid-cols-1 lg:grid-cols-12 gap-2">
+            <div class="lg:col-span-6">
+              <div class="flex items-center gap-2 rounded-xl bg-netflix-panel border border-netflix-border px-3 py-2">
+                <i data-lucide="search" class="w-4 h-4 text-netflix-muted"></i>
+                <input
+                  id="searchInput"
+                  type="text"
+                  placeholder="대사/설명/액션 검색..."
+                  class="w-full bg-transparent outline-none text-sm placeholder:text-netflix-muted/70"
+                  autocomplete="off"
+                />
+                <button
+                  id="clearSearchBtn"
+                  type="button"
+                  class="text-xs text-netflix-muted hover:text-netflix-text px-2 py-1 rounded-lg border border-netflix-border"
+                >
+                  Clear
+                </button>
+              </div>
+            </div>
+
+            <div class="lg:col-span-2">
+              <select
+                id="filterLocation"
+                class="w-full rounded-xl bg-netflix-panel border border-netflix-border px-3 py-2 text-sm outline-none"
+              >
+                <option value="">Location (ALL)</option>
+              </select>
+            </div>
+            <div class="lg:col-span-2">
+              <select
+                id="filterPosition"
+                class="w-full rounded-xl bg-netflix-panel border border-netflix-border px-3 py-2 text-sm outline-none"
+              >
+                <option value="">Position (ALL)</option>
+              </select>
+            </div>
+            <div class="lg:col-span-2">
+              <select
+                id="filterIntensity"
+                class="w-full rounded-xl bg-netflix-panel border border-netflix-border px-3 py-2 text-sm outline-none"
+              >
+                <option value="">Intensity (ALL)</option>
+              </select>
+            </div>
+          </div>
+        </div>
+      </header>
+
+      <main class="px-4 py-4">
+        <div class="grid grid-cols-1 lg:grid-cols-12 gap-4">
+          <!-- Left: Player -->
+          <section class="lg:col-span-5">
+            <div class="rounded-xl bg-netflix-panel border border-netflix-border shadow-glow overflow-hidden">
+              <div class="px-4 py-3 border-b border-netflix-border flex items-center gap-2">
+                <i data-lucide="play-circle" class="w-5 h-5"></i>
+                <div class="font-medium">플레이어</div>
+                <div class="ml-auto text-xs text-netflix-muted" id="videoMeta"></div>
+              </div>
+              <div class="p-3">
+                <video
+                  id="video"
+                  class="w-full rounded-lg bg-black"
+                  controls
+                  preload="metadata"
+                ></video>
+                <div class="mt-3 grid grid-cols-1 gap-2">
+                  <div class="flex items-center justify-between text-sm">
+                    <div class="text-netflix-muted">현재 시간</div>
+                    <div class="font-mono" id="currentTimeText">0:00</div>
+                  </div>
+                  <div class="flex items-center justify-between text-sm">
+                    <div class="text-netflix-muted">현재 구간</div>
+                    <div class="truncate max-w-[70%]" id="currentZoneText">-</div>
+                  </div>
+                  <div class="flex items-center justify-between text-sm">
+                    <div class="text-netflix-muted">현재 챕터</div>
+                    <div class="truncate max-w-[70%]" id="currentChapterText">-</div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div class="mt-4 rounded-xl bg-netflix-panel border border-netflix-border shadow-glow overflow-hidden">
+              <div class="px-4 py-3 border-b border-netflix-border flex items-center gap-2">
+                <i data-lucide="file-json" class="w-5 h-5"></i>
+                <div class="font-medium">데이터</div>
+              </div>
+              <div class="p-4 text-sm text-netflix-muted">
+                <div>기본 로딩: <code class="px-1 py-0.5 bg-black/40 rounded">web_database.js</code></div>
+                <div class="mt-1">대체 로딩: <code class="px-1 py-0.5 bg-black/40 rounded">web_database.json</code> (로컬 서버 필요)</div>
+                <div class="mt-3 text-xs">
+                  팁: 더블 클릭 실행이 안 되면 프로젝트 루트에서
+                  <code class="px-1 py-0.5 bg-black/40 rounded">python -m http.server 8000</code>
+                  후 <code class="px-1 py-0.5 bg-black/40 rounded">http://localhost:8000</code>로 접속하세요.
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <!-- Right: Timeline -->
+          <section class="lg:col-span-7">
+            <div class="rounded-xl bg-netflix-panel border border-netflix-border shadow-glow overflow-hidden">
+              <div class="px-4 py-3 border-b border-netflix-border flex items-center gap-2">
+                <i data-lucide="layout-grid" class="w-5 h-5"></i>
+                <div class="font-medium">타임라인 갤러리</div>
+                <div class="ml-auto text-xs text-netflix-muted" id="countsText"></div>
+              </div>
+              <div class="p-4">
+                <div id="timeline" class="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-3"></div>
+                <div id="emptyState" class="hidden text-netflix-muted text-sm">
+                  표시할 카드가 없습니다. `data/derived/master_db.js`가 없거나 검색 조건이 너무 제한적일 수 있어요.
+                </div>
+              </div>
+            </div>
+          </section>
+        </div>
+      </main>
+    </div>
+
+    <!-- Zero-build: 전역 변수 방식 (CORS-safe) -->
+    <script src="./data/derived/master_db.js"></script>
+    <script src="./web_database.js"></script>
+    <script src="./js/app.js"></script>
+    <script>
+      lucide.createIcons();
+    </script>
+  </body>
+</html>
+
