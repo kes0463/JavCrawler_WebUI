@@ -10,7 +10,7 @@ import httpx
 
 from javstory.config.app_config import (
     LLM_TIERS, LLM_BACKOFF_STAGES, LLM_REFUSAL_PATTERNS,
-    OPENROUTER_BASE_URL, OLLAMA_BASE_URL,
+    OPENROUTER_BASE_URL, OLLAMA_BASE_URL, GEMINI_BASE_URL,
 )
 
 
@@ -216,12 +216,25 @@ class MultiTierRouter:
             api_key="ollama",
             timeout=httpx.Timeout(300.0, connect=5.0)
         )
+        # Gemini 비동기 클라이언트 (API 키 미설정 시 None)
+        import os as _os
+        _gemini_key = (_os.environ.get("JAVSTORY_GEMINI_API_KEY") or "").strip()
+        self.gemini_client: Optional[AsyncOpenAI] = (
+            AsyncOpenAI(
+                base_url=GEMINI_BASE_URL,
+                api_key=_gemini_key,
+                timeout=httpx.Timeout(180.0, connect=5.0),
+            )
+            if _gemini_key else None
+        )
 
     async def close(self) -> None:
         """비동기 클라이언트 리소스를 명시적으로 해제합니다."""
         try:
             await self.or_client.close()
             await self.ol_client.close()
+            if self.gemini_client:
+                await self.gemini_client.close()
         except Exception as e:
             self.logger(f"  [Router] 리소스 해제 중 오류 (무시 가능): {e}")
 
@@ -265,11 +278,22 @@ class MultiTierRouter:
         extra_headers: 요청별 HTTP 헤더. tier ``openrouter_extra_headers``와 병합되며 동일 키는 이 인자가 우선.
         """
         provider = model_cfg.get("provider", "openrouter")
-        client = self.or_client if provider == "openrouter" else self.ol_client
-        
-        # [수정] json_mode가 True일 때만 json_object 형식을 강제함
+
+        if provider == "gemini":
+            if self.gemini_client is None:
+                raise ValueError(
+                    "Gemini API 키가 설정되지 않았습니다. "
+                    "설정 화면에서 Gemini API 키를 입력하고 저장해주세요."
+                )
+            client = self.gemini_client
+        elif provider == "ollama":
+            client = self.ol_client
+        else:
+            client = self.or_client
+
+        # Gemini는 HTML 출력 방식 — json_mode 미사용
         resp_fmt = {"type": "json_object"} if json_mode and provider == "openrouter" else None
-        
+
         kwargs: Dict[str, Any] = {
             "model": model_cfg["model"],
             "messages": messages,
@@ -279,7 +303,7 @@ class MultiTierRouter:
         if isinstance(max_tokens, int) and max_tokens > 0:
             kwargs["max_tokens"] = max_tokens
 
-        # OpenRouter/Ollama OpenAI 호환: provider별 extra_body 지원
+        # OpenRouter/Ollama OpenAI 호환: provider별 extra_body 지원 (Gemini는 불필요)
         if provider == "ollama":
             xb = model_cfg.get("ollama_extra_body") or {}
             ot = model_cfg.get("ollama_think", None)
@@ -315,6 +339,10 @@ class MultiTierRouter:
         if merged_headers and provider == "openrouter" and _chat_completions_accepts_extra_headers(client):
             kwargs["extra_headers"] = merged_headers
 
+        # Gemini: response_format=None 보장 (HTML 출력)
+        if provider == "gemini":
+            kwargs.pop("response_format", None)
+
         try:
             response = await client.chat.completions.create(**kwargs)
         except TypeError as e:
@@ -331,6 +359,8 @@ class MultiTierRouter:
                 response = await client.chat.completions.create(**kwargs)
             else:
                 raise
+        except Exception as e:
+            raise
 
         content = _coalesce_chat_message_text(response.choices[0].message)
         # Qwen 등: 본문이 reasoning 쪽에만 있을 때 `<think>` 래퍼가 남는 경우

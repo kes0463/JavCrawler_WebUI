@@ -6,18 +6,25 @@ GlassCard {
     id: root
     autoSize: false
 
-    property alias model: logView.model
     property int maxLines: 500
+    property string copyText: ""
 
     function append(text) {
         logListModel.append({"line": text});
         if (logListModel.count > maxLines)
             logListModel.remove(0);
-        logView.positionViewAtEnd();
+        // keep copyText in sync for selection/copy
+        var lines = [];
+        for (var i = 0; i < logListModel.count; i++) {
+            lines.push(logListModel.get(i).line);
+        }
+        copyText = lines.join("\n");
+        logArea.cursorPosition = logArea.length
     }
 
     function clear() {
         logListModel.clear();
+        copyText = "";
     }
 
     implicitHeight: 200
@@ -32,37 +39,29 @@ GlassCard {
         color: Theme.textSecondary
     }
 
-    ListView {
-        boundsBehavior: Theme.boundsBehavior
-        id: logView
+    ScrollView {
         anchors.top: headerLabel.bottom
         anchors.topMargin: 4
         anchors.left: parent.left
         anchors.right: parent.right
         anchors.bottom: parent.bottom
         clip: true
-        model: logListModel
 
-        ScrollBar.vertical: ScrollBar {
-            policy: ScrollBar.AsNeeded
-        }
+        ScrollBar.vertical.policy: ScrollBar.AsNeeded
 
-        delegate: Text {
-            width: logView.width
-            text: model.line
-            wrapMode: Text.Wrap
+        TextArea {
+            id: logArea
+            width: parent.width
+            text: root.copyText
+            readOnly: true
+            selectByMouse: true
+            wrapMode: TextArea.Wrap
+            color: Theme.textMuted
+            selectedTextColor: Theme.textPrimary
+            selectionColor: Theme.accentNeon
             font.pixelSize: Theme.fontCaption
             font.family: "Consolas"
-            color: {
-                if (model.line.indexOf("[에러]") >= 0 || model.line.indexOf("실패") >= 0)
-                    return Theme.error;
-                if (model.line.indexOf("[성공]") >= 0 || model.line.indexOf("완료") >= 0)
-                    return Theme.success;
-                if (model.line.indexOf("[경고]") >= 0)
-                    return Theme.warning;
-                return Theme.textMuted;
-            }
-            padding: 1
+            background: null
         }
     }
 }

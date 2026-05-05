@@ -15,5 +15,5 @@ IF NOT EXIST "venv" (
 
 :: Activate venv and run GUI v2
 call venv\Scripts\activate.bat
-python gui_main_v2.py
+python main.py
 pause

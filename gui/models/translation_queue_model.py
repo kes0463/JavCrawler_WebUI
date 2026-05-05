@@ -56,7 +56,7 @@ class TranslationQueueController(QAbstractListModel):
         return len(self._items)
 
     def data(self, index, role=Qt.ItemDataRole.DisplayRole):
-        if not index.isValid():
+        if not index.isValid() or not (0 <= index.row() < len(self._items)):
             return None
         item = self._items[index.row()]
         if role == self.SkuRole:

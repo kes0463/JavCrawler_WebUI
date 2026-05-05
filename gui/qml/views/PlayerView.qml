@@ -858,6 +858,7 @@ Item {
             Slider {
                 id: progressSlider
                 Layout.fillWidth: true
+                Layout.preferredHeight: 28
                 focusPolicy: Qt.NoFocus
                 from: 0; to: Math.max(1, mediaPlayer.duration)
                 value: mediaPlayer.position
@@ -865,10 +866,18 @@ Item {
                 onMoved: mediaPlayer.setPosition(value)
 
                 background: Rectangle {
-                    height: 6; radius: 3; color: Qt.rgba(255, 255, 255, 0.12)
+                    color: "transparent"
                     Rectangle {
-                        width: progressSlider.visualPosition * parent.width
-                        height: parent.height; radius: 3; color: Theme.accentNeon
+                        anchors.verticalCenter: parent.verticalCenter
+                        width: parent.width
+                        height: progressSlider.pressed ? 8 : (progressSlider.hovered ? 7 : 5)
+                        radius: 4
+                        color: Qt.rgba(255, 255, 255, 0.12)
+                        Behavior on height { NumberAnimation { duration: 80 } }
+                        Rectangle {
+                            width: progressSlider.visualPosition * parent.width
+                            height: parent.height; radius: parent.radius; color: Theme.accentNeon
+                        }
                     }
                 }
                 handle: Rectangle {
@@ -888,12 +897,13 @@ Item {
 
                 // 재생/일시정지
                 Button {
-                    id: playPauseBtn; flat: true; font.pixelSize: 24; focusPolicy: Qt.NoFocus
+                    id: playPauseBtn; flat: true; font.pixelSize: 28; focusPolicy: Qt.NoFocus
                     onClicked: mediaPlayer.playbackState === MediaPlayer.PlayingState
                         ? mediaPlayer.pause() : mediaPlayer.play()
                     contentItem: Text {
-                        text: mediaPlayer.playbackState === MediaPlayer.PlayingState ? "⏸" : "▶"
-                        color: "#FFF"; font: parent.font; horizontalAlignment: Text.AlignHCenter
+                        text: mediaPlayer.playbackState === MediaPlayer.PlayingState ? "" : ""
+                        color: "#FFF"; font.pixelSize: parent.font.pixelSize; font.family: Theme.iconFont
+                        horizontalAlignment: Text.AlignHCenter
                     }
                     background: Rectangle { color: "transparent" }
                     scale: playPauseBtn.hovered ? 1.15 : 1.0
@@ -909,8 +919,11 @@ Item {
 
                 // 10초 뒤로
                 Button {
-                    flat: true; font.pixelSize: 17; focusPolicy: Qt.NoFocus
-                    contentItem: Text { text: "⏪"; color: "#FFF"; font: parent.font }
+                    flat: true; font.pixelSize: 24; focusPolicy: Qt.NoFocus
+                    contentItem: Text {
+                        text: ""; color: "#FFF"; font.pixelSize: parent.font.pixelSize; font.family: Theme.iconFont
+                        
+                    }
                     background: Rectangle { color: "transparent" }
                     onClicked: mediaPlayer.setPosition(Math.max(0, mediaPlayer.position - 10000))
                     ToolTip { text: "10초 뒤로 (←)"; visible: parent.hovered; delay: 500 }
@@ -918,8 +931,11 @@ Item {
 
                 // 10초 앞으로
                 Button {
-                    flat: true; font.pixelSize: 17; focusPolicy: Qt.NoFocus
-                    contentItem: Text { text: "⏩"; color: "#FFF"; font: parent.font }
+                    flat: true; font.pixelSize: 24; focusPolicy: Qt.NoFocus
+                    contentItem: Text {
+                        text: ""; color: "#FFF"; font.pixelSize: parent.font.pixelSize; font.family: Theme.iconFont
+                        
+                    }
                     background: Rectangle { color: "transparent" }
                     onClicked: mediaPlayer.setPosition(Math.min(mediaPlayer.duration, mediaPlayer.position + 10000))
                     ToolTip { text: "10초 앞으로 (→)"; visible: parent.hovered; delay: 500 }
@@ -986,12 +1002,12 @@ Item {
                 // 자막 글꼴·크기 설정 (항상 표시)
                 Button {
                     id: subtitleSettingBtn
-                    flat: true; font.pixelSize: 14; focusPolicy: Qt.NoFocus
+                    flat: true; font.pixelSize: 22; focusPolicy: Qt.NoFocus
                     contentItem: Text {
-                        text: "가"
+                        text: ""
                         color: subtitleSettingsPopup.visible
                                ? Theme.accentNeon : Qt.rgba(1, 1, 1, 0.55)
-                        font: parent.font
+                        font.pixelSize: parent.font.pixelSize; font.family: Theme.iconFont
                         horizontalAlignment: Text.AlignHCenter
                     }
                     background: Rectangle {
@@ -1030,10 +1046,11 @@ Item {
 
                 // 좋아요
                 Button {
-                    id: likeBtn; flat: true; font.pixelSize: 18; focusPolicy: Qt.NoFocus
+                    id: likeBtn; flat: true; font.pixelSize: 22; focusPolicy: Qt.NoFocus
                     property bool active: PlayerModel.isLiked
                     contentItem: Text {
-                        text: "❤"; font: parent.font
+                        text: ""; font.pixelSize: parent.font.pixelSize; font.family: Theme.iconFont
+                        
                         color: likeBtn.active ? "#FF4081" : Qt.rgba(1, 1, 1, 0.45)
                         Behavior on color { ColorAnimation { duration: 200 } }
                     }
@@ -1049,10 +1066,11 @@ Item {
 
                 // 싫어요
                 Button {
-                    id: dislikeBtn; flat: true; font.pixelSize: 18; focusPolicy: Qt.NoFocus
+                    id: dislikeBtn; flat: true; font.pixelSize: 22; focusPolicy: Qt.NoFocus
                     property bool active: PlayerModel.isDisliked
                     contentItem: Text {
-                        text: "👎"; font: parent.font
+                        text: ""; font.pixelSize: parent.font.pixelSize; font.family: Theme.iconFont
+                        
                         color: dislikeBtn.active ? "#FF6B6B" : Qt.rgba(1, 1, 1, 0.45)
                         Behavior on color { ColorAnimation { duration: 200 } }
                     }
@@ -1078,9 +1096,10 @@ Item {
 
                         Text {
                             anchors.centerIn: parent
-                            text: audioOutput.muted ? "🔇" : "🔊"
+                            text: audioOutput.muted ? "" : ""
                             color: "#FFF"
-                            font.pixelSize: 14
+                            font.pixelSize: 18
+                            font.family: Theme.iconFont
                         }
 
                         MouseArea {
@@ -1119,11 +1138,12 @@ Item {
 
                 // PIP 토글
                 Button {
-                    flat: true; font.pixelSize: 16; focusPolicy: Qt.NoFocus
+                    flat: true; font.pixelSize: 22; focusPolicy: Qt.NoFocus
                     contentItem: Text {
-                        text: "⧉"
+                        text: ""
                         color: playerRoot.isPip ? Theme.accentNeon : Qt.rgba(1, 1, 1, 0.7)
-                        font: parent.font; horizontalAlignment: Text.AlignHCenter
+                        font.pixelSize: parent.font.pixelSize; font.family: Theme.iconFont
+                        horizontalAlignment: Text.AlignHCenter
                     }
                     background: Rectangle { color: "transparent" }
                     onClicked: playerRoot.isPip = !playerRoot.isPip
@@ -1132,11 +1152,12 @@ Item {
 
                 // 전체화면 토글
                 Button {
-                    flat: true; font.pixelSize: 16; focusPolicy: Qt.NoFocus
+                    flat: true; font.pixelSize: 22; focusPolicy: Qt.NoFocus
                     contentItem: Text {
-                        text: playerRoot.isFullscreen ? "⊡" : "⊞"
+                        text: playerRoot.isFullscreen ? "" : ""
                         color: Qt.rgba(1, 1, 1, 0.7)
-                        font: parent.font; horizontalAlignment: Text.AlignHCenter
+                        font.pixelSize: parent.font.pixelSize; font.family: Theme.iconFont
+                        horizontalAlignment: Text.AlignHCenter
                     }
                     background: Rectangle { color: "transparent" }
                     onClicked: playerRoot._toggleFullscreen()
@@ -1145,10 +1166,11 @@ Item {
 
                 // 닫기
                 Button {
-                    flat: true; font.pixelSize: 17; focusPolicy: Qt.NoFocus
+                    flat: true; font.pixelSize: 22; focusPolicy: Qt.NoFocus
                     contentItem: Text {
-                        text: "✕"; color: Qt.rgba(1, 1, 1, 0.7)
-                        font: parent.font; horizontalAlignment: Text.AlignHCenter
+                        text: ""; color: Qt.rgba(1, 1, 1, 0.7)
+                        font.pixelSize: parent.font.pixelSize; font.family: Theme.iconFont
+                        horizontalAlignment: Text.AlignHCenter
                     }
                     background: Rectangle {
                         color: parent.hovered ? Qt.rgba(1, 0, 0, 0.25) : "transparent"

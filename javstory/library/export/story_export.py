@@ -30,6 +30,7 @@ def story_context_file_dict_from_canonical(state: LibraryCanonical) -> dict[str,
         "synopsis_short": state.synopsis_short,
         "overall_summary": state.overall_summary,
         "scenes": [],
+        "translation_note": state.translation_note or "",
         "_javstory": {
             "canonical_schema_version": state.canonical_schema_version,
             "updated_at": state.updated_at,
@@ -110,7 +111,8 @@ def canonical_from_story_context_file_dict(data: dict[str, Any]) -> LibraryCanon
     if isinstance(meta, dict) and meta.get("updated_at"):
         updated_at = str(meta["updated_at"])
 
-    return replace(c, scenes=new_scenes, updated_at=updated_at)
+    note = str(data.get("translation_note", "") or "")
+    return replace(c, scenes=new_scenes, updated_at=updated_at, translation_note=note)
 
 
 def write_story_context_json(path: Path | str, state: LibraryCanonical, *, indent: int = 2) -> Path:

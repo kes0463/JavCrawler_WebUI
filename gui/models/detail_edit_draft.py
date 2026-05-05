@@ -50,6 +50,12 @@ class DetailEditDraft(QObject):
 
         self._release_date = ""
 
+        # 번역 노트(작품/배우) — load_from_row 외 별도 채널로 채움
+        self._translation_note = ""
+        self._actress_translation_note = ""
+        # 배우 노트 편집 대상(첫 배우 일본어 표기). 비어있으면 편집 불가.
+        self._actress_note_target_ja = ""
+
     def load_from_row(self, row: Any) -> None:
         self._product_code = _s(getattr(row, "product_code", ""))
 
@@ -427,4 +433,51 @@ class DetailEditDraft(QObject):
         v = _s(v)
         if v != self._release_date:
             self._release_date = v
+            self.draftChanged.emit()
+
+    # ── 번역 노트 ────────────────────────────────────
+    # 줄바꿈/공백을 보존해야 하므로 _s(strip)을 쓰지 않는다.
+
+    @Property(str, notify=draftChanged)
+    def translationNote(self) -> str:
+        return self._translation_note
+
+    @translationNote.setter
+    def translationNote(self, v: str):
+        s = "" if v is None else str(v)
+        if s != self._translation_note:
+            self._translation_note = s
+            self.draftChanged.emit()
+
+    @Property(str, notify=draftChanged)
+    def actressTranslationNote(self) -> str:
+        return self._actress_translation_note
+
+    @actressTranslationNote.setter
+    def actressTranslationNote(self, v: str):
+        s = "" if v is None else str(v)
+        if s != self._actress_translation_note:
+            self._actress_translation_note = s
+            self.draftChanged.emit()
+
+    @Property(str, notify=draftChanged)
+    def actressNoteTargetJa(self) -> str:
+        return self._actress_note_target_ja
+
+    def set_translation_notes(self, *, work_note: str, actress_note: str, actress_target_ja: str) -> None:
+        """모델 측에서 노트(작품/배우)를 일괄 채울 때 호출."""
+        s_w = "" if work_note is None else str(work_note)
+        s_a = "" if actress_note is None else str(actress_note)
+        s_t = _s(actress_target_ja)
+        changed = False
+        if s_w != self._translation_note:
+            self._translation_note = s_w
+            changed = True
+        if s_a != self._actress_translation_note:
+            self._actress_translation_note = s_a
+            changed = True
+        if s_t != self._actress_note_target_ja:
+            self._actress_note_target_ja = s_t
+            changed = True
+        if changed:
             self.draftChanged.emit()

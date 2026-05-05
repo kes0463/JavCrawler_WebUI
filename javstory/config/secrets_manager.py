@@ -12,6 +12,8 @@ from javstory.config.app_config import (
     ENV_OPENROUTER_API_KEY,
     KEYRING_ACCOUNT_OPENROUTER,
     KEYRING_SERVICE_NAME,
+    ENV_GEMINI_API_KEY,
+    KEYRING_ACCOUNT_GEMINI,
 )
 
 # 프로젝트 .env 로드 (이미 설정된 OS 환경변수는 덮어쓰지 않음 — dotenv 기본)
@@ -83,8 +85,40 @@ def clear_openrouter_api_key_from_keyring() -> None:
         pass
 
 
+def get_gemini_api_key() -> Optional[str]:
+    """환경변수 → keyring 순으로 조회. 공백만 있으면 None 취급."""
+    key = os.getenv(ENV_GEMINI_API_KEY)
+    if key and key.strip():
+        return key.strip()
+    stored = keyring.get_password(KEYRING_SERVICE_NAME, KEYRING_ACCOUNT_GEMINI)
+    if stored and stored.strip():
+        return stored.strip()
+    return None
+
+
+def set_gemini_api_key(value: str, *, write_env_file: bool = True) -> None:
+    """keyring 저장, os.environ 반영, 옵션으로 .env 파일 기록."""
+    v = (value or "").strip()
+    if not v:
+        raise ValueError("Gemini API 키가 비어 있습니다.")
+    keyring.set_password(KEYRING_SERVICE_NAME, KEYRING_ACCOUNT_GEMINI, v)
+    os.environ[ENV_GEMINI_API_KEY] = v
+    if write_env_file:
+        set_env_runtime_value(ENV_GEMINI_API_KEY, v)
+
+
+def clear_gemini_api_key_from_keyring() -> None:
+    try:
+        keyring.delete_password(KEYRING_SERVICE_NAME, KEYRING_ACCOUNT_GEMINI)
+    except Exception:
+        pass
+
+
 def apply_env_to_os() -> None:
     """저장소에서 읽은 키를 subprocess/라이브러리용으로 os.environ에 맞춤."""
     k = get_openrouter_api_key()
     if k:
         os.environ[ENV_OPENROUTER_API_KEY] = k
+    gk = get_gemini_api_key()
+    if gk:
+        os.environ[ENV_GEMINI_API_KEY] = gk

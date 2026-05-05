@@ -162,6 +162,11 @@ class LibraryCanonical:
     media: MediaBinding | None = None
     export_manifest: ExportManifest | None = None
 
+    # 작품 단위 번역 노트 — Gemini 번역 프롬프트의 {{note}}에 주입.
+    # 권장 섹션: [작품 기본 컨텍스트], [화자 프로필 및 관계],
+    # [Whisper AI 오인식 교정 사전], [용어/은어 매핑], [고정 표기/호칭 사전]
+    translation_note: str = ""
+
     created_at: str = ""
     updated_at: str = ""
 
@@ -211,6 +216,7 @@ class LibraryCanonical:
             "work_locked_fields": sorted(self.work_locked_fields),
             "media": media_d,
             "export_manifest": exp,
+            "translation_note": self.translation_note,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
         }
@@ -284,6 +290,7 @@ class LibraryCanonical:
             work_locked_fields=work_locked,
             media=media,
             export_manifest=exp,
+            translation_note=str(d.get("translation_note", "") or ""),
             created_at=str(d.get("created_at", "")),
             updated_at=str(d.get("updated_at", "")),
         )

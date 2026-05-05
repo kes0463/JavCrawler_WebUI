@@ -286,6 +286,16 @@ def create_engine(app) -> QQmlApplicationEngine:
     from javstory.harvest.database import init_db
     init_db()
 
+    _font_path = Path(__file__).resolve().parent / "fonts" / "MaterialSymbolsRounded.ttf"
+    if _font_path.is_file():
+        from PySide6.QtGui import QFontDatabase
+        fid = QFontDatabase.addApplicationFont(str(_font_path))
+        if fid >= 0:
+            families = QFontDatabase.applicationFontFamilies(fid)
+            print(f"[UI] Material Symbols font registered: {families}")
+        else:
+            print("[UI] Material Symbols font registration failed")
+
     engine = QQmlApplicationEngine()
 
     engine.addImportPath(str(_QML_DIR))

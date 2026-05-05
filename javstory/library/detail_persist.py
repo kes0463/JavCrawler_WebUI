@@ -104,10 +104,12 @@ def persist_metadata_row_and_sync_files(
     row: Any,
     *,
     scenes_override: list[SceneEntry] | None = None,
+    translation_note_override: str | None = None,
 ) -> None:
     """
     DB 행이 이미 커밋된 뒤 호출 — library_state.json 및 모든 후보 Grok 캐시 JSON에 동일 캐노니컬 반영.
     scenes_override가 있으면 씬 배열을 통째로 교체(편집 세션 저장).
+    translation_note_override가 None이 아니면 작품 단위 번역 노트도 교체.
     """
     pc = (product_code or "").strip().upper()
     state = load_canonical_for_product(pc)
@@ -116,6 +118,8 @@ def persist_metadata_row_and_sync_files(
     if scenes_override is not None:
         merged = merge_scene_edit_with_previous(state.scenes, list(scenes_override))
         state = replace(state, scenes=merged)
+    if translation_note_override is not None:
+        state = replace(state, translation_note=str(translation_note_override or ""))
 
     ls_path = library_state_path(pc)
     ls_path.parent.mkdir(parents=True, exist_ok=True)

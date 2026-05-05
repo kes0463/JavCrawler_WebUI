@@ -210,6 +210,14 @@ def _default_chunk_durations(tier: Dict[str, Any]) -> tuple[float, float]:
     model_l = (tier.get("model") or "").lower()
     if tier.get("provider") == "ollama":
         return _ollama_chunk_params_by_model(model_l)
+    if tier.get("provider") == "gemini":
+        try:
+            from javstory.config.app_config import gemini_default_chunk_params
+
+            tgt, ov, _ = gemini_default_chunk_params(tier.get("model") or "")
+            return float(tgt), float(ov)
+        except Exception:
+            return 45.0, 10.0
     if "minimax" in model_l:
         return 30.0, 6.0
     if _is_glm_tier(tier):
@@ -244,6 +252,14 @@ def _translation_concurrency(tier: Dict[str, Any]) -> int:
             pass
     if tier.get("provider") == "ollama":
         return 1
+    if tier.get("provider") == "gemini":
+        try:
+            from javstory.config.app_config import gemini_default_chunk_params
+
+            _, _, conc = gemini_default_chunk_params(tier.get("model") or "")
+            return max(1, min(int(conc), 8))
+        except Exception:
+            return 2
     if tier.get("provider") == "openrouter":
         return 3 if _is_glm_tier(tier) else 2
     return 1
@@ -350,6 +366,10 @@ async def translate_ja_segments_to_ko_async(
     translation_provider: Optional[str] = None,
     story_context_hints: Optional[str] = None,
     story_context_grok_json: Optional[Dict[str, Any]] = None,
+    translation_note_global: Optional[str] = None,
+    translation_note_actress: Optional[str] = None,
+    translation_note_work: Optional[str] = None,
+    apply_glossary_post: bool = True,
     logger_func: OptionalLogger = None,
     should_cancel: CancelCheck = None,
     log_full_translation_prompt: Optional[bool] = None,
@@ -386,6 +406,31 @@ async def translate_ja_segments_to_ko_async(
 
     extra_hints = _merge_translation_hints(story_context_hints, "")
 
+    # 전역+배우+작품 노트 결합(Gemini {{note}}용). 결합 결과는 build_translation_note로 합쳐짐.
+    try:
+        from javstory.translation.translation_notes import (
+            combine_translation_notes,
+            extract_glossary,
+            apply_glossary_to_text,
+        )
+        combined_user_note = combine_translation_notes(
+            global_note=translation_note_global or "",
+            actress_note=translation_note_actress or "",
+            work_note=translation_note_work or "",
+        )
+    except Exception:
+        combined_user_note = ""
+        extract_glossary = None  # type: ignore[assignment]
+        apply_glossary_to_text = None  # type: ignore[assignment]
+
+    # 후처리 글로서리 — LLM이 놓친 토큰을 강제 치환.
+    glossary_pairs: list[tuple[str, str]] = []
+    if apply_glossary_post and combined_user_note and extract_glossary:
+        try:
+            glossary_pairs = extract_glossary(combined_user_note)
+        except Exception:
+            glossary_pairs = []
+
     if tier.get("provider") == "ollama":
         await before_ko_translate_work(tier["model"], logger_func=log)
 
@@ -415,6 +460,77 @@ async def translate_ja_segments_to_ko_async(
             tgt_segs: List[SimpleSegment] = chunk["target"]
             if not tgt_segs:
                 return
+
+            # ── Gemini HTML 번역 경로 ─────────────────────────────────
+            if str(tier.get("provider") or "").lower() == "gemini":
+                from javstory.translation import gemini_prompts
+
+                # 사용자 작성 노트(전역+배우+작품) → 스토리 힌트와 함께 합쳐 {{note}}로 주입
+                merged_hints = "\n\n".join(
+                    [s for s in (extra_hints, combined_user_note) if s and s.strip()]
+                )
+                note = gemini_prompts.build_translation_note(background_json_str, merged_hints)
+                sys_prompt = gemini_prompts.build_system_prompt_jav_subtitle(note)
+                user_msg = gemini_prompts.segments_to_html_user_message(tgt_segs)
+                messages_g: List[dict[str, str]] = [
+                    {"role": "system", "content": sys_prompt},
+                    {"role": "user", "content": user_msg},
+                ]
+                if log_full_prompt:
+                    _log_full_glm_prompt(
+                        log, chunk_idx=idx, total_chunks=total_chunks, messages=messages_g
+                    )
+                t_req = time.monotonic()
+                log(
+                    f"[KO-TRANSLATE] 청크 {idx + 1}/{total_chunks} Gemini 대기 중… "
+                    f"~{tgt_segs[0].start:.1f}–{tgt_segs[-1].end:.1f}s"
+                )
+                res = await route_with_backoff(
+                    router, messages_g, tier, log=_translation_retry_log(log)
+                )
+                log(
+                    f"[KO-TRANSLATE] 청크 {idx + 1}/{total_chunks} Gemini 응답 수신 "
+                    f"({time.monotonic() - t_req:.1f}s)"
+                )
+                if log_full_prompt:
+                    pr = res or ""
+                    log(
+                        f"[KO-TRANSLATE] 현재 {idx + 1} / {total_chunks} — Gemini 응답:\n"
+                        f"{pr[:12000]}{'…' if len(pr) > 12000 else ''}"
+                    )
+                if not gemini_prompts.parse_html_translation_response(res or "", tgt_segs):
+                    log(
+                        f"[KO-TRANSLATE] 현재 {idx + 1} / {total_chunks} — Gemini HTML 파싱 실패 — 재시도"
+                    )
+                    retry_msgs: List[dict[str, str]] = messages_g + [
+                        {"role": "assistant", "content": res or ""},
+                        {
+                            "role": "user",
+                            "content": (
+                                '번역이 불완전합니다. <p id="N">번역문</p> 형식으로 '
+                                "모든 줄을 빠짐없이 번역하고 </main>으로 종료해 주세요."
+                            ),
+                        },
+                    ]
+                    res2 = await route_with_backoff(
+                        router, retry_msgs, tier, log=_translation_retry_log(log)
+                    )
+                    if not gemini_prompts.parse_html_translation_response(res2 or "", tgt_segs):
+                        log(
+                            f"[KO-TRANSLATE] 현재 {idx + 1} / {total_chunks} "
+                            "— Gemini HTML 최종 실패 — 해당 구간 일본어 유지"
+                        )
+                # 사용자 노트의 [용어/은어 매핑]·[고정 표기/호칭 사전]을 강제 치환
+                if glossary_pairs and apply_glossary_to_text is not None:
+                    for s in tgt_segs:
+                        try:
+                            s.text = apply_glossary_to_text(s.text or "", glossary_pairs)
+                        except Exception:
+                            pass
+                log(f"[KO-TRANSLATE] 현재 {idx + 1} / {total_chunks} — 완료")
+                return
+            # ── 기존 JSON 번역 경로 ───────────────────────────────────
+
             chunk_json = _chunk_json_for_segments(tgt_segs)
             anchor_sec = (tgt_segs[0].start + tgt_segs[-1].end) / 2.0 if tgt_segs else 0.0
             scene_id, scene_tone = resolve_grok_scene_for_chunk(
@@ -559,6 +675,13 @@ async def translate_ja_segments_to_ko_async(
                         log(
                             f"[KO-TRANSLATE] 현재 {idx + 1} / {total_chunks} — 최종 실패 — 해당 구간 일본어 유지"
                         )
+            # OpenRouter/Ollama 경로에도 동일하게 사용자 노트 글로서리 강제 치환
+            if glossary_pairs and apply_glossary_to_text is not None:
+                for s in tgt_segs:
+                    try:
+                        s.text = apply_glossary_to_text(s.text or "", glossary_pairs)
+                    except Exception:
+                        pass
             log(f"[KO-TRANSLATE] 현재 {idx + 1} / {total_chunks} — 완료")
 
     try:

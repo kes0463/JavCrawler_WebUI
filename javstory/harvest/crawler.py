@@ -28,17 +28,16 @@ from javstory.utils.njav_playwright import njavtv_detail_urls, scrape_njavtv_pla
 from javstory.utils.common import log_ts
 
 # 폴백 스크레이퍼(순서: 123av -> missav123 -> avwiki -> njavtv)
-# - 루트에 있는 단독 스크립트들이지만, _ROOT를 sys.path에 추가했기 때문에 import 가능
 try:
-    import av123_scraper  # type: ignore
+    from javstory.harvest.scrapers import av123_scraper
 except Exception:  # pragma: no cover
     av123_scraper = None  # type: ignore
 try:
-    import missav123_scraper  # type: ignore
+    from javstory.harvest.scrapers import missav123_scraper
 except Exception:  # pragma: no cover
     missav123_scraper = None  # type: ignore
 try:
-    import avwiki  # type: ignore
+    from javstory.harvest.scrapers import avwiki
 except Exception:  # pragma: no cover
     avwiki = None  # type: ignore
 

@@ -18,7 +18,7 @@ Base = declarative_base()
 # DB 스키마/마이그레이션 가드 버전.
 # - SQLite `PRAGMA user_version`에 저장한다.
 # - 테이블/컬럼 마이그레이션 로직을 변경하면 이 값을 올려서 1회 재실행되게 한다.
-_APP_DB_SCHEMA_VERSION = 5
+_APP_DB_SCHEMA_VERSION = 6
 
 class JAVMetadata(Base):
     """
@@ -100,6 +100,9 @@ class Actress(Base):
     korean = Column(String(100), nullable=True)   # None = 아직 미입력
     romaji = Column(String(100), nullable=True)   # None = 아직 미입력
     needs_review = Column(Boolean, default=True)  # True = 수동 확인 대기 중
+    # 배우 단위 번역 노트 — 같은 배우의 모든 작품에 공통 적용되는 페르소나/말투/표기 가이드.
+    # Gemini 번역 프롬프트의 {{note}}에 작품 노트·전역 노트와 함께 합쳐 주입된다.
+    translation_note = Column(Text, nullable=True)
 
 class Genre(Base):
     """장르 정보 테이블 (genres)"""
@@ -302,6 +305,7 @@ def init_db():
     _migrate_v3_analytics_columns()
     _migrate_v4_favorite_columns()
     _migrate_v5_favorite_crawl_failed_at()
+    _migrate_v6_actress_translation_note()
     _ensure_indexes_and_optimize()
     try:
         with sqlite3.connect(DB_PATH) as conn:
@@ -420,6 +424,21 @@ def _migrate_v5_favorite_crawl_failed_at():
             conn.commit()
     except Exception as e:
         print(f"[DB Migration v5] 실패: {e}")
+
+
+def _migrate_v6_actress_translation_note():
+    """v6: actresses.translation_note — 배우 단위 번역 노트(페르소나/말투/표기 가이드)"""
+    import sqlite3
+    try:
+        with sqlite3.connect(DB_PATH) as conn:
+            cursor = conn.cursor()
+            cols = [row[1] for row in cursor.execute("PRAGMA table_info(actresses)")]
+            if "translation_note" not in cols:
+                cursor.execute("ALTER TABLE actresses ADD COLUMN translation_note TEXT")
+                print("[DB Migration v6] actresses.translation_note 컬럼 추가 완료")
+            conn.commit()
+    except Exception as e:
+        print(f"[DB Migration v6] 실패: {e}")
 
 
 def _ensure_indexes_and_optimize() -> None:

@@ -73,6 +73,73 @@ METADATA_CONFIG = {
 # ============================================================
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 OLLAMA_BASE_URL     = "http://localhost:11434"
+GEMINI_BASE_URL     = "https://generativelanguage.googleapis.com/v1beta/openai/"
+
+# keyring 계정 및 환경변수 — Gemini API 키
+KEYRING_ACCOUNT_GEMINI = "gemini_api_key"
+ENV_GEMINI_API_KEY     = "JAVSTORY_GEMINI_API_KEY"
+
+# Gemini 모델 메타 (AI Studio 무료 등급 rate limits 기준)
+GEMINI_MODELS: dict[str, dict] = {
+    # AI Studio (무료 등급) 스크린샷 기준 (2026-05)
+    # - rpm: requests/minute
+    # - tpm: tokens/minute (input+output)
+    # - rpd: requests/day (None=무제한 표기)
+    "gemini-3.0-flash":      {"rpm": 1000, "tpm": 2_000_000, "rpd": 10000,  "is_pro": False},
+    "gemini-3.1-flash-lite": {"rpm": 4000, "tpm": 4_000_000, "rpd": 150000, "is_pro": False},
+    "gemini-2.5-flash":      {"rpm": 1000, "tpm": 1_000_000, "rpd": 10000,  "is_pro": False},
+    "gemini-2.5-pro":        {"rpm": 150,  "tpm": 2_000_000, "rpd": 1000,   "is_pro": True},
+    "gemini-2.0-flash":      {"rpm": 2000, "tpm": 4_000_000, "rpd": None,   "is_pro": False},
+    "gemini-2.0-flash-lite": {"rpm": 4000, "tpm": 4_000_000, "rpd": None,   "is_pro": False},
+}
+
+# Gemini 모델 ID 별칭(실제 ListModels에 있는 name 기준)
+# - UI/과거 문서에서 쓰던 슬러그가 API에서 그대로 노출되지 않는 경우가 있어, 런타임에서 정규화한다.
+_GEMINI_MODEL_ALIASES: dict[str, str] = {
+    "gemini-3.0-flash": "gemini-3-flash-preview",
+    "gemini-3.1-flash-lite": "gemini-3.1-flash-lite-preview",
+}
+
+
+def normalize_gemini_model_id(model_id: str | None) -> str:
+    """Gemini 모델 ID를 API가 실제로 받는 형태로 정규화(aliases + models/ prefix 제거)."""
+    mid = (model_id or "").strip()
+    if not mid:
+        return "gemini-2.0-flash"
+    if mid.startswith("models/"):
+        mid = mid.split("/", 1)[1].strip()
+    return _GEMINI_MODEL_ALIASES.get(mid, mid)
+
+
+def gemini_default_chunk_params(model_id: str) -> tuple[float, float, int]:
+    """
+    Gemini 모델별 기본 청킹 파라미터(초) + 동시성.
+    목표: rpm이 낮은 모델은 청크를 길게(요청 수 감소), rpm이 높은 모델은 청크를 짧게(품질/지연 균형).
+    """
+    mid_raw = (model_id or "").strip() or "gemini-2.0-flash"
+    mid = normalize_gemini_model_id(mid_raw)
+    meta = GEMINI_MODELS.get(mid, {}) or GEMINI_MODELS.get(mid_raw, {})
+    rpm = int(meta.get("rpm") or 0)
+
+    # 매우 보수적인 기본값 (환경변수로 덮어쓰기 가능: *_CHUNK_TARGET_SEC / *_CONCURRENCY)
+    if rpm <= 200:
+        # Pro 계열(150 rpm 등): 요청 수를 최대한 줄인다.
+        return 120.0, 12.0, 1
+    if rpm <= 1000:
+        return 45.0, 10.0, 4
+    if rpm <= 2000:
+        return 35.0, 8.0, 6
+    # 4000 rpm 등
+    return 25.0, 6.0, 8
+
+_GEMINI_PROFILE_MAP: dict[str, str] = {
+    "gemini_3_flash":      "gemini-3.0-flash",
+    "gemini_3_flash_lite": "gemini-3.1-flash-lite",
+    "gemini_25_flash":     "gemini-2.5-flash",
+    "gemini_25_pro":       "gemini-2.5-pro",
+    "gemini_2_flash":      "gemini-2.0-flash",
+    "gemini_2_flash_lite": "gemini-2.0-flash-lite",
+}
 
 # [자동 폴백 티어]
 LLM_TIERS = [
@@ -169,10 +236,26 @@ def correction_llm_tier(pass_n: int) -> dict:
             "max_ctx": 200000,
         }
     if pass_n == 2:
+        # Pass2 모델은 설정(UI)에서 런타임에 바뀔 수 있으므로, 상수 대신 환경변수 값을 매 호출 시 읽는다.
+        model = os.environ.get("JAVSTORY_CORRECTION_PASS2_MODEL", CORRECTION_PASS2_MODEL)
+        if model.lower().startswith("gemini:"):
+            model_id_raw = model.split(":", 1)[1].strip() or "gemini-2.0-flash"
+            model_id = normalize_gemini_model_id(model_id_raw)
+            meta = GEMINI_MODELS.get(model_id, {}) or GEMINI_MODELS.get(model_id_raw, {})
+            return {
+                "rank": 99,
+                "name": "correction_pass2_gemini",
+                "model": model_id,
+                "provider": "gemini",
+                "cost_tier": "high" if meta.get("is_pro") else "low",
+                "uncensored": True,
+                "timeout": 180,
+                "max_ctx": 1_000_000,
+            }
         return {
             "rank": 99,
             "name": "correction_pass2_glm51",
-            "model": CORRECTION_PASS2_MODEL,
+            "model": model,
             "provider": "openrouter",
             "cost_tier": "high",
             "uncensored": True,
@@ -218,7 +301,7 @@ def correction_skip_enabled() -> bool:
 TRANSLATION_PROVIDER_DEFAULT = (
     os.environ.get("JAVSTORY_TRANSLATION_PROVIDER", "openrouter").strip().lower() or "openrouter"
 )
-if TRANSLATION_PROVIDER_DEFAULT not in ("openrouter", "ollama"):
+if TRANSLATION_PROVIDER_DEFAULT not in ("openrouter", "ollama", "gemini"):
     TRANSLATION_PROVIDER_DEFAULT = "openrouter"
 
 # OpenRouter 번역 전용 슬러그(Non-Thinking 계열; R1·reasoning 전용 아님)
@@ -262,6 +345,18 @@ def _translation_profile() -> str:
         return "qwen25_7"
     if v in ("jkv_12b", "ja-ko-vn", "jkv12b"):
         return "jkv_12b"
+    if v in ("gemini_3_flash", "gemini3flash"):
+        return "gemini_3_flash"
+    if v in ("gemini_3_flash_lite", "gemini31flashlite", "gemini3flashlite"):
+        return "gemini_3_flash_lite"
+    if v in ("gemini_25_flash", "gemini25flash"):
+        return "gemini_25_flash"
+    if v in ("gemini_25_pro", "gemini25pro"):
+        return "gemini_25_pro"
+    if v in ("gemini_2_flash", "gemini2flash"):
+        return "gemini_2_flash"
+    if v in ("gemini_2_flash_lite", "gemini2flashlite"):
+        return "gemini_2_flash_lite"
     return "default"
 
 
@@ -300,14 +395,16 @@ def _ollama_translation_model() -> str:
 def _effective_translation_provider(translation_provider: str | None) -> str:
     if translation_provider and str(translation_provider).strip():
         p = str(translation_provider).strip().lower()
-        if p in ("openrouter", "ollama"):
+        if p in ("openrouter", "ollama", "gemini"):
             return p
     env_p = os.environ.get("JAVSTORY_TRANSLATION_PROVIDER", "").strip().lower()
-    if env_p in ("openrouter", "ollama"):
+    if env_p in ("openrouter", "ollama", "gemini"):
         return env_p
     prof = _translation_profile()
     if prof in ("budget", "qwen35", "qwen3_14", "gemma3_12", "jkv_12b"):
         return "ollama"
+    if prof in _GEMINI_PROFILE_MAP:
+        return "gemini"
     return "openrouter"
 
 
@@ -350,6 +447,30 @@ def translation_llm_tier_ollama() -> dict:
     }
 
 
+def gemini_translation_llm_tier(model_id: str | None = None) -> dict:
+    """Gemini 번역 tier 딕셔너리. 환경변수 JAVSTORY_GEMINI_MODEL로 모델 덮어쓰기 가능."""
+    prof = _translation_profile()
+    resolved = (
+        (model_id or "").strip()
+        or os.environ.get("JAVSTORY_GEMINI_MODEL", "").strip()
+        or _GEMINI_PROFILE_MAP.get(prof, "gemini-2.0-flash")
+    )
+    resolved_raw = resolved
+    resolved = normalize_gemini_model_id(resolved)
+    meta = GEMINI_MODELS.get(resolved, {}) or GEMINI_MODELS.get(resolved_raw, {})
+    is_pro = bool(meta.get("is_pro"))
+    return {
+        "rank": 99,
+        "name": "translation_gemini",
+        "model": resolved,
+        "provider": "gemini",
+        "cost_tier": "high" if is_pro else "low",
+        "uncensored": True,
+        "timeout": 240 if is_pro else 120,
+        "max_ctx": 1_000_000,
+    }
+
+
 def resolve_translation_llm_tier(
     *,
     translation_provider: str | None = None,
@@ -360,13 +481,17 @@ def resolve_translation_llm_tier(
     없으면 `translation_provider` → `JAVSTORY_TRANSLATION_PROVIDER` → `JAVSTORY_TRANSLATION_PROFILE`(budget→ollama) 순.
     """
     if isinstance(translation_tier, dict) and translation_tier.get("provider") and translation_tier.get("model"):
-        base = (
-            translation_llm_tier_ollama()
-            if str(translation_tier.get("provider")).lower() == "ollama"
-            else translation_llm_tier_openrouter()
-        )
+        prov = str(translation_tier.get("provider")).lower()
+        if prov == "gemini":
+            base = gemini_translation_llm_tier(str(translation_tier.get("model", "")))
+        elif prov == "ollama":
+            base = translation_llm_tier_ollama()
+        else:
+            base = translation_llm_tier_openrouter()
         return {**base, **translation_tier}
     prov = _effective_translation_provider(translation_provider)
+    if prov == "gemini":
+        return gemini_translation_llm_tier()
     if prov == "ollama":
         return translation_llm_tier_ollama()
     return translation_llm_tier_openrouter()
@@ -377,13 +502,28 @@ def resolve_translation_llm_tier(
 # - 환경변수: JAVSTORY_HARVEST_TRANSLATION_MODEL
 #   - openrouter:deepseek/deepseek-v3.2
 #   - ollama:gemma4:e4b
-#   - ollama:qwen2.4:14b
+#   - gemini:gemini-2.0-flash
 # ============================================================
 def harvest_translation_llm_tier() -> dict:
     raw = (os.environ.get("JAVSTORY_HARVEST_TRANSLATION_MODEL", "") or "").strip()
     v = raw.lower()
     if not v:
         v = "openrouter:deepseek/deepseek-v3.2"
+
+    if v.startswith("gemini:"):
+        model = raw.split(":", 1)[1].strip() if ":" in raw else "gemini-2.0-flash"
+        model = model or "gemini-2.0-flash"
+        meta = GEMINI_MODELS.get(model, {})
+        return {
+            "rank": 99,
+            "name": "harvest_translation_gemini",
+            "model": model,
+            "provider": "gemini",
+            "cost_tier": "high" if meta.get("is_pro") else "low",
+            "uncensored": False,
+            "timeout": 120,
+            "max_ctx": 1_000_000,
+        }
 
     if v.startswith("ollama:"):
         model = raw.split(":", 1)[1].strip() if ":" in raw else "gemma4:e4b"

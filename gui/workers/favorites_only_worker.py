@@ -110,8 +110,8 @@ class FavoritesOnlyWorker(QThread):
         """
         반환: (결과 종류, 품번). 종류: "updated" | "zero" | "failed"
         """
-        from av123_scraper import fetch_video_info as av123_fetch
-        from missav123_scraper import fetch_video_info as missav_fetch
+        from javstory.harvest.scrapers.av123_scraper import fetch_video_info as av123_fetch
+        from javstory.harvest.scrapers.missav123_scraper import fetch_video_info as missav_fetch
         from javstory.harvest.database import get_db_session_ctx, JAVMetadata, clear_favorite_crawl_failed
 
         if self._stop:

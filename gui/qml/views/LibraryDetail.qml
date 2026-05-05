@@ -2536,6 +2536,137 @@ Item {
                 }
             }
 
+            // ── 번역 노트 (작품 + 배우) ─────────────────
+            GlassCard {
+                visible: LibraryModel.detailEditing
+                width: parent.width
+                autoSize: true
+
+                Column {
+                    width: parent.width
+                    spacing: Theme.spacingSm
+
+                    Row {
+                        spacing: Theme.spacingSm
+                        Rectangle {
+                            width: 3; height: noteTitleText.height
+                            color: Theme.accentNeon
+                            radius: 2
+                            anchors.verticalCenter: parent.verticalCenter
+                        }
+                        Text {
+                            id: noteTitleText
+                            text: "번역 노트"
+                            font.pixelSize: Theme.fontSubtitle
+                            font.weight: Font.DemiBold
+                            color: Theme.textPrimary
+                        }
+                    }
+
+                    Text {
+                        text: "작품 노트(이 작품 한정) + 배우 노트(같은 배우의 모든 작품 공통)는 전역 노트와 함께 Gemini 번역 프롬프트의 {{note}}에 합쳐 주입됩니다."
+                        font.pixelSize: Theme.fontCaption
+                        color: Theme.textMuted
+                        wrapMode: Text.Wrap
+                        width: parent.width
+                    }
+
+                    Row {
+                        spacing: Theme.spacingSm
+                        ActionButton {
+                            text: "작품 노트 자동 생성"
+                            primary: false
+                            enabled: !LibraryModel.translationNoteGenerating
+                            onClicked: LibraryModel.generateWorkTranslationNote(LibraryModel.editDraft.productCode)
+                        }
+                        ActionButton {
+                            text: LibraryModel.editDraft.actressNoteTargetJa.length > 0
+                                ? ("배우 노트 자동 생성 (" + LibraryModel.editDraft.actressNoteTargetJa + ")")
+                                : "배우 노트 자동 생성"
+                            primary: false
+                            enabled: !LibraryModel.translationNoteGenerating
+                                     && LibraryModel.editDraft.actressNoteTargetJa.length > 0
+                            onClicked: LibraryModel.generateActressTranslationNote(LibraryModel.editDraft.actressNoteTargetJa)
+                        }
+                        Text {
+                            visible: LibraryModel.translationNoteGenerating
+                            text: "Gemini 노트 생성 중…"
+                            font.pixelSize: Theme.fontCaption
+                            color: Theme.accentNeon
+                            anchors.verticalCenter: parent.verticalCenter
+                        }
+                    }
+
+                    // 작품 노트
+                    Text {
+                        text: "작품 노트"
+                        font.pixelSize: Theme.fontBody
+                        color: Theme.textSecondary
+                    }
+                    Rectangle {
+                        width: parent.width
+                        height: 240
+                        radius: Theme.radiusSm
+                        color: Theme.surfaceLight
+                        border.color: workNoteArea.activeFocus ? Theme.accentNeon : Theme.glassBorder
+                        border.width: 1
+                        AppScrollView {
+                            anchors.fill: parent
+                            anchors.margins: 4
+                            clip: true
+                            TextArea {
+                                id: workNoteArea
+                                width: parent.width
+                                placeholderText: "[작품 기본 컨텍스트]\n- 핵심 장르: ...\n- 전체 톤앤매너: ...\n\n[화자 프로필 및 관계]\n- 남성 (상사): 반말. 거만/명령조.\n- 여성 (부하직원): 존댓말. 후반 무너지는 말투.\n\n[Whisper AI 오인식 교정 사전]\n- (잘못된 인식) -> (올바른 단어/상황)\n\n[용어/은어 매핑]\n- 원어 => 번역어"
+                                text: LibraryModel.editDraft.translationNote
+                                onTextChanged: LibraryModel.editDraft.translationNote = text
+                                wrapMode: TextArea.Wrap
+                                selectByMouse: true
+                                color: Theme.textPrimary
+                                font.pixelSize: Theme.fontBody
+                                background: null
+                            }
+                        }
+                    }
+
+                    // 배우 노트
+                    Text {
+                        text: LibraryModel.editDraft.actressNoteTargetJa.length > 0
+                            ? ("배우 노트 (" + LibraryModel.editDraft.actressNoteTargetJa + ")")
+                            : "배우 노트 (배우 미지정 — 편집 불가)"
+                        font.pixelSize: Theme.fontBody
+                        color: Theme.textSecondary
+                    }
+                    Rectangle {
+                        width: parent.width
+                        height: 180
+                        radius: Theme.radiusSm
+                        color: Theme.surfaceLight
+                        border.color: actressNoteArea.activeFocus ? Theme.accentNeon : Theme.glassBorder
+                        border.width: 1
+                        opacity: LibraryModel.editDraft.actressNoteTargetJa.length > 0 ? 1.0 : 0.5
+                        AppScrollView {
+                            anchors.fill: parent
+                            anchors.margins: 4
+                            clip: true
+                            TextArea {
+                                id: actressNoteArea
+                                width: parent.width
+                                enabled: LibraryModel.editDraft.actressNoteTargetJa.length > 0
+                                placeholderText: "[화자 프로필]\n- 평소 말투/페르소나\n\n[고정 표기/호칭 사전]\n- 원어 => 번역어"
+                                text: LibraryModel.editDraft.actressTranslationNote
+                                onTextChanged: LibraryModel.editDraft.actressTranslationNote = text
+                                wrapMode: TextArea.Wrap
+                                selectByMouse: true
+                                color: Theme.textPrimary
+                                font.pixelSize: Theme.fontBody
+                                background: null
+                            }
+                        }
+                    }
+                }
+            }
+
             // ── Grok 씬 요약 ──────────────────────────
             GlassCard {
                 id: grokScenesCard

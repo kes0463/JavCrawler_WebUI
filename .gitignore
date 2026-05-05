@@ -30,6 +30,7 @@ logs/
 output/
 data/media/
 data/cache/
+data/db/
 data/derived/
 data/folder_binding_inbox.json
 screenshots/
@@ -65,11 +66,13 @@ tmp/
 *.srt
 *.wav
 *.mp4
+*.txt
 *.ja.corrected.txt
 master_db.js
 models.txt
 *_story_context.json
 *_translation_hints*.txt
+crash_report.txt
 
 # Transcription caches (regeneratable)
 Transcription/reference_cache/
@@ -87,4 +90,8 @@ dist/
 build/
 *.exe
 *.log
-claude/ 
+claude/
+
+# 폰트 (바이너리 대용량, 빌드 시 재다운로드)
+gui/fonts/*.ttf
+gui/fonts/*.otf

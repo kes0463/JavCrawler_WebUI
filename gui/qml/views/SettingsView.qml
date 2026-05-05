@@ -270,6 +270,35 @@ Item {
                         }
                     }
 
+                    // Gemini API 키
+                    Row {
+                        spacing: Theme.spacingSm
+                        width: parent.width
+                        Text {
+                            text: "Gemini API 키"
+                            font.pixelSize: Theme.fontBody
+                            color: Theme.textSecondary
+                            width: 160
+                            anchors.verticalCenter: parent.verticalCenter
+                        }
+                        TextField {
+                            id: geminiKeyField
+                            width: parent.width - 180
+                            echoMode: TextInput.Password
+                            text: SettingsModel.geminiApiKey
+                            onTextChanged: SettingsModel.geminiApiKey = text
+                            placeholderText: "AIza..."
+                            color: Theme.textPrimary
+                            font.pixelSize: Theme.fontBody
+                            background: Rectangle {
+                                radius: Theme.radiusSm
+                                color: Theme.surfaceLight
+                                border.color: geminiKeyField.activeFocus ? Theme.accentNeon : Theme.glassBorder
+                                border.width: 1
+                            }
+                        }
+                    }
+
                     // Ollama URL
                     Row {
                         spacing: Theme.spacingSm
@@ -540,14 +569,65 @@ Item {
 
                         ComboBox {
                             id: profileCombo
-                            model: ["DeepSeek V3.2", "GLM 5.1", "DeepSeek V3 Chat", "Gemma4 E4B (Local)", "Qwen 3.5 9B (Local)", "Qwen 3 14B (Local)", "Gemma 3 12B (Local)", "Gemma 2 9B (Local)", "Qwen 2.5 7B (Local)", "JKV-12B (Local)"]
+                            model: [
+                                "DeepSeek V3.2",
+                                "GLM 5.1",
+                                "DeepSeek V3 Chat",
+                                "Gemini 3 Flash",
+                                "Gemini 3 Flash Lite",
+                                "Gemini 2.5 Flash",
+                                "Gemini 2.5 Pro",
+                                "Gemini 2 Flash",
+                                "Gemini 2 Flash Lite",
+                                "Gemma4 E4B (Local)",
+                                "Qwen 3.5 9B (Local)",
+                                "Qwen 3 14B (Local)",
+                                "Gemma 3 12B (Local)",
+                                "Gemma 2 9B (Local)",
+                                "Qwen 2.5 7B (Local)",
+                                "JKV-12B (Local)"
+                            ]
                             width: 200
                             currentIndex: {
-                                var m = {"default":0, "keeper":1, "deepseek_chat":2, "budget":3, "qwen35":4, "qwen3_14":5, "gemma3_12":6, "gemma2_9":7, "qwen25_7":8, "jkv_12b":9};
+                                var m = {
+                                    "default": 0,
+                                    "keeper": 1,
+                                    "deepseek_chat": 2,
+                                    "gemini_3_flash": 3,
+                                    "gemini_3_flash_lite": 4,
+                                    "gemini_25_flash": 5,
+                                    "gemini_25_pro": 6,
+                                    "gemini_2_flash": 7,
+                                    "gemini_2_flash_lite": 8,
+                                    "budget": 9,
+                                    "qwen35": 10,
+                                    "qwen3_14": 11,
+                                    "gemma3_12": 12,
+                                    "gemma2_9": 13,
+                                    "qwen25_7": 14,
+                                    "jkv_12b": 15
+                                };
                                 return m[SettingsModel.translationProfile] !== undefined ? m[SettingsModel.translationProfile] : 0;
                             }
                             onCurrentIndexChanged: {
-                                var profiles = ["default", "keeper", "deepseek_chat", "budget", "qwen35", "qwen3_14", "gemma3_12", "gemma2_9", "qwen25_7", "jkv_12b"];
+                                var profiles = [
+                                    "default",
+                                    "keeper",
+                                    "deepseek_chat",
+                                    "gemini_3_flash",
+                                    "gemini_3_flash_lite",
+                                    "gemini_25_flash",
+                                    "gemini_25_pro",
+                                    "gemini_2_flash",
+                                    "gemini_2_flash_lite",
+                                    "budget",
+                                    "qwen35",
+                                    "qwen3_14",
+                                    "gemma3_12",
+                                    "gemma2_9",
+                                    "qwen25_7",
+                                    "jkv_12b"
+                                ];
                                 SettingsModel.translationProfile = profiles[currentIndex];
                             }
                             background: Rectangle {
@@ -582,6 +662,12 @@ Item {
                             id: harvestTransCombo
                             model: [
                                 "DeepSeek V3.2 (OpenRouter)",
+                                "Gemini 3 Flash",
+                                "Gemini 3 Flash Lite",
+                                "Gemini 2.5 Flash",
+                                "Gemini 2.5 Pro",
+                                "Gemini 2 Flash",
+                                "Gemini 2 Flash Lite",
                                 "Gemma4:E4B (Local)",
                                 "Qwen2.4:14B (Local)",
                                 "Gemma 3:12B (Local)",
@@ -594,18 +680,30 @@ Item {
                                 var v = (SettingsModel.harvestTranslationModel || "").toLowerCase()
                                 var m = {
                                     "openrouter:deepseek/deepseek-v3.2": 0,
-                                    "ollama:gemma4:e4b": 1,
-                                    "ollama:qwen2.4:14b": 2,
-                                    "ollama:gemma3:12b": 3,
-                                    "ollama:gemma2:9b": 4,
-                                    "ollama:qwen2.5:7b": 5,
-                                    "ollama:ja-ko-vn-jav:latest": 6
+                                    "gemini:gemini-3.0-flash": 1,
+                                    "gemini:gemini-3.1-flash-lite": 2,
+                                    "gemini:gemini-2.5-flash": 3,
+                                    "gemini:gemini-2.5-pro": 4,
+                                    "gemini:gemini-2.0-flash": 5,
+                                    "gemini:gemini-2.0-flash-lite": 6,
+                                    "ollama:gemma4:e4b": 7,
+                                    "ollama:qwen2.4:14b": 8,
+                                    "ollama:gemma3:12b": 9,
+                                    "ollama:gemma2:9b": 10,
+                                    "ollama:qwen2.5:7b": 11,
+                                    "ollama:ja-ko-vn-jav:latest": 12
                                 }
                                 return m[v] !== undefined ? m[v] : 0
                             }
                             onCurrentIndexChanged: {
                                 var vals = [
                                     "openrouter:deepseek/deepseek-v3.2",
+                                    "gemini:gemini-3.0-flash",
+                                    "gemini:gemini-3.1-flash-lite",
+                                    "gemini:gemini-2.5-flash",
+                                    "gemini:gemini-2.5-pro",
+                                    "gemini:gemini-2.0-flash",
+                                    "gemini:gemini-2.0-flash-lite",
                                     "ollama:gemma4:e4b",
                                     "ollama:qwen2.4:14b",
                                     "ollama:gemma3:12b",
@@ -643,19 +741,45 @@ Item {
                         }
                         ComboBox {
                             id: correctionCombo
-                            model: ["Qwen 3 235B (OpenRouter)", "DeepSeek V3.2 (OpenRouter)", "GLM 5.1 (OpenRouter)"]
+                            model: [
+                                "Qwen 3 235B (OpenRouter)",
+                                "DeepSeek V3.2 (OpenRouter)",
+                                "GLM 5.1 (OpenRouter)",
+                                "Gemini 3 Flash",
+                                "Gemini 3 Flash Lite",
+                                "Gemini 2.5 Flash",
+                                "Gemini 2.5 Pro",
+                                "Gemini 2 Flash",
+                                "Gemini 2 Flash Lite"
+                            ]
                             width: 200
                             enabled: !SettingsModel.correctionSkip
                             currentIndex: {
                                 var m = {
                                     "qwen/qwen3-235b-a22b-2507": 0,
                                     "deepseek/deepseek-v3.2": 1,
-                                    "z-ai/glm-5.1": 2
+                                    "z-ai/glm-5.1": 2,
+                                    "gemini:gemini-3.0-flash": 3,
+                                    "gemini:gemini-3.1-flash-lite": 4,
+                                    "gemini:gemini-2.5-flash": 5,
+                                    "gemini:gemini-2.5-pro": 6,
+                                    "gemini:gemini-2.0-flash": 7,
+                                    "gemini:gemini-2.0-flash-lite": 8
                                 };
                                 return m[SettingsModel.correctionProfile] !== undefined ? m[SettingsModel.correctionProfile] : 0;
                             }
                             onCurrentIndexChanged: {
-                                var models = ["qwen/qwen3-235b-a22b-2507", "deepseek/deepseek-v3.2", "z-ai/glm-5.1"];
+                                var models = [
+                                    "qwen/qwen3-235b-a22b-2507",
+                                    "deepseek/deepseek-v3.2",
+                                    "z-ai/glm-5.1",
+                                    "gemini:gemini-3.0-flash",
+                                    "gemini:gemini-3.1-flash-lite",
+                                    "gemini:gemini-2.5-flash",
+                                    "gemini:gemini-2.5-pro",
+                                    "gemini:gemini-2.0-flash",
+                                    "gemini:gemini-2.0-flash-lite"
+                                ];
                                 SettingsModel.correctionProfile = models[currentIndex];
                             }
                             background: Rectangle {
@@ -1028,6 +1152,69 @@ Item {
                         width: parent.width
                         ActionButton {
                             text: "옵션 저장"
+                            onClicked: SettingsModel.saveOptions()
+                        }
+                    }
+                }
+            }
+
+            // ── 전역 번역 노트 ──────────────────────────
+            GlassCard {
+                width: parent.width
+                autoSize: true
+
+                Column {
+                    width: parent.width
+                    spacing: Theme.spacingSm
+
+                    Text {
+                        text: "전역 번역 노트 (공통 규칙)"
+                        font.pixelSize: Theme.fontSubtitle
+                        font.weight: Font.DemiBold
+                        color: Theme.textPrimary
+                    }
+
+                    Text {
+                        text: "모든 작품 번역에 공통 적용되는 노트입니다. Gemini 프롬프트의 {{note}}에 작품/배우 노트와 함께 합쳐 주입됩니다.\n섹션 헤더 권장: [전역 규칙], [용어/은어 매핑], [고정 표기/호칭 사전]"
+                        font.pixelSize: Theme.fontCaption
+                        color: Theme.textMuted
+                        wrapMode: Text.Wrap
+                        width: parent.width
+                    }
+
+                    Rectangle {
+                        width: parent.width
+                        height: 240
+                        radius: Theme.radiusSm
+                        color: Theme.surfaceLight
+                        border.color: noteGlobalArea.activeFocus ? Theme.accentNeon : Theme.glassBorder
+                        border.width: 1
+
+                        AppScrollView {
+                            anchors.fill: parent
+                            anchors.margins: 4
+                            clip: true
+
+                            TextArea {
+                                id: noteGlobalArea
+                                width: parent.width
+                                placeholderText: "[전역 규칙]\n- 출력은 100% 한국어 구어체. 번역투 금지.\n- 한 줄은 한 줄로: 문장 합치기 금지.\n\n[용어/은어 매핑]\n- 원어 => 번역어"
+                                text: SettingsModel.translationNoteGlobal
+                                onTextChanged: SettingsModel.translationNoteGlobal = text
+                                wrapMode: TextArea.Wrap
+                                selectByMouse: true
+                                color: Theme.textPrimary
+                                font.pixelSize: Theme.fontBody
+                                background: null
+                            }
+                        }
+                    }
+
+                    Row {
+                        layoutDirection: Qt.RightToLeft
+                        width: parent.width
+                        ActionButton {
+                            text: "노트 저장"
                             onClicked: SettingsModel.saveOptions()
                         }
                     }

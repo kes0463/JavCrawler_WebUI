@@ -125,8 +125,63 @@ def _translation_forward_kwargs(kwargs: dict[str, Any]) -> dict[str, Any]:
         "logger_func",
         "log_full_translation_prompt",
         "story_context_grok_json",
+        "translation_note_global",
+        "translation_note_actress",
+        "translation_note_work",
+        "apply_glossary_post",
     )
     return {k: kwargs[k] for k in keys if k in kwargs}
+
+
+def _gather_translation_notes(product_code: str) -> dict[str, str]:
+    """전역/배우/작품 번역 노트를 디스크·DB에서 수집해 dict로 반환.
+
+    - 전역: `translation_notes.load_global_note()` (파일 + .env 폴백)
+    - 배우: `actresses.translation_note` (해당 작품 모든 배우 합산)
+    - 작품: `LibraryCanonical.translation_note` (library_state.json)
+    """
+    res = {"global": "", "actress": "", "work": ""}
+    pc = (product_code or "").strip().upper()
+
+    try:
+        from javstory.translation.translation_notes import load_global_note
+        res["global"] = load_global_note() or ""
+    except Exception:
+        res["global"] = ""
+
+    if not pc:
+        return res
+
+    try:
+        from javstory.library.detail_persist import load_canonical_for_product
+        st = load_canonical_for_product(pc)
+        res["work"] = (getattr(st, "translation_note", "") or "")
+    except Exception:
+        res["work"] = ""
+
+    try:
+        from javstory.harvest.database import get_db_session, JAVMetadata, Actress
+        session = get_db_session()
+        try:
+            row = session.query(JAVMetadata).filter_by(product_code=pc).first()
+            jas: list[str] = []
+            if row and row.actors_ja:
+                jas = [x.strip() for x in str(row.actors_ja).split(",") if x.strip()]
+            if jas:
+                blocks: list[str] = []
+                for ja in jas:
+                    a = session.query(Actress).filter_by(japanese=ja).first()
+                    note = (getattr(a, "translation_note", None) or "") if a is not None else ""
+                    if note.strip():
+                        blocks.append(f"[화자: {ja}]\n{note.strip()}")
+                if blocks:
+                    res["actress"] = "\n\n".join(blocks)
+        finally:
+            session.close()
+    except Exception:
+        res["actress"] = ""
+
+    return res
 
 
 def _build_background_from_db(product_code: str) -> str:
@@ -244,6 +299,19 @@ class SubtitlePipelineOrchestrator:
         product_code = str(kwargs.get("product_code") or "Unknown")
         segments = _load_simple_segments_from_srt(ja_in)
         forward = _translation_forward_kwargs(kwargs)
+
+        # 전역+배우+작품 번역 노트 수집(이미 kwargs에 있으면 그대로 사용)
+        if not any(
+            k in forward for k in ("translation_note_global", "translation_note_actress", "translation_note_work")
+        ):
+            notes = _gather_translation_notes(product_code)
+            forward["translation_note_global"] = notes["global"]
+            forward["translation_note_actress"] = notes["actress"]
+            forward["translation_note_work"] = notes["work"]
+            log(
+                "[Orchestrator] 번역 노트 — "
+                f"전역 {len(notes['global'])}자 / 배우 {len(notes['actress'])}자 / 작품 {len(notes['work'])}자"
+            )
 
         log(f"[Orchestrator] KO 번역 시작: {ja_in.name} → {out_path.name}")
         hints = kwargs.get("story_context_report_text")

@@ -58,8 +58,10 @@ if __name__ == "__main__":
         print("=" * 50)
         traceback.print_exc()
 
-        with open("crash_report.txt", "w", encoding="utf-8") as f:
+        log_dir = _ROOT_GUI / "logs"
+        log_dir.mkdir(exist_ok=True)
+        with open(log_dir / "crash_report.txt", "w", encoding="utf-8") as f:
             f.write(traceback.format_exc())
 
-        print("\n상세 오류 내용이 'crash_report.txt'에 저장되었습니다.")
+        print("\n상세 오류 내용이 'logs/crash_report.txt'에 저장되었습니다.")
         input("종료하시려면 엔터키를 누르세요...")

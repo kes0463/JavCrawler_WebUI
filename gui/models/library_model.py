@@ -20,6 +20,70 @@ from PySide6.QtCore import QThread
 from dataclasses import asdict
 
 
+def _extract_dialogue_lines(srt_text: str, *, max_lines: int = 80) -> str:
+    """SRT 본문에서 시간코드/번호를 제거하고 텍스트 라인만 추출."""
+    if not srt_text:
+        return ""
+    out: list[str] = []
+    seen: set[str] = set()
+    for raw in srt_text.splitlines():
+        s = raw.strip()
+        if not s:
+            continue
+        if s.isdigit():
+            continue
+        if "-->" in s:
+            continue
+        if s in seen:
+            continue
+        seen.add(s)
+        out.append(s)
+        if len(out) >= max_lines:
+            break
+    return "\n".join(out)
+
+
+class _NoteGenWorker(QThread):
+    """Gemini 번역 노트 생성 백그라운드 워커. 시그널: finished(kind, ok, payload)"""
+
+    finished = Signal(str, bool, str)
+
+    def __init__(self, kind: str, ctx: Any, parent=None):
+        super().__init__(parent)
+        self.kind = kind
+        self.ctx = ctx
+
+    def run(self):
+        import asyncio as _asyncio
+        loop = _asyncio.new_event_loop()
+        _asyncio.set_event_loop(loop)
+        ok = False
+        payload = ""
+        try:
+            from javstory.translation.translation_note_generator import (
+                generate_work_translation_note_async,
+                generate_actress_translation_note_async,
+            )
+            if self.kind == "work":
+                payload = loop.run_until_complete(
+                    generate_work_translation_note_async(self.ctx)
+                ) or ""
+            else:
+                payload = loop.run_until_complete(
+                    generate_actress_translation_note_async(self.ctx)
+                ) or ""
+            ok = True
+        except Exception as e:
+            ok = False
+            payload = str(e)
+        finally:
+            try:
+                loop.close()
+            except Exception:
+                pass
+        self.finished.emit(self.kind, ok, payload)
+
+
 def _preview_path_for(pc: str, e_root: Path | None, legacy_root: Path | None) -> str:
     code = (pc or "").strip().upper()
     if not code:
@@ -641,6 +705,7 @@ class LibraryModel(QObject):
     isExtractingSnapshotsChanged = Signal()
     snapshotProgressMsgChanged = Signal()
     detailEditingChanged = Signal()
+    translationNoteGeneratingChanged = Signal()
     isLoadingChanged = Signal()
     canLoadMoreChanged = Signal()
     loadedCountChanged = Signal()
@@ -667,6 +732,8 @@ class LibraryModel(QObject):
         self._detail_editing = False
         self._edit_draft = DetailEditDraft(self)
         self._scene_edit = SceneEditModel(self)
+        self._translation_note_generating = False
+        self._note_gen_worker = None
         self._is_loading = False
         self._reload_worker = None
         # 전체 라이브러리를 한 번에 표시(페이지네이션 비활성)
@@ -703,6 +770,10 @@ class LibraryModel(QObject):
     @Property(bool, notify=detailEditingChanged)
     def detailEditing(self) -> bool:
         return self._detail_editing
+
+    @Property(bool, notify=translationNoteGeneratingChanged)
+    def translationNoteGenerating(self) -> bool:
+        return bool(self._translation_note_generating)
 
     @Property(bool, notify=isLoadingChanged)
     def isLoading(self): return self._is_loading
@@ -1518,8 +1589,10 @@ class LibraryModel(QObject):
             self.toastMessage.emit("품번이 없습니다.", "warning")
             return
         try:
-            from javstory.harvest.database import get_db_session, JAVMetadata
+            from javstory.harvest.database import get_db_session, JAVMetadata, Actress
 
+            actress_note = ""
+            actress_target_ja = ""
             session = get_db_session()
             try:
                 row = session.query(JAVMetadata).filter_by(product_code=pc).first()
@@ -1527,6 +1600,18 @@ class LibraryModel(QObject):
                     self.toastMessage.emit(f"DB에 품번 {pc}가 없습니다.", "error")
                     return
                 self._edit_draft.load_from_row(row)
+                # 첫 일본어 배우 1명의 노트만 편집 대상으로 노출
+                first_ja = ""
+                src = (row.actors_ja or "").strip()
+                if src:
+                    parts = [x.strip() for x in src.split(",") if x.strip()]
+                    if parts:
+                        first_ja = parts[0]
+                if first_ja:
+                    a = session.query(Actress).filter_by(japanese=first_ja).first()
+                    if a is not None:
+                        actress_note = (getattr(a, "translation_note", None) or "")
+                        actress_target_ja = first_ja
             finally:
                 session.close()
 
@@ -1534,6 +1619,11 @@ class LibraryModel(QObject):
 
             st = load_canonical_for_product(pc)
             self._scene_edit.load_entries(st.scenes)
+            self._edit_draft.set_translation_notes(
+                work_note=st.translation_note or "",
+                actress_note=actress_note,
+                actress_target_ja=actress_target_ja,
+            )
 
             self._set_detail_editing(True)
         except Exception as e:
@@ -1546,20 +1636,177 @@ class LibraryModel(QObject):
         if not pc:
             return
         try:
-            from javstory.harvest.database import get_db_session, JAVMetadata
+            from javstory.harvest.database import get_db_session, JAVMetadata, Actress
             from javstory.library.detail_persist import load_canonical_for_product
 
+            actress_note = ""
+            actress_target_ja = ""
             session = get_db_session()
             try:
                 row = session.query(JAVMetadata).filter_by(product_code=pc).first()
                 if row:
                     self._edit_draft.load_from_row(row)
+                    src = (row.actors_ja or "").strip()
+                    if src:
+                        parts = [x.strip() for x in src.split(",") if x.strip()]
+                        if parts:
+                            actress_target_ja = parts[0]
+                            a = session.query(Actress).filter_by(japanese=parts[0]).first()
+                            if a is not None:
+                                actress_note = (getattr(a, "translation_note", None) or "")
             finally:
                 session.close()
             st = load_canonical_for_product(pc)
             self._scene_edit.load_entries(st.scenes)
+            self._edit_draft.set_translation_notes(
+                work_note=st.translation_note or "",
+                actress_note=actress_note,
+                actress_target_ja=actress_target_ja,
+            )
         except Exception as e:
             _ = e
+
+    def _set_translation_note_generating(self, v: bool) -> None:
+        if bool(v) != self._translation_note_generating:
+            self._translation_note_generating = bool(v)
+            self.translationNoteGeneratingChanged.emit()
+
+    @Slot(str)
+    def generateWorkTranslationNote(self, productCode: str):
+        """Gemini로 작품 번역 노트 초안 생성 → editDraft.translationNote에 채움."""
+        pc = (productCode or "").strip().upper()
+        if not pc:
+            self.toastMessage.emit("품번이 없습니다.", "warning")
+            return
+        if self._translation_note_generating:
+            return
+
+        try:
+            from javstory.translation.translation_note_generator import WorkNoteContext
+            from javstory.harvest.database import get_db_session, JAVMetadata
+        except Exception as e:
+            self.toastMessage.emit(f"노트 생성 모듈 로드 실패: {e}", "error")
+            return
+
+        ctx = WorkNoteContext(product_code=pc)
+        try:
+            session = get_db_session()
+            try:
+                row = session.query(JAVMetadata).filter_by(product_code=pc).first()
+                if row:
+                    ctx.title_ja = (row.title_ja or row.original_title or "") or ""
+                    ctx.title_ko = (row.title_ko or row.title or "") or ""
+                    ctx.actress_ko = (row.actors_ko or row.actors or "") or ""
+                    ctx.actress_ja = row.actors_ja or ""
+                    ctx.maker = (row.maker_ko or row.maker or "") or ""
+                    ctx.genres = (row.genres_ko or row.genres or "") or ""
+                    ctx.synopsis = (row.synopsis_ko or row.synopsis or "") or ""
+            finally:
+                session.close()
+        except Exception:
+            pass
+
+        try:
+            from javstory.library.detail_persist import load_canonical_for_product
+            st = load_canonical_for_product(pc)
+            ctx.overall_summary = st.overall_summary or ""
+        except Exception:
+            pass
+
+        try:
+            ctx.sample_dialogue_ja = self._sample_ja_subtitle_lines(pc, max_lines=80)
+        except Exception:
+            ctx.sample_dialogue_ja = ""
+
+        self._set_translation_note_generating(True)
+        worker = _NoteGenWorker("work", ctx, self)
+        worker.finished.connect(self._on_note_gen_finished)
+        self._note_gen_worker = worker
+        worker.start()
+
+    @Slot(str)
+    def generateActressTranslationNote(self, japaneseName: str):
+        """Gemini로 배우 번역 노트 초안 생성 → editDraft.actressTranslationNote에 채움."""
+        ja = (japaneseName or "").strip()
+        if not ja:
+            self.toastMessage.emit("배우 일본어 표기가 없습니다.", "warning")
+            return
+        if self._translation_note_generating:
+            return
+
+        try:
+            from javstory.translation.translation_note_generator import ActressNoteContext
+            from javstory.harvest.database import get_db_session, JAVMetadata, Actress
+        except Exception as e:
+            self.toastMessage.emit(f"노트 생성 모듈 로드 실패: {e}", "error")
+            return
+
+        ctx = ActressNoteContext(japanese=ja)
+        try:
+            session = get_db_session()
+            try:
+                a = session.query(Actress).filter_by(japanese=ja).first()
+                if a is not None:
+                    ctx.korean = a.korean or ""
+                    ctx.romaji = a.romaji or ""
+                # 같은 배우의 최근 작품 제목 샘플링(최대 12개)
+                rows = (
+                    session.query(JAVMetadata)
+                    .filter(JAVMetadata.actors_ja.ilike(f"%{ja}%"))
+                    .order_by(JAVMetadata.release_date.desc())
+                    .limit(12)
+                    .all()
+                )
+                titles: list[str] = []
+                for r in rows:
+                    t = (r.title_ja or r.original_title or r.title_ko or r.title or "").strip()
+                    if t:
+                        titles.append(f"- {r.product_code}: {t}")
+                if titles:
+                    ctx.sample_titles = "\n".join(titles)
+            finally:
+                session.close()
+        except Exception:
+            pass
+
+        self._set_translation_note_generating(True)
+        worker = _NoteGenWorker("actress", ctx, self)
+        worker.finished.connect(self._on_note_gen_finished)
+        self._note_gen_worker = worker
+        worker.start()
+
+    def _on_note_gen_finished(self, kind: str, ok: bool, payload: str):
+        self._set_translation_note_generating(False)
+        if not ok:
+            self.toastMessage.emit(f"번역 노트 생성 실패: {payload}", "error")
+            return
+        if not (payload or "").strip():
+            self.toastMessage.emit("번역 노트가 비어 있습니다.", "warning")
+            return
+        if kind == "work":
+            self._edit_draft.translationNote = payload
+            self.toastMessage.emit("작품 번역 노트 초안 생성 완료(저장 버튼으로 확정)", "success")
+        elif kind == "actress":
+            self._edit_draft.actressTranslationNote = payload
+            self.toastMessage.emit("배우 번역 노트 초안 생성 완료(저장 버튼으로 확정)", "success")
+
+    def _sample_ja_subtitle_lines(self, product_code: str, *, max_lines: int = 80) -> str:
+        """해당 작품의 일본어 자막에서 대사 샘플을 추출(노트 생성 컨텍스트용)."""
+        try:
+            from gui.library_data import find_all_video_paths_for_product
+            from javstory.library.multipart.srt_timeline import sibling_srt_for_video
+        except Exception:
+            return ""
+        paths = find_all_video_paths_for_product(product_code) or []
+        for vp in paths:
+            try:
+                sp = sibling_srt_for_video(Path(vp))
+                if sp and sp.is_file():
+                    txt = sp.read_text(encoding="utf-8", errors="ignore")
+                    return _extract_dialogue_lines(txt, max_lines=max_lines)
+            except Exception:
+                continue
+        return ""
 
     @Slot(result=bool)
     def saveDetailEdit(self) -> bool:
@@ -1568,7 +1815,7 @@ class LibraryModel(QObject):
             self.toastMessage.emit("품번이 없습니다.", "warning")
             return False
         try:
-            from javstory.harvest.database import get_db_session, JAVMetadata
+            from javstory.harvest.database import get_db_session, JAVMetadata, Actress
             from javstory.library.detail_persist import persist_metadata_row_and_sync_files
 
             session = get_db_session()
@@ -1578,10 +1825,21 @@ class LibraryModel(QObject):
                     self.toastMessage.emit(f"DB에 품번 {pc}가 없습니다.", "error")
                     return False
                 self._edit_draft.apply_to_row(row)
+                # 배우 노트(첫 배우만 편집) 저장
+                target_ja = (self._edit_draft.actressNoteTargetJa or "").strip()
+                if target_ja:
+                    a = session.query(Actress).filter_by(japanese=target_ja).first()
+                    if a is not None:
+                        a.translation_note = (self._edit_draft.actressTranslationNote or "") or None
                 session.commit()
                 session.refresh(row)
                 scenes = self._scene_edit.to_entries()
-                persist_metadata_row_and_sync_files(pc, row, scenes_override=scenes)
+                persist_metadata_row_and_sync_files(
+                    pc,
+                    row,
+                    scenes_override=scenes,
+                    translation_note_override=str(self._edit_draft.translationNote or ""),
+                )
             finally:
                 session.close()
 

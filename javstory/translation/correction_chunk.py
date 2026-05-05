@@ -24,6 +24,7 @@ from typing import Any, Callable, Dict, List, Optional
 
 from javstory.translation.json_extract import parse_json_array, parse_json_object
 from javstory.translation.llm_backoff import route_with_backoff
+from javstory.translation.llm_backoff import is_free_tier_daily_quota_exceeded
 from javstory.transcription.stt_types import STTCancelled, SimpleSegment
 
 CancelCheck = Optional[Callable[[], bool]]
@@ -58,6 +59,14 @@ def _chunk_params_for_tier(tier: Dict[str, Any]) -> tuple[float, float]:
     model = (tier.get("model") or "").lower()
     if tier.get("provider") == "ollama":
         return _ollama_chunk_params_by_model(model)
+    if tier.get("provider") == "gemini":
+        try:
+            from javstory.config.app_config import gemini_default_chunk_params
+
+            tgt, ov, _ = gemini_default_chunk_params(tier.get("model") or "")
+            return float(tgt), float(ov)
+        except Exception:
+            return 45.0, 10.0
     if "minimax" in model:
         return 30.0, 6.0
     if _is_glm_tier(tier):
@@ -113,6 +122,14 @@ def _is_glm_tier(tier: Dict[str, Any]) -> bool:
 def _default_pass2_concurrency(tier: Dict[str, Any]) -> int:
     if tier.get("provider") == "ollama":
         return 1
+    if tier.get("provider") == "gemini":
+        try:
+            from javstory.config.app_config import gemini_default_chunk_params
+
+            _, _, conc = gemini_default_chunk_params(tier.get("model") or "")
+            return int(conc)
+        except Exception:
+            return 2
     if tier.get("provider") == "openrouter":
         return 3 if _is_glm_tier(tier) else 2
     return 1
@@ -160,10 +177,15 @@ def _build_system_prompt_pass2(
     tier: Dict[str, Any] | None = None,
 ) -> str:
     model_name = (tier.get("model") or "").lower() if tier else ""
+    _gemini_sfx = (
+        "\n\n[출력 형식] 반드시 순수 JSON 배열만 출력. ```json 블록 없이 [ 로 시작해 ] 로 종료."
+        if (tier and tier.get("provider") == "gemini")
+        else ""
+    )
 
     # 1. Qwen 3 235B 특화 프롬프트
     if "qwen3-235b" in model_name:
-        return f"""너는 10년 경력의 전문 JAV 자막 번역·교정 전문가다. 아래 규칙을 **절대적으로 준수**해야 한다. 어떤 이유로도 규칙을 어기면 안 된다.
+        _body = f"""너는 10년 경력의 전문 JAV 자막 번역·교정 전문가다. 아래 규칙을 **절대적으로 준수**해야 한다. 어떤 이유로도 규칙을 어기면 안 된다.
 
 [최우선 규칙 - 절대 위반 금지]
 1. 타임스탬프(start, end)는 입력된 값과 **100% 정확히 동일하게** 유지한다. 절대 변경, 조정, 삭제하지 마라.
@@ -200,10 +222,11 @@ def _build_system_prompt_pass2(
 위 규칙과 데이터를 바탕으로 교정 작업을 수행한 후, **순수 JSON 배열 하나만** 출력하라.
 
 마지막으로 다시 강조한다: 출력은 **100% 한국어만** 사용해야 하며, 어떤 외국어도 절대 혼입되지 않아야 한다. 출력은 순수 JSON 배열 하나여야 한다."""
+        return _body + _gemini_sfx
 
     # 2. DeepSeek V3.2 특화 프롬프트
     if "deepseek-v3.2" in model_name:
-        return f"""너는 10년 경력의 전문 JAV 자막 번역·교정 전문가다. 아래 규칙을 **절대적으로 준수**해야 한다.
+        _body = f"""너는 10년 경력의 전문 JAV 자막 번역·교정 전문가다. 아래 규칙을 **절대적으로 준수**해야 한다.
 
 [최우선 규칙 - 절대 위반 금지]
 1. 타임스탬프(start, end)는 입력된 값과 **100% 정확히 동일하게** 유지한다. 절대 변경하지 마라.
@@ -459,7 +482,30 @@ async def _run_pass2_chunk(
             {"role": "system", "content": sys_p},
             {"role": "user", "content": user_p},
         ]
-        res = await route_with_backoff(router, messages, tier, log=_correction_retry_log(log))
+        try:
+            res = await route_with_backoff(router, messages, tier, log=_correction_retry_log(log))
+        except Exception as e:
+            # Gemini FreeTier 일 quota 초과는 대기해도 해결이 불가하므로 OpenRouter 폴백(옵션)
+            msg = str(e)
+            if str(tier.get("provider") or "").lower() == "gemini" and is_free_tier_daily_quota_exceeded(msg):
+                log(
+                    f"[CORRECTION] Pass2 Gemini FreeTier 일 quota 초과 감지 — OpenRouter로 폴백 (청크 {idx + 1}/{total})"
+                )
+                fallback_model = (os.environ.get("JAVSTORY_CORRECTION_PASS2_FALLBACK_OPENROUTER_MODEL", "") or "").strip() or "qwen/qwen3-235b-a22b-2507"
+                fallback_tier = {
+                    **{k: v for k, v in tier.items() if k not in ("provider", "model", "name", "max_ctx")},
+                    "rank": 99,
+                    "name": "correction_pass2_fallback_openrouter",
+                    "model": fallback_model,
+                    "provider": "openrouter",
+                    "timeout": int(tier.get("timeout") or 180),
+                    "max_ctx": 196608,
+                    "uncensored": True,
+                    "cost_tier": "high",
+                }
+                res = await route_with_backoff(router, messages, fallback_tier, log=_correction_retry_log(log))
+            else:
+                raise
         processed = re.sub(r"<redacted_thinking>.*?</redacted_thinking>", "", res or "", flags=re.DOTALL)
         if not _apply_json_chunk(tgt_segs, processed, log=log):
             log(f"[CORRECTION] Pass2 청크 {idx + 1} JSON 적용 실패 — 1회 재요청")

@@ -94,6 +94,7 @@ QtObject {
 
     // ── 시스템 폰트 ──────────────────────────────────
     readonly property string fontFamily: "Segoe UI, Malgun Gothic, sans-serif"
+    readonly property string iconFont: "Material Symbols Rounded"
 
     // ── 헬퍼 함수 ────────────────────────────────────
     function pathToUrl(path) {

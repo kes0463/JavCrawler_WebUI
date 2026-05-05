@@ -15,10 +15,12 @@ _ROOT = Path(__file__).resolve().parent.parent.parent
 
 class SettingsModel(QObject):
     apiKeyChanged = Signal()
+    geminiApiKeyChanged = Signal()
     ollamaUrlChanged = Signal()
     mediaRootChanged = Signal()
     whisperModelChanged = Signal()
     translationProfileChanged = Signal()
+    translationNoteGlobalChanged = Signal()
     harvestTranslationModelChanged = Signal()
     grokEnabledChanged = Signal()
     dpiBypassChanged = Signal()
@@ -57,8 +59,10 @@ class SettingsModel(QObject):
         try:
             from javstory.config import secrets_manager
             self._api_key = secrets_manager.get_openrouter_api_key() or ""
+            self._gemini_api_key = secrets_manager.get_gemini_api_key() or ""
         except Exception:
             self._api_key = ""
+            self._gemini_api_key = ""
 
         def _env_bool(key: str, default: bool) -> bool:
             try:
@@ -82,6 +86,13 @@ class SettingsModel(QObject):
         self._whisper_model = os.environ.get("JAVSTORY_WHISPER_MODEL", "large-v2")
         self._translation_profile = os.environ.get("JAVSTORY_TRANSLATION_PROFILE", "default").lower()
         self._harvest_translation_model = (os.environ.get("JAVSTORY_HARVEST_TRANSLATION_MODEL", "openrouter:deepseek/deepseek-v3.2") or "").strip() or "openrouter:deepseek/deepseek-v3.2"
+        # 전역 번역 노트(공통 규칙·표기 정책 등) — Gemini 프롬프트의 {{note}}에 합쳐 주입됨
+        # 파일 저장(`data/notes/translation_note_global.txt`); .env 폴백 호환.
+        try:
+            from javstory.translation.translation_notes import load_global_note
+            self._translation_note_global = load_global_note() or ""
+        except Exception:
+            self._translation_note_global = os.environ.get("JAVSTORY_TRANSLATION_NOTE_GLOBAL", "") or ""
         
         # 3. 기능 토글
         self._grok_enabled = _env_bool("JAVSTORY_STORY_ANALYSIS_ENABLED", True)
@@ -157,6 +168,17 @@ class SettingsModel(QObject):
         if v != self._api_key:
             self._api_key = v; self.apiKeyChanged.emit()
 
+    @Property(str, notify=geminiApiKeyChanged)
+    def geminiApiKey(self) -> str:
+        return str(getattr(self, "_gemini_api_key", "") or "")
+
+    @geminiApiKey.setter  # type: ignore[attr-defined]
+    def geminiApiKey(self, v: str):
+        s = str(v or "")
+        if s != str(getattr(self, "_gemini_api_key", "") or ""):
+            self._gemini_api_key = s
+            self.geminiApiKeyChanged.emit()
+
     @Property(str, notify=ollamaUrlChanged)
     def ollamaUrl(self): return self._ollama_url
     @ollamaUrl.setter  # type: ignore[attr-defined]
@@ -184,6 +206,17 @@ class SettingsModel(QObject):
     def translationProfile(self, v):
         if v != self._translation_profile:
             self._translation_profile = v; self.translationProfileChanged.emit()
+
+    @Property(str, notify=translationNoteGlobalChanged)
+    def translationNoteGlobal(self) -> str:
+        return str(getattr(self, "_translation_note_global", "") or "")
+
+    @translationNoteGlobal.setter  # type: ignore[attr-defined]
+    def translationNoteGlobal(self, v: str):
+        s = str(v or "")
+        if s != str(getattr(self, "_translation_note_global", "") or ""):
+            self._translation_note_global = s
+            self.translationNoteGlobalChanged.emit()
 
     @Property(str, notify=harvestTranslationModelChanged)
     def harvestTranslationModel(self) -> str:
@@ -215,7 +248,10 @@ class SettingsModel(QObject):
     @correctionSkip.setter  # type: ignore[attr-defined]
     def correctionSkip(self, v):
         if v != self._correction_skip:
-            self._correction_skip = v; self.correctionProfileChanged.emit()
+            self._correction_skip = v
+            from javstory.config.secrets_manager import set_env_runtime_value
+            set_env_runtime_value("JAVSTORY_CORRECTION_SKIP", "1" if v else "0")
+            self.correctionProfileChanged.emit()
 
     @Property(bool, notify=dpiBypassChanged)
     def dpiBypass(self): return self._dpi_bypass
@@ -525,12 +561,22 @@ class SettingsModel(QObject):
     @Slot()
     def saveApiKey(self):
         key = self._api_key.strip()
-        if not key:
-            self.toastMessage.emit("API 키를 입력하세요.", "warning")
-            return
         try:
-            from javstory.config.secrets_manager import set_openrouter_api_key, set_env_runtime_value
-            set_openrouter_api_key(key)
+            from javstory.config.secrets_manager import (
+                set_openrouter_api_key,
+                set_gemini_api_key,
+                set_env_runtime_value,
+            )
+
+            if key:
+                set_openrouter_api_key(key)
+            else:
+                self.toastMessage.emit("OpenRouter API 키가 비어 있습니다. (Gemini만 저장 가능)", "info")
+
+            gk = str(getattr(self, "_gemini_api_key", "") or "").strip()
+            if gk:
+                set_gemini_api_key(gk)
+
             if self._ollama_url.strip():
                 set_env_runtime_value("JAVSTORY_OLLAMA_URL", self._ollama_url.strip())
             self.toastMessage.emit("API 키 저장 완료", "success")
@@ -550,6 +596,11 @@ class SettingsModel(QObject):
         set_env_runtime_value("JAVSTORY_WHISPER_MODEL", self._whisper_model)
         set_env_runtime_value("JAVSTORY_TRANSLATION_PROFILE", self._translation_profile)
         set_env_runtime_value("JAVSTORY_HARVEST_TRANSLATION_MODEL", str(getattr(self, "_harvest_translation_model", "openrouter:deepseek/deepseek-v3.2")))
+        try:
+            from javstory.translation.translation_notes import save_global_note
+            save_global_note(str(getattr(self, "_translation_note_global", "") or ""))
+        except Exception as _e:
+            self.toastMessage.emit(f"전역 번역 노트 저장 실패: {_e}", "error")
         set_env_runtime_value("JAVSTORY_STORY_ANALYSIS_ENABLED", "1" if self._grok_enabled else "0")
         set_env_runtime_value("JAVSTORY_CORRECTION_PASS2_MODEL", self._correction_profile)
         set_env_runtime_value("JAVSTORY_CORRECTION_SKIP", "1" if self._correction_skip else "0")
