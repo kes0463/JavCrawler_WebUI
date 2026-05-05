@@ -2,7 +2,7 @@
 
 **Grand Master Blueprint v20+** 기준의 현재 구현 진척도를 요약한 문서입니다.
 
-## 📊 핵심 파이프라인 진척도 (Stage 1~8)
+## 📊 핵심 파이프라인 진척도 (Stage 0~7)
 
 **Stage 0~3**은 기능·역할 기준으로 **모두 구현 완료**다. 초기 블루프린트·플랜과 **세부 스택·파일 구조·도구 선택**이 다를 뿐, “미구현”이 아니다(예: STT는 stable-ts 단일 경로, Harvest는 `Harvest/` 패키지 등).
 
@@ -16,7 +16,6 @@
 | **Stage 5** | **Build** | ✅ 완료 | SQLite DB 직접 연동 (master_db.js 폐기) |
 | **Stage 6** | **Maintain** | ✅ 구현 완료 | 에러 복구 자동화 구현 완료 (`javstory/utils/error_recovery.py`, `error_watcher.py`, `gui/components/error_dashboard.py`). |
 | **Stage 7** | **Watchdog** | ✅ 완료 | 24시간 무인 자동화 분석 루프 GUI 통합 완료. |
-| **Stage 8** | **Match** | 🔄 대기 | 자막-스토리 정밀 매칭 및 인물 관계도 도출. |
 
 ## Transcription 모듈 — 구현 완료
 
@@ -28,24 +27,31 @@ SoT(참고): `.cursor/plans/transcription_stable-ts_이식_d9a90db7.plan.md` —
 
 ---
 
-## 🎨 GUI (V2) 구현 현황
+## 🎨 GUI (V2) 구현 현황 — PySide6 + QML (Glassmorphism)
 
-- [x] **Mica 테마 및 프레임워크**: Win11 Fluent Design 기반 마스터 윈도우 구축 완료.
-- [x] **대시보드 (Dashboard)**: 전체 공장 요약 및 통계 뷰.
-- [x] **하베스트 (Harvest)**: 검색/수집·번역 통합 뷰.
-- [x] **프로세싱 (Processing)**: 4단계 분석 시각화 및 자동화(공장 모드) 구축 완료.
-- [x] **라이브러리 (Library)**: 통합 검색 필터 및 씬 탐색 — SQLite 직접 연동.
-- [x] **세팅 (Settings)**: API 키 및 공장 루트 설정.
+- [x] **대시보드 (Dashboard)**: `DashboardView.qml` — GPU/CPU 모니터 + 파이프라인 현황 + 큐.
+- [x] **하베스트 (Harvest)**: `HarvestView.qml` — 검색 + 폴더/INBOX 스캔 + 카드 그리드.
+- [x] **프로세싱 (Processing)**: `ProcessingView.qml` — STT 큐 + 자막 워커 + 진행률.
+- [x] **라이브러리 (Library)**: `LibraryView.qml` + `LibraryDetail.qml` — 포스터 그리드 + 상세 + 필터.
+- [x] **세팅 (Settings)**: `SettingsView.qml` — API/경로/테마/모델/옵션.
+- [x] **인사이트 (Insight)**: `InsightView.qml` — 취향 분석 대시보드 (`javstory/analytics/` 연동).
+- [x] **플레이어 (Player)**: `PlayerView.qml` — 영상 재생 뷰.
+- [x] **모자이크 가져오기**: `MosaicImportView.qml`
 
----
-
-## 🛠 현재 진행 중인 작업 (Next Mission)
-
-> [!IMPORTANT]
-> **Stage 8: Match (자막-스토리 매칭)**
-> - 자막-스토리 정밀 매칭 및 인물 관계도 도출.
+### 공통 컴포넌트 (QML)
+`GlassCard`, `ActionButton`, `NavSidebar`, `LogPanel`, `PosterCard`, `ToastNotification`, `MasterSearchPopup`, `MultiLangEditorPopup`, `SimilarProductsPopup`, `RatingWidget` 등
 
 ---
+
+## 🔄 추가 구현 완료 (별도 로드맵)
+
+| 모듈 | 경로 | 비고 |
+|------|------|------|
+| 시맨틱 검색 인프라 | `javstory/library/embeddings/` | 벡터 스토어·파이프라인·유사도 검색 |
+| 취향/통계 분석 엔진 | `javstory/analytics/` | `preference_engine`, `library_stats`, `batch_worker` |
+| 하이라이트 & 프리뷰 | `javstory/library/highlight/` | WebP 프리뷰·몽타주 생성 |
+| 라이브러리 서비스 레이어 | `javstory/library/service.py` | 씬 편집·Grok 병합·export 고수준 API |
+| 라이브러리 상세 편집 저장 | `javstory/library/detail_persist.py` | DB + Grok JSON 원자적 저장 |
 
 ## ⚠️ 폐기된 구성요소
 
@@ -63,4 +69,4 @@ SoT(참고): `.cursor/plans/transcription_stable-ts_이식_d9a90db7.plan.md` —
 - **번역 품질**: DeepSeek V3 및 Hermes 405B 폴백 체인을 통해 안정적인 무검열 한국어 메타데이터를 확보 중입니다.
 
 ---
-*마지막 갱신: 2026-04-12 — Grok JSON(공통 모듈 + Harvest 직후) 구현 완료 반영 · Stage 0~3 구현 완료 문구 정리*
+*마지막 갱신: 2026-04-30 — Stage 8(Match) 항목 제거. 추가 구현 완료 섹션 추가 (embeddings, analytics, highlight, library service). GUI를 PySide6+QML 기준으로 업데이트.*

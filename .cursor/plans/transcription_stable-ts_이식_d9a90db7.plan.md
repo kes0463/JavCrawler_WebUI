@@ -31,7 +31,7 @@ todos:
     status: completed
   - id: ko-translation-chunks
     content: 한국어 자막 — 청크 번역 모듈 신규 + _translate_ko_chunks (reference_v2 subtitle_guidance.ko_translation 등과 정합)
-    status: pending
+    status: completed
   - id: verify-scene-summary
     content: _verify_scene_summary — 씬 요약 vs 메타/배경/web_database 기준·입력 정의 후 구현 (선택 우선순위)
     status: pending
@@ -59,7 +59,7 @@ isProject: false
 | API 재시도·백오프 | 완료 | `llm_backoff.py` (HTTP `Retry-After` 헤더 직접 파싱은 없음 → 플랜 대비 보완 여지) |
 | 배경 JSON 캐시 | 완료 | `background_context.py` |
 | 통합 오케스트레이터 | **부분 완료** | `subtitle_pipeline_orchestrator.py` — `get_or_build_background`·`_correct_ja_chunks`(→ `correct_ja_segments_async`, `{stem}.corrected.srt`) **완료**; `_translate_ko_chunks`·`_verify_scene_summary`는 **스텁** |
-| 한국어 자막 청크 번역 | **미구현** | Transcription 내 전용 파이프라인 없음; 오케스트레이터 KO 스텁과 동일 |
+| 한국어 자막 청크 번역 | **완료** | `javstory/translation/ko_translation_chunk.py` + `_translate_ko_chunks` 연결 완료 |
 
 **삭제됨:** 예전 `Transcription/Obsolete/` 등 레거시 트리(신규 코드에서 경로 금지 원칙은 동일).
 

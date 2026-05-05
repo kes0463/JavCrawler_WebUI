@@ -2,37 +2,53 @@
 description: JAV Story Analyzer 통합 데이터 분석 워크플로우
 ---
 
-이 워크플로우는 영상 파일로부터 메타데이터 수집, 번역, 오디오 전처리, 장면 분석 및 AI 하이엔드 스토리 분석까지의 전 과정을 설명합니다.
+이 워크플로우는 영상 파일로부터 메타데이터 수집, 번역, STT, 자막 교정/번역까지의 전 과정을 설명합니다.
+상세 모듈 경로 및 아키텍처는 `WORKFLOW_PIPELINES.md`를 참고하세요.
 
-### 1단계: 하이브리드 메타데이터 수집 (Phase 1-3)
-- **도구**: `core.hybrid_crawler.HybridJavCrawler`
-- **프로세스**:
-  - `Playwright`를 사용하여 `njavtv.com` 등에서 원본 데이터를 스크레이핑합니다.
-  - 일본어 원문 제목, 시놉시스, 배우, 장르, 메이커 정보를 확보합니다.
-  - `core.actress_resolver`를 통해 배우 이름을 한글/로마자로 변환합니다.
+---
 
-### 2단계: 무검열 번역 파이프라인 (Phase 5 - New)
-- **도구**: `core.translator.MetadataTranslator`
-- **프로세스**:
-  - `METADATA_CONFIG` 설정에 따라 타이틀과 시놉시스를 한국어로 번역합니다.
-  - **Gemini의 검열 위험**을 피하기 위해 `DeepSeek V3` 및 `Hermes 405B` 폴백 체인을 사용합니다.
-  - 번역된 데이터는 DB의 `title`, `synopsis` 필드에 저장되고 원문은 `original_title`에 보전됩니다.
+### 1단계: 하이브리드 메타데이터 수집
 
-### 3단계: 병렬 미디어 분석 (Phase 4)
-- **도구**: `core.analyzer_coordinator.run_parallel_analysis`
-- **프로세스**:
-  - **장면 분석 (`SceneAnalyzer`)**: `FFmpeg` 및 `PySceneDetect`를 사용하여 장면 변화를 감지하고 대표 썸네일(목표 24장)을 추출합니다.
-  - **음성 인식 (`Whisper`)**: 로컬 GPU를 사용하여 영상 내 대사를 전체 타임스탬프와 함께 텍스트화(STT)합니다.
+- **진입점**: `javstory.harvest.coordinator.run_crawler_for_video_path(video_path, ...)`
+- **크롤러**: `javstory.harvest.crawler.HybridJavCrawler` (Playwright + DrissionPage)
+- **번역**: `javstory.harvest.translator.MetadataTranslator` — DeepSeek V3 / Hermes 405B 폴백 체인으로 무검열 한국어 번역
+- **DB 적재**: `javstory.harvest.database.upsert_jav_metadata` → `data/db/jav_database.db`
+- **배우명 표준화**: `javstory.utils.actress_resolver.ActressResolver`
+- **Grok 스토리 JSON**: 수집 직후 `story_grok_module.run_story_grok_after_harvest` 실행 → `data/cache/story_context/{품번}.json`
 
-### 4단계: 스토리 매칭 및 AI 통합 분석 (Phase 4-5)
-- **도구**: `core.story_matcher.StoryMatcher` 및 `core.ai_analyzer.AIAnalyzer`
-- **프로세스**:
-  - 추출된 텍스트 세그먼트를 각 장면의 시간대에 맞게 정렬(Align)합니다.
-  - `AIAnalyzer`가 인물 관계(Relationship Mapping)를 분석하고 한국어 페르소나를 적용하여 장면별 3줄 요약을 생성합니다.
-  - 모든 결과는 JSON 형태로 `jav_database.db`의 `extra_data` 및 `scene_summaries` 컬럼에 업데이트됩니다.
+---
+
+### 2단계: STT — 일본어 자막 생성
+
+- **진입점**: `javstory.transcription.engine.process_video_to_segments(video_path, output_dir, ...)`
+- **엔진**: `stable-ts` + `faster-whisper` (레거시 Whisper 미사용)
+- **출력**: 영상 옆 `{stem}.ja.srt`
+- **캐시 동작**: `.ja.srt`가 이미 존재하면 STT 스킵
+
+---
+
+### 3단계: 자막 교정 + 한국어 번역
+
+- **진입점**: `javstory.translation.subtitle_pipeline_orchestrator.SubtitlePipelineOrchestrator.run_for_product(product_code, ...)`
+- **흐름**:
+  1. Grok 캐시 로드 (`data/cache/story_context/{품번}.json`)
+  2. JA 교정 — Pass 1 (Grok 맥락 기반) → Pass 2 (GLM 문법 교정) → 출력: `{stem}.ja.corrected.srt`
+  3. KO 번역 — DeepSeek V3 기반 → 출력: `{stem}.ko.srt`
+- **LLM 라우터**: `javstory.llm.engine.MultiTierRouter` (OpenRouter API)
+
+---
+
+### 4단계: 파이프라인 원스톱 실행
+
+- **오케스트레이터**: `javstory.pipeline.orchestrator.run_product_pipeline_async(product_code, video_path, stages, ...)`
+- **단계**: `PipelineStage.HARVEST` → `PipelineStage.STT` → `PipelineStage.SUBTITLE`
+- **스킵 정책**: 산출물이 이미 존재하면 자동 스킵 (`--force`로 강제 재실행)
+
+---
 
 ### 5단계: 결과 확인 및 관리
-- **도구**: `gui.main_window.MainWindow` 또는 `check_db.py`
-- **프로세스**:
-  - GUI 목록에서 분석 상태(`done`)를 확인합니다.
-  - `scripts/migrate_metadata_translations.py`를 통해 기존 데이터의 번역을 사후에 일괄 업데이트할 수도 있습니다.
+
+- **GUI**: `gui_main_v2.py` → `gui.main_window.JAVStoryMainWindow`
+  - 라이브러리 뷰에서 분석 상태 및 씬 탐색
+- **CLI**: `python scripts/run_product_pipeline.py ABC-123 --video "D:/media/ABC-123.mp4" --stages all`
+
