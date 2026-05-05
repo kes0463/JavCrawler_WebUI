@@ -481,7 +481,7 @@ Item {
     }
 
     Keys.onPressed: function(event) {
-        if (lightboxOverlay.visible || root.folderPickerOpen)
+        if (lightboxOverlay.visible || root.folderPickerOpen || window.isPlayerOpen)
             return
 
         var key = event.key
@@ -579,37 +579,37 @@ Item {
 
     Shortcut {
         sequences: ["Up"]
-        enabled: root.shortcutNavOk && !root.activeFocus
+        enabled: root.shortcutNavOk && !root.activeFocus && !window.isPlayerOpen
         onActivated: root.processDetailNavigationKey(Qt.Key_Up, Qt.NoModifier)
     }
     Shortcut {
         sequences: ["Down"]
-        enabled: root.shortcutNavOk && !root.activeFocus
+        enabled: root.shortcutNavOk && !root.activeFocus && !window.isPlayerOpen
         onActivated: root.processDetailNavigationKey(Qt.Key_Down, Qt.NoModifier)
     }
     Shortcut {
         sequences: ["Left"]
-        enabled: root.shortcutNavOk && !root.activeFocus
+        enabled: root.shortcutNavOk && !root.activeFocus && !window.isPlayerOpen
         onActivated: root.processDetailNavigationKey(Qt.Key_Left, Qt.NoModifier)
     }
     Shortcut {
         sequences: ["Right"]
-        enabled: root.shortcutNavOk && !root.activeFocus
+        enabled: root.shortcutNavOk && !root.activeFocus && !window.isPlayerOpen
         onActivated: root.processDetailNavigationKey(Qt.Key_Right, Qt.NoModifier)
     }
     Shortcut {
         sequences: ["Tab"]
-        enabled: root.shortcutNavOk && !root.activeFocus
+        enabled: root.shortcutNavOk && !root.activeFocus && !window.isPlayerOpen
         onActivated: root.processDetailNavigationKey(Qt.Key_Tab, Qt.NoModifier)
     }
     Shortcut {
         sequences: ["Space"]
-        enabled: root.shortcutNavOk && !root.activeFocus
+        enabled: root.shortcutNavOk && !root.activeFocus && !window.isPlayerOpen
         onActivated: root.processDetailNavigationKey(Qt.Key_Space, Qt.NoModifier)
     }
     Shortcut {
         sequences: ["Return", "Enter"]
-        enabled: root.shortcutNavOk && !root.activeFocus
+        enabled: root.shortcutNavOk && !root.activeFocus && !window.isPlayerOpen
         onActivated: root.processDetailNavigationKey(Qt.Key_Return, Qt.NoModifier)
     }
 
@@ -1477,6 +1477,17 @@ Item {
                     }
                 }
 
+                ActionButton {
+                    text: "♡ 좋아요만"
+                    primary: false
+                    visible: !LibraryModel.detailEditing
+                    onClicked: {
+                        var pc = (LibraryModel.detail.productCode || "").trim()
+                        if (pc !== "")
+                            HarvestModel.recrawlFavoritesOnly([pc])
+                    }
+                }
+
                 Popup {
                     id: deleteDialog
                     modal: true
@@ -1967,6 +1978,64 @@ Item {
                                         }
                                     }
                                 }
+                            }
+
+                            // 시청 통계 (횟수 / 누적 시간)
+                            Row {
+                                spacing: 14
+                                visible: LibraryModel.detail.watchCount > 0
+
+                                Text {
+                                    text: "▶ " + LibraryModel.detail.watchCount + "회 시청"
+                                    font.pixelSize: 12
+                                    color: Theme.textSecondary
+                                    verticalAlignment: Text.AlignVCenter
+                                }
+
+                                Text {
+                                    visible: LibraryModel.detail.watchDuration > 0
+                                    text: {
+                                        var sec = LibraryModel.detail.watchDuration
+                                        var h = Math.floor(sec / 3600)
+                                        var m = Math.floor((sec % 3600) / 60)
+                                        var s = sec % 60
+                                        if (h > 0)
+                                            return "⏱ " + h + "h " + m + "m 시청"
+                                        else if (m > 0)
+                                            return "⏱ " + m + "분 " + s + "초 시청"
+                                        else
+                                            return "⏱ " + s + "초 시청"
+                                    }
+                                    font.pixelSize: 12
+                                    color: Theme.textSecondary
+                                    verticalAlignment: Text.AlignVCenter
+                                }
+
+                                Text {
+                                    visible: LibraryModel.detail.lastPosition > 5000
+                                    text: {
+                                        var ms = LibraryModel.detail.lastPosition
+                                        var totalSec = Math.floor(ms / 1000)
+                                        var h = Math.floor(totalSec / 3600)
+                                        var m = Math.floor((totalSec % 3600) / 60)
+                                        var s = totalSec % 60
+                                        var pos = h > 0
+                                            ? (h + ":" + String(m).padStart(2,"0") + ":" + String(s).padStart(2,"0"))
+                                            : (m + ":" + String(s).padStart(2,"0"))
+                                        return "⏩ " + pos + " 에서 재개"
+                                    }
+                                    font.pixelSize: 12
+                                    color: Theme.accentNeon
+                                    verticalAlignment: Text.AlignVCenter
+                                }
+                            }
+
+                            Text {
+                                visible: LibraryModel.detail.favoriteScore > 0
+                                text: "♥ " + LibraryModel.detail.favoriteScore
+                                font.pixelSize: 13
+                                font.family: Theme.fontFamily
+                                color: "#FF4081"
                             }
 
                             SelectableText {

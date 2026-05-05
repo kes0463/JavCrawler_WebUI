@@ -191,26 +191,41 @@ Item {
                                     Layout.fillWidth: true; Layout.fillHeight: true; clip: true
                                     contentWidth: availableWidth
                                     Column {
-                                        width: parent.width; spacing: 6
+                                        width: parent.width; spacing: 2
                                         Repeater {
                                             model: root.libraryDist.actors || []
-                                            RowLayout {
+                                            Rectangle {
                                                 width: parent.width
-                                                spacing: 8
-                                                Text {
-                                                    text: modelData.name
-                                                    font.pixelSize: 14
-                                                    color: Theme.textPrimary
-                                                    Layout.fillWidth: true
-                                                    elide: Text.ElideRight
+                                                height: distActorInner.implicitHeight + 8
+                                                radius: 4
+                                                color: distActorMa.containsMouse ? Qt.rgba(1,1,1,0.07) : "transparent"
+
+                                                RowLayout {
+                                                    id: distActorInner
+                                                    anchors { left: parent.left; right: parent.right; leftMargin: 4; rightMargin: 4; verticalCenter: parent.verticalCenter }
+                                                    spacing: 8
+                                                    Text {
+                                                        text: modelData.name
+                                                        font.pixelSize: 14
+                                                        color: distActorMa.containsMouse ? Theme.accentNeon : Theme.textPrimary
+                                                        Layout.fillWidth: true
+                                                        elide: Text.ElideRight
+                                                    }
+                                                    Text {
+                                                        text: modelData.count + "편"
+                                                        font.pixelSize: 13
+                                                        color: Theme.accentNeon
+                                                        font.weight: Font.Bold
+                                                        Layout.preferredWidth: 60
+                                                        horizontalAlignment: Text.AlignRight
+                                                    }
                                                 }
-                                                Text {
-                                                    text: modelData.count + "편"
-                                                    font.pixelSize: 13
-                                                    color: Theme.accentNeon
-                                                    font.weight: Font.Bold
-                                                    Layout.preferredWidth: 60
-                                                    horizontalAlignment: Text.AlignRight
+                                                MouseArea {
+                                                    id: distActorMa
+                                                    anchors.fill: parent
+                                                    hoverEnabled: true
+                                                    cursorShape: Qt.PointingHandCursor
+                                                    onClicked: window.navigateToLibrarySearch(modelData.name)
                                                 }
                                             }
                                         }
@@ -231,26 +246,41 @@ Item {
                                     Layout.fillWidth: true; Layout.fillHeight: true; clip: true
                                     contentWidth: availableWidth
                                     Column {
-                                        width: parent.width; spacing: 6
+                                        width: parent.width; spacing: 2
                                         Repeater {
                                             model: root.libraryDist.genres || []
-                                            RowLayout {
+                                            Rectangle {
                                                 width: parent.width
-                                                spacing: 8
-                                                Text {
-                                                    text: modelData.name
-                                                    font.pixelSize: 14
-                                                    color: Theme.textPrimary
-                                                    Layout.fillWidth: true
-                                                    elide: Text.ElideRight
+                                                height: distGenreInner.implicitHeight + 8
+                                                radius: 4
+                                                color: distGenreMa.containsMouse ? Qt.rgba(1,1,1,0.07) : "transparent"
+
+                                                RowLayout {
+                                                    id: distGenreInner
+                                                    anchors { left: parent.left; right: parent.right; leftMargin: 4; rightMargin: 4; verticalCenter: parent.verticalCenter }
+                                                    spacing: 8
+                                                    Text {
+                                                        text: modelData.name
+                                                        font.pixelSize: 14
+                                                        color: distGenreMa.containsMouse ? "#FF9F43" : Theme.textPrimary
+                                                        Layout.fillWidth: true
+                                                        elide: Text.ElideRight
+                                                    }
+                                                    Text {
+                                                        text: modelData.count + "편"
+                                                        font.pixelSize: 13
+                                                        color: "#FF9F43"
+                                                        font.weight: Font.Bold
+                                                        Layout.preferredWidth: 60
+                                                        horizontalAlignment: Text.AlignRight
+                                                    }
                                                 }
-                                                Text {
-                                                    text: modelData.count + "편"
-                                                    font.pixelSize: 13
-                                                    color: "#FF9F43"
-                                                    font.weight: Font.Bold
-                                                    Layout.preferredWidth: 60
-                                                    horizontalAlignment: Text.AlignRight
+                                                MouseArea {
+                                                    id: distGenreMa
+                                                    anchors.fill: parent
+                                                    hoverEnabled: true
+                                                    cursorShape: Qt.PointingHandCursor
+                                                    onClicked: window.navigateToLibrarySearch(modelData.name)
                                                 }
                                             }
                                         }
@@ -271,26 +301,41 @@ Item {
                                     Layout.fillWidth: true; Layout.fillHeight: true; clip: true
                                     contentWidth: availableWidth
                                     Column {
-                                        width: parent.width; spacing: 6
+                                        width: parent.width; spacing: 2
                                         Repeater {
                                             model: root.libraryDist.makers || []
-                                            RowLayout {
+                                            Rectangle {
                                                 width: parent.width
-                                                spacing: 8
-                                                Text {
-                                                    text: modelData.name
-                                                    font.pixelSize: 14
-                                                    color: Theme.textPrimary
-                                                    Layout.fillWidth: true
-                                                    elide: Text.ElideRight
+                                                height: distMakerInner.implicitHeight + 8
+                                                radius: 4
+                                                color: distMakerMa.containsMouse ? Qt.rgba(1,1,1,0.07) : "transparent"
+
+                                                RowLayout {
+                                                    id: distMakerInner
+                                                    anchors { left: parent.left; right: parent.right; leftMargin: 4; rightMargin: 4; verticalCenter: parent.verticalCenter }
+                                                    spacing: 8
+                                                    Text {
+                                                        text: modelData.name
+                                                        font.pixelSize: 14
+                                                        color: distMakerMa.containsMouse ? "#48DBFB" : Theme.textPrimary
+                                                        Layout.fillWidth: true
+                                                        elide: Text.ElideRight
+                                                    }
+                                                    Text {
+                                                        text: modelData.count + "편"
+                                                        font.pixelSize: 13
+                                                        color: "#48DBFB"
+                                                        font.weight: Font.Bold
+                                                        Layout.preferredWidth: 60
+                                                        horizontalAlignment: Text.AlignRight
+                                                    }
                                                 }
-                                                Text {
-                                                    text: modelData.count + "편"
-                                                    font.pixelSize: 13
-                                                    color: "#48DBFB"
-                                                    font.weight: Font.Bold
-                                                    Layout.preferredWidth: 60
-                                                    horizontalAlignment: Text.AlignRight
+                                                MouseArea {
+                                                    id: distMakerMa
+                                                    anchors.fill: parent
+                                                    hoverEnabled: true
+                                                    cursorShape: Qt.PointingHandCursor
+                                                    onClicked: window.navigateToLibrarySearch(modelData.name)
                                                 }
                                             }
                                         }
@@ -329,57 +374,77 @@ Item {
                             Repeater {
                                 model: root.actors.slice(0, 5)
 
-                                RowLayout {
+                                Item {
                                     Layout.fillWidth: true
-                                    spacing: Theme.spacingSm
+                                    implicitHeight: top5ActorRow.implicitHeight + 8
 
-                                    // 순위 번지
                                     Rectangle {
-                                        width: 28; height: 28; radius: 14
-                                        color: index === 0 ? "#FFD700"
-                                             : index === 1 ? "#C0C0C0"
-                                             : index === 2 ? "#CD7F32"
-                                             : Theme.surfaceLight
-                                        Text {
-                                            anchors.centerIn: parent
-                                            text: index + 1
-                                            font.pixelSize: 12
-                                            font.weight: Font.Bold
-                                            color: index < 3 ? "#000" : Theme.textMuted
-                                        }
+                                        anchors.fill: parent
+                                        radius: 6
+                                        color: top5ActorMa.containsMouse ? Qt.rgba(1,1,1,0.07) : "transparent"
                                     }
 
-                                    Text {
-                                        text: modelData.name || ""
-                                        font.pixelSize: Theme.fontBody
-                                        color: Theme.textPrimary
-                                        Layout.fillWidth: true
-                                        elide: Text.ElideRight
-                                    }
+                                    RowLayout {
+                                        id: top5ActorRow
+                                        anchors { left: parent.left; right: parent.right; leftMargin: 4; rightMargin: 4; verticalCenter: parent.verticalCenter }
+                                        spacing: Theme.spacingSm
 
-                                    // 점수 바
-                                    Rectangle {
-                                        property int maxScore: root.actors.length > 0
-                                            ? (root.actors[0].score || 1) : 1
-                                        property real ratio: Math.min(1.0,
-                                            (modelData.score || 0) / maxScore)
-                                        width: 100; height: 8; radius: 4
-                                        color: Theme.progressTrack
-
+                                        // 순위 뱃지
                                         Rectangle {
-                                            width: parent.ratio * parent.width
-                                            height: parent.height; radius: 4
-                                            color: Theme.accentNeon
-                                            Behavior on width { NumberAnimation { duration: 600; easing.type: Easing.OutCubic } }
+                                            width: 28; height: 28; radius: 14
+                                            color: index === 0 ? "#FFD700"
+                                                 : index === 1 ? "#C0C0C0"
+                                                 : index === 2 ? "#CD7F32"
+                                                 : Theme.surfaceLight
+                                            Text {
+                                                anchors.centerIn: parent
+                                                text: index + 1
+                                                font.pixelSize: 12
+                                                font.weight: Font.Bold
+                                                color: index < 3 ? "#000" : Theme.textMuted
+                                            }
+                                        }
+
+                                        Text {
+                                            text: modelData.name || ""
+                                            font.pixelSize: Theme.fontBody
+                                            color: top5ActorMa.containsMouse ? Theme.accentNeon : Theme.textPrimary
+                                            Layout.fillWidth: true
+                                            elide: Text.ElideRight
+                                        }
+
+                                        // 점수 바
+                                        Rectangle {
+                                            property int maxScore: root.actors.length > 0
+                                                ? (root.actors[0].score || 1) : 1
+                                            property real ratio: Math.min(1.0,
+                                                (modelData.score || 0) / maxScore)
+                                            width: 100; height: 8; radius: 4
+                                            color: Theme.progressTrack
+
+                                            Rectangle {
+                                                width: parent.ratio * parent.width
+                                                height: parent.height; radius: 4
+                                                color: Theme.accentNeon
+                                                Behavior on width { NumberAnimation { duration: 600; easing.type: Easing.OutCubic } }
+                                            }
+                                        }
+
+                                        Text {
+                                            text: modelData.score || 0
+                                            font.pixelSize: Theme.fontCaption
+                                            color: Theme.textSecondary
+                                            Layout.preferredWidth: 30
+                                            horizontalAlignment: Text.AlignRight
                                         }
                                     }
 
-                                    Text {
-                                        text: modelData.score || 0
-                                        font.pixelSize: Theme.fontCaption
-                                        color: Theme.textSecondary
-                                        Layout.preferredWidth: 30
-                                        horizontalAlignment: Text.AlignRight
+                                    MouseArea {
+                                        id: top5ActorMa
+                                        anchors.fill: parent
+                                        hoverEnabled: true
+                                        cursorShape: Qt.PointingHandCursor
+                                        onClicked: window.navigateToLibrarySearch(modelData.name)
                                     }
                                 }
                             }
@@ -424,54 +489,78 @@ Item {
                                 Layout.fillWidth: true
                                 Layout.fillHeight: true
                                 clip: true
+                                contentWidth: availableWidth
 
-                                ColumnLayout {
+                                Column {
                                     width: parent.width
-                                    spacing: Theme.spacingSm
+                                    spacing: 2
 
                                     Repeater {
                                         model: root.genres.slice(0, 8)
 
-                                        RowLayout {
-                                            Layout.fillWidth: true
-                                            spacing: Theme.spacingSm
+                                        Rectangle {
+                                            width: parent.width
+                                            height: top8GenreInner.implicitHeight + 8
+                                            radius: 6
+                                            color: top8GenreMa.containsMouse ? Qt.rgba(1,1,1,0.07) : "transparent"
 
-                                            // 장르 색상 도트
-                                            Rectangle {
-                                                width: 10; height: 10; radius: 5
-                                                color: _genreColor(index)
-                                            }
+                                            RowLayout {
+                                                id: top8GenreInner
+                                                anchors {
+                                                    left: parent.left; right: parent.right
+                                                    leftMargin: 4; rightMargin: 4
+                                                    verticalCenter: parent.verticalCenter
+                                                }
+                                                spacing: Theme.spacingSm
 
-                                            Text {
-                                                text: modelData.name || ""
-                                                font.pixelSize: Theme.fontCaption
-                                                color: Theme.textPrimary
-                                                Layout.fillWidth: true
-                                                elide: Text.ElideRight
-                                            }
+                                                // 장르 색상 도트
+                                                Rectangle {
+                                                    width: 10; height: 10; radius: 5
+                                                    color: _genreColor(index)
+                                                    Layout.alignment: Qt.AlignVCenter
+                                                }
 
-                                            Rectangle {
-                                                property int maxScore: root.genres.length > 0
-                                                    ? (root.genres[0].score || 1) : 1
-                                                property real ratio: Math.min(1.0,
-                                                    (modelData.score || 0) / maxScore)
-                                                width: 80; height: 6; radius: 3
-                                                color: Theme.progressTrack
+                                                Text {
+                                                    text: modelData.name || ""
+                                                    font.pixelSize: Theme.fontCaption
+                                                    color: top8GenreMa.containsMouse ? _genreColor(index) : Theme.textPrimary
+                                                    Layout.fillWidth: true
+                                                    elide: Text.ElideRight
+                                                }
 
                                                 Rectangle {
-                                                    width: parent.ratio * parent.width
-                                                    height: parent.height; radius: 3
-                                                    color: _genreColor(index)
-                                                    Behavior on width { NumberAnimation { duration: 500; easing.type: Easing.OutCubic } }
+                                                    property int maxScore: root.genres.length > 0
+                                                        ? (root.genres[0].score || 1) : 1
+                                                    property real ratio: Math.min(1.0,
+                                                        (modelData.score || 0) / maxScore)
+                                                    Layout.preferredWidth: 80
+                                                    height: 6; radius: 3
+                                                    color: Theme.progressTrack
+                                                    Layout.alignment: Qt.AlignVCenter
+
+                                                    Rectangle {
+                                                        width: parent.ratio * parent.width
+                                                        height: parent.height; radius: 3
+                                                        color: _genreColor(index)
+                                                        Behavior on width { NumberAnimation { duration: 500; easing.type: Easing.OutCubic } }
+                                                    }
+                                                }
+
+                                                Text {
+                                                    text: modelData.score || 0
+                                                    font.pixelSize: Theme.fontCaption
+                                                    color: Theme.textSecondary
+                                                    Layout.preferredWidth: 28
+                                                    horizontalAlignment: Text.AlignRight
                                                 }
                                             }
 
-                                            Text {
-                                                text: modelData.score || 0
-                                                font.pixelSize: Theme.fontCaption
-                                                color: Theme.textSecondary
-                                                Layout.preferredWidth: 28
-                                                horizontalAlignment: Text.AlignRight
+                                            MouseArea {
+                                                id: top8GenreMa
+                                                anchors.fill: parent
+                                                hoverEnabled: true
+                                                cursorShape: Qt.PointingHandCursor
+                                                onClicked: window.navigateToLibrarySearch(modelData.name)
                                             }
                                         }
                                     }
@@ -481,7 +570,8 @@ Item {
                                         text: "장르 데이터 없음"
                                         color: Theme.textMuted
                                         font.pixelSize: Theme.fontCaption
-                                        Layout.alignment: Qt.AlignHCenter
+                                        width: parent.width
+                                        horizontalAlignment: Text.AlignHCenter
                                     }
                                 }
                             }

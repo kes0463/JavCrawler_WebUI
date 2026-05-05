@@ -147,13 +147,16 @@ def decay_recent_scores(decay_factor: float = 0.8) -> None:
 
 def _get_top(category_type: str, n: int = 5,
              use_recent: bool = False,
-             time_slot: str = "all") -> List[Dict[str, Any]]:
+             time_slot: str = "all",
+             excluded: set[str] | None = None) -> List[Dict[str, Any]]:
     """내부 공통 TOP N 조회."""
     with get_db_session_ctx() as session:
         q = session.query(UserPreference).filter(
             UserPreference.category_type == category_type,
             UserPreference.time_slot == time_slot,
         )
+        if excluded:
+            q = q.filter(UserPreference.category_value.notin_(excluded))
         if use_recent:
             q = q.order_by(UserPreference.recent_score.desc(), UserPreference.score.desc())
         else:
@@ -174,22 +177,24 @@ def get_top_actors(n: int = 5, use_recent: bool = False) -> List[Dict[str, Any]]
     return _get_top("actor", n, use_recent=use_recent)
 
 
-def get_top_genres(n: int = 8, use_recent: bool = False) -> List[Dict[str, Any]]:
-    return _get_top("genre", n, use_recent=use_recent)
+def get_top_genres(n: int = 8, use_recent: bool = False,
+                   excluded: set[str] | None = None) -> List[Dict[str, Any]]:
+    return _get_top("genre", n, use_recent=use_recent, excluded=excluded)
 
 
 def get_top_makers(n: int = 5, use_recent: bool = False) -> List[Dict[str, Any]]:
     return _get_top("maker", n, use_recent=use_recent)
 
 
-def compute_recent_trend(days: int = 7) -> Dict[str, List[Dict[str, Any]]]:
+def compute_recent_trend(days: int = 7,
+                         excluded_genres: set[str] | None = None) -> Dict[str, List[Dict[str, Any]]]:
     """
     최근 N일 기준 취향 변화를 반환합니다.
     Returns: {"actors": [...], "genres": [...]}
     """
     return {
         "actors": get_top_actors(5, use_recent=True),
-        "genres": get_top_genres(5, use_recent=True),
+        "genres": get_top_genres(5, use_recent=True, excluded=excluded_genres),
     }
 
 

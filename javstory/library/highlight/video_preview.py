@@ -38,6 +38,8 @@ def _ffprobe_duration_sec(path: Path) -> float:
             ],
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             startupinfo=_startupinfo_hidden(),
             check=False,
         )

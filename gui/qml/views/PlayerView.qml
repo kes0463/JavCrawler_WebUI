@@ -2,28 +2,238 @@ import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
 import QtMultimedia
+import QtCore
 import ".."
 import "../components"
 
 Item {
     id: playerRoot
+    focus: true
 
     property string productCode: ""
     property url videoSource: ""
     property string title: ""
+    property int resumePosition: 0        // ms 단위, 0 = 처음부터
 
-    // 시각적 상태
     property bool showControls: true
     property bool isPip: false
-
-    // 애니메이션 제어용
     property rect startRect: Qt.rect(0, 0, 0, 0)
 
-    // 스킵 감지용 이전 위치 추적
+    // 이어보기 seek 완료 여부 (중복 seek 방지)
+    property bool _seekDone: false
+    // 소스 주입 직후 자동 재생 보장용(Loaded 이전 play() 유실 방지)
+    property bool _autoPlayPending: false
+
+    // 스킵 감지용
     property int _prevPosition: 0
     property bool _isUserSeeking: false
 
-    // --- 비디오 엔진 ---
+    // 자막
+    property var subtitleTracks: []       // [{path, label, filename}]
+    property int activeSubtitleIdx: -1   // -1 = 없음
+    property var subtitleCues: []        // [{start_ms, end_ms, text, ass?}]
+    property string currentSubtitle: ""  // SRT/SMI/VTT 폴백용 평문
+    property var activeAssCues: []       // 현재 시점에 활성화된 ASS 큐 리스트
+
+    // 전체화면 여부 (ApplicationWindow 기준)
+    readonly property bool isFullscreen: window.visibility === Window.FullScreen
+
+    // ── 볼륨 영구 저장 ──────────────────────────────────────
+    Settings {
+        id: playerSettings
+        category: "Player"
+        property real volume: 0.8
+    }
+
+    // ── 자막 설정 영구 저장 ─────────────────────────────────
+    Settings {
+        id: subtitleSettings
+        category: "Subtitle"
+        property real plainFontSize: 20        // 평문 자막 px
+        property real assFontScale: 1.0        // ASS 자막 크기 배율
+        property string fontFamily: ""         // "" = 테마 기본
+        property string textColor: "#FFFFFF"   // 평문 자막 텍스트 색
+        property real bgOpacity: 0.72          // 배경 불투명도
+    }
+
+    // ── 키보드 단축키 ────────────────────────────────────────
+    // ShortcutOverride를 수락해 ApplicationShortcut이 ESC/Backspace를 먼저 소비하는 것을 막는다.
+    // Qt 이벤트 흐름: ShortcutOverride 수락 → Shortcut 검사 건너뜀 → Keys.onPressed 도달
+    Keys.onShortcutOverride: function(event) {
+        switch (event.key) {
+        case Qt.Key_Space:
+        case Qt.Key_Escape:
+        case Qt.Key_Backspace:
+        case Qt.Key_Left:
+        case Qt.Key_Right:
+        case Qt.Key_Up:
+        case Qt.Key_Down:
+        case Qt.Key_Return:
+        case Qt.Key_F:
+        case Qt.Key_P:
+        case Qt.Key_M:
+        case Qt.Key_Home:
+        case Qt.Key_1: case Qt.Key_2: case Qt.Key_3: case Qt.Key_4: case Qt.Key_5:
+        case Qt.Key_6: case Qt.Key_7: case Qt.Key_8: case Qt.Key_9:
+            event.accepted = true
+            break
+        default:
+            event.accepted = false
+        }
+    }
+
+    Keys.onPressed: function(event) {
+        switch (event.key) {
+        case Qt.Key_Space:
+            if (mediaPlayer.playbackState === MediaPlayer.PlayingState) {
+                mediaPlayer.pause(); showOsd("⏸  일시정지")
+            } else {
+                mediaPlayer.play(); showOsd("▶  재생")
+            }
+            playerRoot.showControls = true
+            event.accepted = true; break
+        case Qt.Key_Escape:
+        case Qt.Key_Backspace:
+            if (playerRoot.isFullscreen)
+                playerRoot._toggleFullscreen()
+            else
+                playerRoot._closePlayer()
+            event.accepted = true; break
+        case Qt.Key_Return:
+        case Qt.Key_F:
+            playerRoot._toggleFullscreen(); event.accepted = true; break
+        case Qt.Key_P:
+            playerRoot.isPip = !playerRoot.isPip; event.accepted = true; break
+        case Qt.Key_Left:
+            if (event.modifiers & Qt.ShiftModifier) {
+                mediaPlayer.setPosition(Math.max(0, mediaPlayer.position - 30000))
+                showOsd("◀◀  -30초")
+            } else if (event.modifiers & Qt.ControlModifier) {
+                mediaPlayer.setPosition(Math.max(0, mediaPlayer.position - 60000))
+                showOsd("◀◀◀  -1분")
+            } else {
+                mediaPlayer.setPosition(Math.max(0, mediaPlayer.position - 5000))
+                showOsd("◀  -5초")
+            }
+            event.accepted = true; break
+        case Qt.Key_Right:
+            if (event.modifiers & Qt.ShiftModifier) {
+                mediaPlayer.setPosition(Math.min(mediaPlayer.duration, mediaPlayer.position + 30000))
+                showOsd("+30초  ▶▶")
+            } else if (event.modifiers & Qt.ControlModifier) {
+                mediaPlayer.setPosition(Math.min(mediaPlayer.duration, mediaPlayer.position + 60000))
+                showOsd("+1분  ▶▶▶")
+            } else {
+                mediaPlayer.setPosition(Math.min(mediaPlayer.duration, mediaPlayer.position + 5000))
+                showOsd("+5초  ▶")
+            }
+            event.accepted = true; break
+        case Qt.Key_Up:
+            volumeSlider.value = Math.min(1.0, volumeSlider.value + 0.05)
+            showOsd("🔊  " + Math.round(volumeSlider.value * 100) + "%")
+            event.accepted = true; break
+        case Qt.Key_Down:
+            volumeSlider.value = Math.max(0.0, volumeSlider.value - 0.05)
+            showOsd("🔊  " + Math.round(volumeSlider.value * 100) + "%")
+            event.accepted = true; break
+        case Qt.Key_M:
+            audioOutput.muted = !audioOutput.muted
+            showOsd(audioOutput.muted ? "🔇  음소거" : "🔊  음소거 해제")
+            event.accepted = true; break
+        case Qt.Key_Home:
+            mediaPlayer.setPosition(0); showOsd("⏮  처음으로"); event.accepted = true; break
+        case Qt.Key_1: mediaPlayer.setPosition(Math.floor(mediaPlayer.duration * 0.1)); showOsd("▶  10%"); event.accepted = true; break
+        case Qt.Key_2: mediaPlayer.setPosition(Math.floor(mediaPlayer.duration * 0.2)); showOsd("▶  20%"); event.accepted = true; break
+        case Qt.Key_3: mediaPlayer.setPosition(Math.floor(mediaPlayer.duration * 0.3)); showOsd("▶  30%"); event.accepted = true; break
+        case Qt.Key_4: mediaPlayer.setPosition(Math.floor(mediaPlayer.duration * 0.4)); showOsd("▶  40%"); event.accepted = true; break
+        case Qt.Key_5: mediaPlayer.setPosition(Math.floor(mediaPlayer.duration * 0.5)); showOsd("▶  50%"); event.accepted = true; break
+        case Qt.Key_6: mediaPlayer.setPosition(Math.floor(mediaPlayer.duration * 0.6)); showOsd("▶  60%"); event.accepted = true; break
+        case Qt.Key_7: mediaPlayer.setPosition(Math.floor(mediaPlayer.duration * 0.7)); showOsd("▶  70%"); event.accepted = true; break
+        case Qt.Key_8: mediaPlayer.setPosition(Math.floor(mediaPlayer.duration * 0.8)); showOsd("▶  80%"); event.accepted = true; break
+        case Qt.Key_9: mediaPlayer.setPosition(Math.floor(mediaPlayer.duration * 0.9)); showOsd("▶  90%"); event.accepted = true; break
+        default: event.accepted = false
+        }
+    }
+
+    // 포커스를 빼앗겼을 때 즉시 재취득 (MediaPlayer 등 내부 아이템이 포커스를 가져갈 경우 대비)
+    onActiveFocusChanged: {
+        if (!activeFocus && visible)
+            Qt.callLater(forceActiveFocus)
+    }
+
+    function _closePlayer() {
+        if (playerRoot.isFullscreen) window.visibility = Window.Windowed
+        mediaPlayer.stop()
+        playerRoot.closeRequest()
+    }
+
+    function _toggleFullscreen() {
+        if (playerRoot.isFullscreen)
+            window.visibility = Window.Windowed
+        else
+            window.visibility = Window.FullScreen
+    }
+
+    function showOsd(text) {
+        osdText.text = text
+        osdAnim.restart()
+    }
+
+    // ── 자막 헬퍼 ────────────────────────────────────────────
+    function loadSubtitle(idx) {
+        playerRoot.activeSubtitleIdx = idx
+        playerRoot.currentSubtitle = ""
+        if (idx < 0 || idx >= playerRoot.subtitleTracks.length) {
+            playerRoot.subtitleCues = []
+            return
+        }
+        var path = playerRoot.subtitleTracks[idx].path
+        var json = PlayerModel.loadSubtitleFile(path)
+        try {
+            playerRoot.subtitleCues = JSON.parse(json)
+        } catch(e) {
+            playerRoot.subtitleCues = []
+        }
+    }
+
+    function _updateSubtitle() {
+        if (playerRoot.activeSubtitleIdx < 0 || playerRoot.subtitleCues.length === 0) {
+            if (playerRoot.currentSubtitle !== "")
+                playerRoot.currentSubtitle = ""
+            if (playerRoot.activeAssCues.length !== 0)
+                playerRoot.activeAssCues = []
+            return
+        }
+        var pos = mediaPlayer.position
+        var cues = playerRoot.subtitleCues
+        var foundPlain = ""
+        var ass = []
+        for (var i = 0; i < cues.length; i++) {
+            var c = cues[i]
+            if (pos < c.start_ms || pos > c.end_ms)
+                continue
+            if (c.ass) {
+                ass.push(c)
+            } else if (foundPlain === "") {
+                foundPlain = c.text
+            }
+        }
+        if (playerRoot.currentSubtitle !== foundPlain)
+            playerRoot.currentSubtitle = foundPlain
+        playerRoot.activeAssCues = ass
+    }
+
+    Timer {
+        id: subtitleTimer
+        interval: 80
+        repeat: true
+        running: playerRoot.activeSubtitleIdx >= 0
+            && playerRoot.subtitleCues.length > 0
+            && mediaPlayer.playbackState !== MediaPlayer.StoppedState
+        onTriggered: playerRoot._updateSubtitle()
+    }
+
+    // ── 미디어 엔진 ──────────────────────────────────────────
     MediaPlayer {
         id: mediaPlayer
         source: playerRoot.videoSource
@@ -31,108 +241,561 @@ Item {
         audioOutput: AudioOutput { id: audioOutput; volume: volumeSlider.value }
 
         onPlaybackStateChanged: {
-            if (playbackState === MediaPlayer.PlayingState) {
-                PlayerModel.startWatch(playerRoot.productCode, duration / 1000)
+            if (mediaPlayer.playbackState === MediaPlayer.PlayingState)
+                playerRoot._autoPlayPending = false
+        }
+
+        onMediaStatusChanged: {
+            // Loaded/Buffered 시점에 autoplay 요청을 확실히 소진
+            if (playerRoot._autoPlayPending
+                    && (mediaPlayer.mediaStatus === MediaPlayer.LoadedMedia
+                        || mediaPlayer.mediaStatus === MediaPlayer.BufferedMedia)) {
+                mediaPlayer.play()
+            }
+            if (mediaPlayer.mediaStatus === MediaPlayer.EndOfMedia) {
+                // 마지막 프레임에서 멈춤 — 컨트롤 표시 유지
+                playerRoot.showControls = true
+                PlayerModel.updateProgress(
+                    playerRoot.productCode,
+                    mediaPlayer.duration,
+                    Math.floor(mediaPlayer.duration / 1000)
+                )
+            }
+        }
+
+        // duration 확정 시 총 길이 기록
+        onDurationChanged: {
+            if (mediaPlayer.duration > 0)
+                PlayerModel.updateTotalDuration(playerRoot.productCode, Math.floor(mediaPlayer.duration / 1000))
+        }
+
+        // seekable 상태가 되면 이어보기 seek 실행 (1회)
+        onSeekableChanged: {
+            if (mediaPlayer.seekable && playerRoot.resumePosition > 5000 && !playerRoot._seekDone) {
+                playerRoot._seekDone = true
+                mediaPlayer.setPosition(playerRoot.resumePosition)
             }
         }
 
         onPositionChanged: {
-            var pos = position
-
-            // 스킵 감지: 이전 위치보다 5초 이상 앞으로 점프 → 사용자 스킵
+            var pos = mediaPlayer.position
+            if (playerRoot.activeSubtitleIdx >= 0)
+                playerRoot._updateSubtitle()
+            // 스킵 감지 (5초 이상 앞으로 점프)
             if (!playerRoot._isUserSeeking && playerRoot._prevPosition > 0) {
                 var jump = pos - playerRoot._prevPosition
-                if (jump > 5000 && jump < 3600000) {
+                if (jump > 5000 && jump < 3600000)
                     PlayerModel.recordSkip(playerRoot.productCode, playerRoot._prevPosition, pos)
-                }
             }
             playerRoot._prevPosition = pos
+        }
+    }
 
-            // 약 5초마다 DB에 진척도 저장
-            if (pos > 0 && pos % 5000 < 500) {
-                PlayerModel.updateProgress(playerRoot.productCode, pos, duration / 1000)
+    // 소스가 늦게 주입되는 구조(Loader + Qt.callLater)라서,
+    // videoSource가 설정되는 순간 재생을 시작한다.
+    onVideoSourceChanged: {
+        playerRoot._seekDone = false
+        playerRoot._prevPosition = 0
+        playerRoot._autoPlayPending = true
+        playerRoot.reloadSubtitleTracks()
+        if (playerRoot.videoSource && playerRoot.videoSource.toString() !== "") {
+            if (mediaPlayer.playbackState !== MediaPlayer.PlayingState) {
+                mediaPlayer.play()
             }
         }
     }
 
-    // 30초마다 누적 시청 시간 저장
+    // 재생 위치 5초마다 저장
     Timer {
-        id: durationTimer
-        interval: 30000
-        repeat: true
+        id: progressTimer
+        interval: 5000; repeat: true
         running: mediaPlayer.playbackState === MediaPlayer.PlayingState
         onTriggered: {
-            PlayerModel.updateWatchDuration(playerRoot.productCode, 30)
+            if (mediaPlayer.position > 0)
+                PlayerModel.updateProgress(
+                    playerRoot.productCode,
+                    mediaPlayer.position,
+                    Math.floor(mediaPlayer.duration / 1000)
+                )
         }
     }
 
+    // 누적 시청 시간 30초마다 저장
+    Timer {
+        id: durationTimer
+        interval: 30000; repeat: true
+        running: mediaPlayer.playbackState === MediaPlayer.PlayingState
+        onTriggered: PlayerModel.updateWatchDuration(playerRoot.productCode, 30)
+    }
+
+    // ── 검은 배경 오버레이 ───────────────────────────────────
     Rectangle {
         id: bgRect
         anchors.fill: parent
         color: "#000000"
         opacity: 0
-
-        states: [
-            State {
-                name: "visible"
-                PropertyChanges { target: bgRect; opacity: 1.0 }
-            }
-        ]
+        visible: !playerRoot.isPip
+        states: State {
+            name: "visible"
+            PropertyChanges { target: bgRect; opacity: 1.0 }
+        }
         transitions: Transition {
-            NumberAnimation { property: "opacity"; duration: 400 }
+            NumberAnimation { property: "opacity"; duration: 350 }
         }
     }
 
-    // 비디오 출력 영역 (애니메이션 대상)
+    // ── PIP 상태: 우하단 작은 창 ─────────────────────────────
+    // 단일 상태 기계로 통합 — videoContainer.states 제거, 여기서만 관리
+    onIsPipChanged: playerRoot.state = playerRoot.isPip ? "pip" : "normal"
+
+    states: [
+        State {
+            name: "normal"
+            PropertyChanges { target: videoContainer; x: 0; y: 0; width: playerRoot.width; height: playerRoot.height; radius: 0 }
+        },
+        State {
+            name: "pip"
+            PropertyChanges { target: videoContainer; x: playerRoot.width - 404; y: playerRoot.height - 232; width: 400; height: 225; radius: 10 }
+        }
+    ]
+    transitions: Transition {
+        NumberAnimation { properties: "x,y,width,height,radius"; duration: 300; easing.type: Easing.OutCubic }
+    }
+
+    // ── 비디오 컨테이너 ─────────────────────────────────────
     Rectangle {
         id: videoContainer
         x: playerRoot.startRect.x
         y: playerRoot.startRect.y
         width: playerRoot.startRect.width
         height: playerRoot.startRect.height
-        color: "transparent"
+        color: "#000"
         clip: true
 
         VideoOutput {
             id: videoOutput
             anchors.fill: parent
             fillMode: VideoOutput.PreserveAspectFit
+        }
 
-            TapHandler {
-                onTapped: {
-                    if (mediaPlayer.playbackState === MediaPlayer.PlayingState) mediaPlayer.pause()
-                    else mediaPlayer.play()
-                    playerRoot.showControls = true
+        // 영상 화면 클릭: 재생/일시정지 (PIP이면 PIP 해제)
+        // TapHandler가 환경에 따라 누락되는 케이스가 있어 MouseArea로 보강
+        MouseArea {
+            anchors.fill: parent
+            acceptedButtons: Qt.LeftButton
+            onDoubleClicked: playerRoot._toggleFullscreen()
+            onClicked: {
+                if (playerRoot.isPip) {
+                    playerRoot.isPip = false
+                    return
                 }
+                mediaPlayer.playbackState === MediaPlayer.PlayingState
+                    ? mediaPlayer.pause()
+                    : mediaPlayer.play()
+                playerRoot.showControls = true
+                controlHideTimer.restart()
             }
         }
 
-        states: [
-            State {
-                name: "fullscreen"
-                PropertyChanges {
-                    target: videoContainer;
-                    x: 0; y: 0;
-                    width: playerRoot.width;
-                    height: playerRoot.height
-                }
+        // PIP 닫기 버튼
+        Rectangle {
+            visible: playerRoot.isPip
+            anchors.top: parent.top; anchors.right: parent.right
+            anchors.margins: 6
+            width: 24; height: 24; radius: 12
+            color: pipCloseMa.containsMouse ? "#CC0000" : "#88000000"
+            Text { anchors.centerIn: parent; text: "✕"; color: "#FFF"; font.pixelSize: 12 }
+            MouseArea {
+                id: pipCloseMa
+                anchors.fill: parent
+                hoverEnabled: true
+                onClicked: playerRoot._closePlayer()
             }
-        ]
+        }
 
-        transitions: Transition {
-            NumberAnimation {
-                properties: "x,y,width,height";
-                duration: 500;
-                easing.type: Easing.OutExpo
-            }
+    }
+
+    // ── 자막 오버레이 ────────────────────────────────────────
+    // SRT/SMI/VTT 평문 폴백 (ASS 큐가 활성화되면 숨김)
+    Rectangle {
+        id: subtitleOverlay
+        anchors.horizontalCenter: parent.horizontalCenter
+        anchors.bottom: controlBar.visible && controlBar.opacity > 0.1 ? controlBar.top : parent.bottom
+        anchors.bottomMargin: controlBar.visible && controlBar.opacity > 0.1 ? 8 : 60
+        visible: playerRoot.currentSubtitle !== ""
+            && playerRoot.activeAssCues.length === 0
+            && !playerRoot.isPip
+        color: Qt.rgba(0, 0, 0, subtitleSettings.bgOpacity)
+        radius: 6
+        width: subtitleText.width + 24
+        height: subtitleText.height + 12
+
+        Text {
+            id: subtitleText
+            anchors.centerIn: parent
+            text: playerRoot.currentSubtitle
+            color: subtitleSettings.textColor
+            font.pixelSize: subtitleSettings.plainFontSize
+            font.family: subtitleSettings.fontFamily !== "" ? subtitleSettings.fontFamily : Theme.fontFamily
+            horizontalAlignment: Text.AlignHCenter
+            wrapMode: Text.WordWrap
+            width: Math.min(implicitWidth, playerRoot.width * 0.85)
+            textFormat: Text.PlainText
+            style: Text.Outline
+            styleColor: "#000000"
         }
     }
 
-    // 컨트롤 숨김 타이머 (4초 후 자동 숨김)
+    // ASS 자막 풀 렌더 오버레이 (글꼴/색/위치/드로잉 지원)
+    AssOverlay {
+        id: assOverlay
+        // VideoOutput의 contentRect 좌표는 VideoOutput 내부 좌표계 → 영상 영역의 부모 좌표로 변환
+        videoRect: Qt.rect(
+            videoContainer.x + videoOutput.x + videoOutput.contentRect.x,
+            videoContainer.y + videoOutput.y + videoOutput.contentRect.y,
+            videoOutput.contentRect.width,
+            videoOutput.contentRect.height,
+        )
+        cues: playerRoot.activeAssCues
+        currentPositionMs: mediaPlayer.position
+        fontSizeScale: subtitleSettings.assFontScale
+        anchors.fill: parent
+        visible: !playerRoot.isPip
+        z: subtitleOverlay.z + 1
+    }
+
+    // ── 자막 글꼴·크기 설정 팝업 ─────────────────────────────
+    Popup {
+        id: subtitleSettingsPopup
+        width: 290
+        height: subSettingsCol.implicitHeight + 28
+        padding: 0
+        parent: playerRoot
+        closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
+
+        background: Rectangle {
+            color: Qt.rgba(0.09, 0.09, 0.11, 0.96)
+            radius: 9
+            border.color: Qt.rgba(1, 1, 1, 0.13)
+            border.width: 1
+        }
+
+        Column {
+            id: subSettingsCol
+            anchors { left: parent.left; right: parent.right; top: parent.top }
+            anchors.margins: 14
+            anchors.topMargin: 14
+            spacing: 14
+
+            Text {
+                text: "자막 설정"
+                color: Qt.rgba(1, 1, 1, 0.9)
+                font.pixelSize: 13; font.bold: true
+                font.family: Theme.fontFamily
+            }
+
+            // ── 평문 자막 크기 ────────────────────────────────
+            Column {
+                width: parent.width
+                spacing: 4
+                Row {
+                    width: parent.width
+                    spacing: 0
+                    Text {
+                        text: "크기 (SRT·SMI·VTT)"
+                        color: Qt.rgba(1, 1, 1, 0.6)
+                        font.pixelSize: 11; font.family: Theme.fontFamily
+                        width: 140
+                        anchors.verticalCenter: parent.verticalCenter
+                    }
+                    Text {
+                        text: Math.round(subtitleSettings.plainFontSize) + " px"
+                        color: Theme.accentNeon
+                        font.pixelSize: 11; font.family: Theme.fontFamily
+                        width: parent.width - 140
+                        horizontalAlignment: Text.AlignRight
+                        anchors.verticalCenter: parent.verticalCenter
+                    }
+                }
+                Slider {
+                    id: plainSizeSlider
+                    width: parent.width
+                    from: 12; to: 56; stepSize: 1
+                    value: subtitleSettings.plainFontSize
+                    focusPolicy: Qt.NoFocus
+                    onMoved: subtitleSettings.plainFontSize = value
+                    background: Rectangle {
+                        height: 4; radius: 2; color: Qt.rgba(1, 1, 1, 0.12)
+                        Rectangle {
+                            width: plainSizeSlider.visualPosition * parent.width
+                            height: parent.height; radius: 2; color: Theme.accentNeon
+                        }
+                    }
+                    handle: Rectangle {
+                        x: plainSizeSlider.visualPosition * (plainSizeSlider.width - width)
+                        y: (plainSizeSlider.height - height) / 2
+                        width: 13; height: 13; radius: 7; color: "#FFF"
+                        border.color: Theme.accentNeon; border.width: 2
+                    }
+                }
+            }
+
+            // ── ASS 자막 크기 배율 ────────────────────────────
+            Column {
+                width: parent.width
+                spacing: 4
+                Row {
+                    width: parent.width
+                    spacing: 0
+                    Text {
+                        text: "배율 (ASS·SSA)"
+                        color: Qt.rgba(1, 1, 1, 0.6)
+                        font.pixelSize: 11; font.family: Theme.fontFamily
+                        width: 140
+                        anchors.verticalCenter: parent.verticalCenter
+                    }
+                    Text {
+                        text: subtitleSettings.assFontScale.toFixed(1) + "×"
+                        color: Theme.accentNeon
+                        font.pixelSize: 11; font.family: Theme.fontFamily
+                        width: parent.width - 140
+                        horizontalAlignment: Text.AlignRight
+                        anchors.verticalCenter: parent.verticalCenter
+                    }
+                }
+                Slider {
+                    id: assScaleSlider
+                    width: parent.width
+                    from: 0.5; to: 2.5; stepSize: 0.1
+                    value: subtitleSettings.assFontScale
+                    focusPolicy: Qt.NoFocus
+                    onMoved: subtitleSettings.assFontScale = value
+                    background: Rectangle {
+                        height: 4; radius: 2; color: Qt.rgba(1, 1, 1, 0.12)
+                        Rectangle {
+                            width: assScaleSlider.visualPosition * parent.width
+                            height: parent.height; radius: 2; color: Theme.accentNeon
+                        }
+                    }
+                    handle: Rectangle {
+                        x: assScaleSlider.visualPosition * (assScaleSlider.width - width)
+                        y: (assScaleSlider.height - height) / 2
+                        width: 13; height: 13; radius: 7; color: "#FFF"
+                        border.color: Theme.accentNeon; border.width: 2
+                    }
+                }
+            }
+
+            // ── 텍스트 색상 ──────────────────────────────────
+            Column {
+                width: parent.width
+                spacing: 5
+                Text {
+                    text: "텍스트 색상 (SRT·SMI·VTT)"
+                    color: Qt.rgba(1, 1, 1, 0.6)
+                    font.pixelSize: 11; font.family: Theme.fontFamily
+                }
+                Row {
+                    spacing: 6
+                    Repeater {
+                        model: [
+                            { clr: "#FFFFFF", name: "흰색" },
+                            { clr: "#FFE234", name: "노란색" },
+                            { clr: "#00FFFF", name: "하늘색" },
+                            { clr: "#90EE90", name: "연두색" },
+                            { clr: "#FF69B4", name: "분홍색" },
+                        ]
+                        Rectangle {
+                            width: 24; height: 24; radius: 5
+                            color: modelData.clr
+                            border.color: subtitleSettings.textColor === modelData.clr
+                                          ? Theme.accentNeon : Qt.rgba(1, 1, 1, 0.25)
+                            border.width: subtitleSettings.textColor === modelData.clr ? 2 : 1
+                            MouseArea {
+                                anchors.fill: parent
+                                hoverEnabled: true
+                                onClicked: subtitleSettings.textColor = modelData.clr
+                                ToolTip { text: modelData.name; visible: parent.containsMouse; delay: 300 }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // ── 배경 불투명도 ─────────────────────────────────
+            Column {
+                width: parent.width
+                spacing: 4
+                Row {
+                    width: parent.width
+                    spacing: 0
+                    Text {
+                        text: "배경 불투명도"
+                        color: Qt.rgba(1, 1, 1, 0.6)
+                        font.pixelSize: 11; font.family: Theme.fontFamily
+                        width: 140
+                        anchors.verticalCenter: parent.verticalCenter
+                    }
+                    Text {
+                        text: Math.round(subtitleSettings.bgOpacity * 100) + "%"
+                        color: Theme.accentNeon
+                        font.pixelSize: 11; font.family: Theme.fontFamily
+                        width: parent.width - 140
+                        horizontalAlignment: Text.AlignRight
+                        anchors.verticalCenter: parent.verticalCenter
+                    }
+                }
+                Slider {
+                    id: bgOpacitySlider
+                    width: parent.width
+                    from: 0.0; to: 1.0; stepSize: 0.05
+                    value: subtitleSettings.bgOpacity
+                    focusPolicy: Qt.NoFocus
+                    onMoved: subtitleSettings.bgOpacity = value
+                    background: Rectangle {
+                        height: 4; radius: 2; color: Qt.rgba(1, 1, 1, 0.12)
+                        Rectangle {
+                            width: bgOpacitySlider.visualPosition * parent.width
+                            height: parent.height; radius: 2; color: Theme.accentNeon
+                        }
+                    }
+                    handle: Rectangle {
+                        x: bgOpacitySlider.visualPosition * (bgOpacitySlider.width - width)
+                        y: (bgOpacitySlider.height - height) / 2
+                        width: 13; height: 13; radius: 7; color: "#FFF"
+                        border.color: Theme.accentNeon; border.width: 2
+                    }
+                }
+            }
+
+            // ── 폰트 선택 ─────────────────────────────────────
+            Column {
+                width: parent.width
+                spacing: 5
+                Text {
+                    text: "폰트 (SRT·SMI·VTT)"
+                    color: Qt.rgba(1, 1, 1, 0.6)
+                    font.pixelSize: 11; font.family: Theme.fontFamily
+                }
+                ComboBox {
+                    id: fontFamilyCombo
+                    width: parent.width
+                    focusPolicy: Qt.NoFocus
+                    model: [
+                        { label: "기본 (테마)",       value: "" },
+                        { label: "맑은 고딕",         value: "Malgun Gothic" },
+                        { label: "나눔고딕",          value: "NanumGothic" },
+                        { label: "나눔명조",          value: "NanumMyeongjo" },
+                        { label: "굴림",             value: "Gulim" },
+                        { label: "돋움",             value: "Dotum" },
+                        { label: "바탕",             value: "Batang" },
+                        { label: "Arial",            value: "Arial" },
+                        { label: "Times New Roman",  value: "Times New Roman" },
+                    ]
+                    textRole: "label"
+                    currentIndex: {
+                        for (var i = 0; i < model.length; i++)
+                            if (model[i].value === subtitleSettings.fontFamily) return i
+                        return 0
+                    }
+                    onActivated: subtitleSettings.fontFamily = model[currentIndex].value
+
+                    background: Rectangle {
+                        color: Qt.rgba(1, 1, 1, 0.07)
+                        radius: 5
+                        border.color: Qt.rgba(1, 1, 1, 0.15)
+                        border.width: 1
+                    }
+                    contentItem: Text {
+                        leftPadding: 8
+                        text: fontFamilyCombo.displayText
+                        color: Qt.rgba(1, 1, 1, 0.85)
+                        font.pixelSize: 12; font.family: Theme.fontFamily
+                        verticalAlignment: Text.AlignVCenter
+                    }
+                    delegate: ItemDelegate {
+                        width: fontFamilyCombo.width
+                        contentItem: Text {
+                            text: modelData.label
+                            color: Qt.rgba(1, 1, 1, 0.85)
+                            font.pixelSize: 12
+                            font.family: modelData.value !== "" ? modelData.value : Theme.fontFamily
+                            verticalAlignment: Text.AlignVCenter
+                        }
+                        background: Rectangle {
+                            color: hovered ? Qt.rgba(0, 168, 255, 0.18) : Qt.rgba(0.1, 0.1, 0.12, 1)
+                        }
+                    }
+                    popup: Popup {
+                        y: fontFamilyCombo.height
+                        width: fontFamilyCombo.width
+                        padding: 0
+                        contentItem: ListView {
+                            implicitHeight: contentHeight
+                            model: fontFamilyCombo.delegateModel
+                            clip: true
+                        }
+                        background: Rectangle {
+                            color: Qt.rgba(0.1, 0.1, 0.12, 0.97)
+                            radius: 5
+                            border.color: Qt.rgba(1, 1, 1, 0.15); border.width: 1
+                        }
+                    }
+                }
+            }
+
+            // ── 초기화 버튼 ───────────────────────────────────
+            Row {
+                width: parent.width
+                layoutDirection: Qt.RightToLeft
+                Button {
+                    flat: true; focusPolicy: Qt.NoFocus
+                    contentItem: Text {
+                        text: "초기화"
+                        color: Qt.rgba(1, 1, 1, 0.4)
+                        font.pixelSize: 11; font.family: Theme.fontFamily
+                    }
+                    background: Rectangle { color: "transparent" }
+                    onClicked: {
+                        subtitleSettings.plainFontSize = 20
+                        subtitleSettings.assFontScale  = 1.0
+                        subtitleSettings.fontFamily    = ""
+                        subtitleSettings.textColor     = "#FFFFFF"
+                        subtitleSettings.bgOpacity     = 0.72
+                    }
+                }
+            }
+
+            Item { height: 0 }
+        }
+    }
+
+    // ── OSD (즉각 피드백 텍스트) ──────────────────────────────
+    Rectangle {
+        id: osdRect
+        anchors.centerIn: parent
+        width: osdText.width + 32; height: 44
+        color: Qt.rgba(0, 0, 0, 0.65); radius: 8
+        visible: false
+        Text {
+            id: osdText
+            anchors.centerIn: parent
+            color: "#FFF"; font.pixelSize: 18
+            font.family: Theme.fontFamily
+        }
+        SequentialAnimation {
+            id: osdAnim
+            ScriptAction { script: { osdRect.opacity = 1; osdRect.visible = true } }
+            PauseAnimation { duration: 1200 }
+            NumberAnimation { target: osdRect; property: "opacity"; to: 0; duration: 400 }
+            ScriptAction { script: osdRect.visible = false }
+        }
+    }
+
+    // ── 컨트롤 숨김 타이머 ───────────────────────────────────
     Timer {
         id: controlHideTimer
-        interval: 4000
-        repeat: false
+        interval: 4000; repeat: false
         running: mediaPlayer.playbackState === MediaPlayer.PlayingState && playerRoot.showControls
         onTriggered: playerRoot.showControls = false
     }
@@ -141,22 +804,44 @@ Item {
         anchors.fill: parent
         hoverEnabled: true
         propagateComposedEvents: true
-        onPositionChanged: {
-            playerRoot.showControls = true
-            controlHideTimer.restart()
-        }
+        onPositionChanged: { playerRoot.showControls = true; controlHideTimer.restart() }
         onClicked: (mouse) => mouse.accepted = false
     }
 
-    // --- 하단 컨트롤 바 (Glassmorphism) ---
+    // ── 상단 타이틀 바 ───────────────────────────────────────
+    Rectangle {
+        id: titleBar
+        anchors.top: parent.top
+        width: parent.width; height: 56
+        visible: !playerRoot.isPip
+        opacity: (playerRoot.showControls || mediaPlayer.playbackState !== MediaPlayer.PlayingState) ? 1.0 : 0.0
+        Behavior on opacity { NumberAnimation { duration: 250 } }
+
+        gradient: Gradient {
+            GradientStop { position: 0.0; color: Qt.rgba(0, 0, 0, 0.85) }
+            GradientStop { position: 1.0; color: "transparent" }
+        }
+        Text {
+            anchors.verticalCenter: parent.verticalCenter
+            anchors.left: parent.left; anchors.leftMargin: 20
+            text: playerRoot.title
+            color: Qt.rgba(1, 1, 1, 0.85)
+            font.pixelSize: 15; font.family: Theme.fontFamily
+            elide: Text.ElideRight
+            width: parent.width - 100
+        }
+    }
+
+    // ── 하단 컨트롤 바 ───────────────────────────────────────
     Rectangle {
         id: controlBar
         anchors.bottom: parent.bottom
-        width: parent.width
-        height: 140
-        visible: playerRoot.showControls || mediaPlayer.playbackState !== MediaPlayer.PlayingState
-        opacity: visible ? 1 : 0
-        Behavior on opacity { NumberAnimation { duration: 300 } }
+        width: parent.width; height: 150
+        visible: !playerRoot.isPip
+        opacity: (playerRoot.showControls || mediaPlayer.playbackState !== MediaPlayer.PlayingState) ? 1.0 : 0.0
+        Behavior on opacity { NumberAnimation { duration: 250 } }
+        // opacity가 0일 때 클릭 이벤트 차단
+        enabled: opacity > 0.05
 
         gradient: Gradient {
             GradientStop { position: 0.0; color: "transparent" }
@@ -165,20 +850,18 @@ Item {
 
         ColumnLayout {
             anchors.fill: parent
-            anchors.margins: 20
-            anchors.bottomMargin: 16
-            spacing: 8
+            anchors.margins: 16
+            anchors.bottomMargin: 12
+            spacing: 6
 
-            // 재생바
+            // ── 재생바 ───────────────────────────────────────
             Slider {
                 id: progressSlider
                 Layout.fillWidth: true
-                from: 0
-                to: Math.max(1, mediaPlayer.duration)
+                focusPolicy: Qt.NoFocus
+                from: 0; to: Math.max(1, mediaPlayer.duration)
                 value: mediaPlayer.position
-                onPressedChanged: {
-                    playerRoot._isUserSeeking = pressed
-                }
+                onPressedChanged: playerRoot._isUserSeeking = pressed
                 onMoved: mediaPlayer.setPosition(value)
 
                 background: Rectangle {
@@ -191,7 +874,7 @@ Item {
                 handle: Rectangle {
                     x: progressSlider.visualPosition * (progressSlider.width - width)
                     y: (progressSlider.height - height) / 2
-                    width: 14; height: 14; radius: 7; color: "#FFFFFF"
+                    width: 14; height: 14; radius: 7; color: "#FFF"
                     border.color: Theme.accentNeon; border.width: 2
                     visible: progressSlider.hovered || progressSlider.pressed
                     scale: progressSlider.hovered ? 1.2 : 1.0
@@ -199,63 +882,145 @@ Item {
                 }
             }
 
+            // ── 버튼 행 ─────────────────────────────────────
             RowLayout {
-                spacing: 16
+                spacing: 10
 
                 // 재생/일시정지
                 Button {
-                    id: playPauseBtn
-                    flat: true
-                    font.pixelSize: 26
+                    id: playPauseBtn; flat: true; font.pixelSize: 24; focusPolicy: Qt.NoFocus
                     onClicked: mediaPlayer.playbackState === MediaPlayer.PlayingState
                         ? mediaPlayer.pause() : mediaPlayer.play()
                     contentItem: Text {
                         text: mediaPlayer.playbackState === MediaPlayer.PlayingState ? "⏸" : "▶"
-                        color: "#FFFFFF"; font: parent.font
-                        horizontalAlignment: Text.AlignHCenter
+                        color: "#FFF"; font: parent.font; horizontalAlignment: Text.AlignHCenter
                     }
                     background: Rectangle { color: "transparent" }
                     scale: playPauseBtn.hovered ? 1.15 : 1.0
                     Behavior on scale { NumberAnimation { duration: 100 } }
                 }
 
-                // 시간 표시
+                // 시간
                 Text {
                     text: formatTime(mediaPlayer.position) + " / " + formatTime(mediaPlayer.duration)
-                    color: Qt.rgba(255, 255, 255, 0.75)
-                    font.pixelSize: 14
-                    font.family: Theme.fontFamily
+                    color: Qt.rgba(1, 1, 1, 0.75)
+                    font.pixelSize: 13; font.family: Theme.fontFamily
                 }
 
                 // 10초 뒤로
                 Button {
-                    flat: true; font.pixelSize: 18
-                    contentItem: Text { text: "⏪"; color: "#FFFFFF"; font: parent.font }
+                    flat: true; font.pixelSize: 17; focusPolicy: Qt.NoFocus
+                    contentItem: Text { text: "⏪"; color: "#FFF"; font: parent.font }
                     background: Rectangle { color: "transparent" }
                     onClicked: mediaPlayer.setPosition(Math.max(0, mediaPlayer.position - 10000))
-                    ToolTip { text: "10초 뒤로"; visible: parent.hovered; delay: 500 }
+                    ToolTip { text: "10초 뒤로 (←)"; visible: parent.hovered; delay: 500 }
                 }
 
                 // 10초 앞으로
                 Button {
-                    flat: true; font.pixelSize: 18
-                    contentItem: Text { text: "⏩"; color: "#FFFFFF"; font: parent.font }
+                    flat: true; font.pixelSize: 17; focusPolicy: Qt.NoFocus
+                    contentItem: Text { text: "⏩"; color: "#FFF"; font: parent.font }
                     background: Rectangle { color: "transparent" }
-                    onClicked: mediaPlayer.setPosition(
-                        Math.min(mediaPlayer.duration, mediaPlayer.position + 10000)
-                    )
-                    ToolTip { text: "10초 앞으로"; visible: parent.hovered; delay: 500 }
+                    onClicked: mediaPlayer.setPosition(Math.min(mediaPlayer.duration, mediaPlayer.position + 10000))
+                    ToolTip { text: "10초 앞으로 (→)"; visible: parent.hovered; delay: 500 }
                 }
 
                 Item { Layout.fillWidth: true }
 
-                // ── 피드백 영역 ──────────────────────────────
+                // ── 자막 선택 ────────────────────────────────
+                Row {
+                    spacing: 4
+                    visible: playerRoot.subtitleTracks.length > 0
 
-                // 별점 위젯
+                    Text {
+                        text: "자막:"
+                        color: Qt.rgba(1, 1, 1, 0.65)
+                        font.pixelSize: 12; font.family: Theme.fontFamily
+                        anchors.verticalCenter: parent.verticalCenter
+                    }
+
+                    Repeater {
+                        model: playerRoot.subtitleTracks
+
+                        Button {
+                            flat: true
+                            focusPolicy: Qt.NoFocus
+                            text: modelData.label
+                            font.pixelSize: 11
+                            checked: playerRoot.activeSubtitleIdx === index
+                            contentItem: Text {
+                                text: parent.text
+                                color: parent.checked ? Theme.accentNeon : Qt.rgba(1, 1, 1, 0.6)
+                                font: parent.font
+                            }
+                            background: Rectangle {
+                                color: parent.checked ? Qt.rgba(0, 168, 255, 0.15) : "transparent"
+                                radius: 4
+                                border.color: parent.checked ? Theme.accentNeon : "transparent"
+                                border.width: 1
+                            }
+                            onClicked: {
+                                if (playerRoot.activeSubtitleIdx === index)
+                                    playerRoot.loadSubtitle(-1)
+                                else
+                                    playerRoot.loadSubtitle(index)
+                            }
+                        }
+                    }
+
+                    // 자막 끄기
+                    Button {
+                        flat: true; font.pixelSize: 11; focusPolicy: Qt.NoFocus
+                        visible: playerRoot.activeSubtitleIdx >= 0
+                        contentItem: Text {
+                            text: "OFF"
+                            color: Qt.rgba(1, 1, 1, 0.5)
+                            font: parent.font
+                        }
+                        background: Rectangle { color: "transparent" }
+                        onClicked: playerRoot.loadSubtitle(-1)
+                    }
+
+                }
+
+                // 자막 글꼴·크기 설정 (항상 표시)
+                Button {
+                    id: subtitleSettingBtn
+                    flat: true; font.pixelSize: 14; focusPolicy: Qt.NoFocus
+                    contentItem: Text {
+                        text: "가"
+                        color: subtitleSettingsPopup.visible
+                               ? Theme.accentNeon : Qt.rgba(1, 1, 1, 0.55)
+                        font: parent.font
+                        horizontalAlignment: Text.AlignHCenter
+                    }
+                    background: Rectangle {
+                        color: subtitleSettingsPopup.visible
+                               ? Qt.rgba(0, 168, 255, 0.12) : "transparent"
+                        radius: 4
+                        border.color: subtitleSettingsPopup.visible
+                                      ? Theme.accentNeon : "transparent"
+                        border.width: 1
+                    }
+                    onClicked: {
+                        if (subtitleSettingsPopup.visible) {
+                            subtitleSettingsPopup.close()
+                        } else {
+                            var pt = subtitleSettingBtn.mapToItem(playerRoot, 0, 0)
+                            subtitleSettingsPopup.x = Math.max(4,
+                                Math.min(pt.x, playerRoot.width - subtitleSettingsPopup.width - 4))
+                            subtitleSettingsPopup.y = pt.y - subtitleSettingsPopup.height - 10
+                            subtitleSettingsPopup.open()
+                        }
+                    }
+                    ToolTip { text: "자막 글꼴·크기·색상"; visible: parent.hovered; delay: 500 }
+                }
+
+                // ── 별점 ─────────────────────────────────────
                 RatingWidget {
                     id: ratingWidget
                     rating: PlayerModel.currentRating
-                    starSize: 20
+                    starSize: 18
                     Layout.alignment: Qt.AlignVCenter
                     onRatingSelected: function(r) {
                         PlayerModel.setRating(playerRoot.productCode, r)
@@ -263,73 +1028,81 @@ Item {
                     }
                 }
 
-                // 좋아요 버튼
+                // 좋아요
                 Button {
-                    id: likeBtn
-                    flat: true; font.pixelSize: 20
+                    id: likeBtn; flat: true; font.pixelSize: 18; focusPolicy: Qt.NoFocus
                     property bool active: PlayerModel.isLiked
                     contentItem: Text {
-                        text: "❤"
-                        color: likeBtn.active ? "#FF4081" : Qt.rgba(255, 255, 255, 0.5)
-                        font: parent.font
+                        text: "❤"; font: parent.font
+                        color: likeBtn.active ? "#FF4081" : Qt.rgba(1, 1, 1, 0.45)
                         Behavior on color { ColorAnimation { duration: 200 } }
                     }
-                    background: Rectangle {
-                        color: "transparent"
-                        radius: 8
-                        border.color: likeBtn.active ? Qt.rgba(255, 64, 129, 0.4) : "transparent"
-                        border.width: 1
-                    }
+                    background: Rectangle { color: "transparent" }
                     scale: likeBtn.hovered ? 1.2 : (likeBtn.active ? 1.1 : 1.0)
                     Behavior on scale { NumberAnimation { duration: 120 } }
                     onClicked: {
                         PlayerModel.setLike(playerRoot.productCode)
-                        if (PlayerModel.isLiked)
-                            window.showToast("좋아요! 취향에 반영됩니다 ❤", "success")
-                        else
-                            window.showToast("좋아요를 취소했습니다", "info")
+                        window.showToast(PlayerModel.isLiked ? "좋아요 ❤" : "좋아요 취소", PlayerModel.isLiked ? "success" : "info")
                     }
-                    ToolTip { text: "좋아요 (+취향점수)"; visible: parent.hovered; delay: 500 }
+                    ToolTip { text: "좋아요"; visible: parent.hovered; delay: 500 }
                 }
 
-                // 싫어요 버튼
+                // 싫어요
                 Button {
-                    id: dislikeBtn
-                    flat: true; font.pixelSize: 20
+                    id: dislikeBtn; flat: true; font.pixelSize: 18; focusPolicy: Qt.NoFocus
                     property bool active: PlayerModel.isDisliked
                     contentItem: Text {
-                        text: "👎"
-                        color: dislikeBtn.active ? "#FF6B6B" : Qt.rgba(255, 255, 255, 0.5)
-                        font: parent.font
+                        text: "👎"; font: parent.font
+                        color: dislikeBtn.active ? "#FF6B6B" : Qt.rgba(1, 1, 1, 0.45)
                         Behavior on color { ColorAnimation { duration: 200 } }
                     }
-                    background: Rectangle {
-                        color: "transparent"
-                        radius: 8
-                        border.color: dislikeBtn.active ? Qt.rgba(255, 107, 107, 0.4) : "transparent"
-                        border.width: 1
-                    }
+                    background: Rectangle { color: "transparent" }
                     scale: dislikeBtn.hovered ? 1.2 : (dislikeBtn.active ? 1.1 : 1.0)
                     Behavior on scale { NumberAnimation { duration: 120 } }
                     onClicked: {
                         PlayerModel.setDislike(playerRoot.productCode)
-                        if (PlayerModel.isDisliked)
-                            window.showToast("취향에서 제외됩니다", "warning")
-                        else
-                            window.showToast("싫어요를 취소했습니다", "info")
+                        window.showToast(PlayerModel.isDisliked ? "취향에서 제외됩니다" : "싫어요 취소", "warning")
                     }
-                    ToolTip { text: "싫어요 (-취향점수)"; visible: parent.hovered; delay: 500 }
+                    ToolTip { text: "싫어요"; visible: parent.hovered; delay: 500 }
                 }
 
                 // 볼륨
                 RowLayout {
-                    spacing: 8
-                    Text { text: "🔊"; color: "#FFFFFF"; font.pixelSize: 16 }
+                    spacing: 6
+                    Rectangle {
+                        width: 22; height: 22
+                        radius: 6
+                        color: volIconMa.containsMouse ? Qt.rgba(255, 255, 255, 0.10) : "transparent"
+                        border.color: volIconMa.containsMouse ? Qt.rgba(255, 255, 255, 0.18) : "transparent"
+                        border.width: 1
+
+                        Text {
+                            anchors.centerIn: parent
+                            text: audioOutput.muted ? "🔇" : "🔊"
+                            color: "#FFF"
+                            font.pixelSize: 14
+                        }
+
+                        MouseArea {
+                            id: volIconMa
+                            anchors.fill: parent
+                            hoverEnabled: true
+                            onClicked: {
+                                audioOutput.muted = !audioOutput.muted
+                                showOsd(audioOutput.muted ? "🔇  음소거" : "🔊  음소거 해제")
+                            }
+                        }
+                        ToolTip { text: audioOutput.muted ? "음소거 해제 (M)" : "음소거 (M)"; visible: volIconMa.containsMouse; delay: 500 }
+                    }
                     Slider {
                         id: volumeSlider
-                        width: 90; from: 0; to: 1.0; value: 0.8
+                        width: 80; from: 0; to: 1.0
+                        focusPolicy: Qt.NoFocus
+                        value: playerSettings.volume
+                        onValueChanged: playerSettings.volume = value
+
                         background: Rectangle {
-                            height: 4; radius: 2; color: Qt.rgba(255, 255, 255, 0.15)
+                            height: 4; radius: 2; color: Qt.rgba(1, 1, 1, 0.15)
                             Rectangle {
                                 width: volumeSlider.visualPosition * parent.width
                                 height: parent.height; radius: 2; color: Theme.accentNeon
@@ -338,57 +1111,120 @@ Item {
                         handle: Rectangle {
                             x: volumeSlider.visualPosition * (volumeSlider.width - width)
                             y: (volumeSlider.height - height) / 2
-                            width: 12; height: 12; radius: 6; color: "#FFFFFF"
+                            width: 12; height: 12; radius: 6; color: "#FFF"
                             border.color: Theme.accentNeon; border.width: 1
                         }
                     }
                 }
 
+                // PIP 토글
+                Button {
+                    flat: true; font.pixelSize: 16; focusPolicy: Qt.NoFocus
+                    contentItem: Text {
+                        text: "⧉"
+                        color: playerRoot.isPip ? Theme.accentNeon : Qt.rgba(1, 1, 1, 0.7)
+                        font: parent.font; horizontalAlignment: Text.AlignHCenter
+                    }
+                    background: Rectangle { color: "transparent" }
+                    onClicked: playerRoot.isPip = !playerRoot.isPip
+                    ToolTip { text: "PIP 모드 (P)"; visible: parent.hovered; delay: 500 }
+                }
+
+                // 전체화면 토글
+                Button {
+                    flat: true; font.pixelSize: 16; focusPolicy: Qt.NoFocus
+                    contentItem: Text {
+                        text: playerRoot.isFullscreen ? "⊡" : "⊞"
+                        color: Qt.rgba(1, 1, 1, 0.7)
+                        font: parent.font; horizontalAlignment: Text.AlignHCenter
+                    }
+                    background: Rectangle { color: "transparent" }
+                    onClicked: playerRoot._toggleFullscreen()
+                    ToolTip { text: playerRoot.isFullscreen ? "전체화면 해제 (F/Enter)" : "전체화면 (F/Enter)"; visible: parent.hovered; delay: 500 }
+                }
+
                 // 닫기
                 Button {
-                    text: "✕"
-                    flat: true; font.pixelSize: 18
+                    flat: true; font.pixelSize: 17; focusPolicy: Qt.NoFocus
                     contentItem: Text {
-                        text: "✕"; color: Qt.rgba(255, 255, 255, 0.7)
+                        text: "✕"; color: Qt.rgba(1, 1, 1, 0.7)
                         font: parent.font; horizontalAlignment: Text.AlignHCenter
                     }
                     background: Rectangle {
-                        color: parent.hovered ? Qt.rgba(255, 0, 0, 0.2) : "transparent"
-                        radius: 6
+                        color: parent.hovered ? Qt.rgba(1, 0, 0, 0.25) : "transparent"
+                        radius: 5
                         Behavior on color { ColorAnimation { duration: 150 } }
                     }
-                    onClicked: {
-                        mediaPlayer.stop()
-                        playerRoot.closeRequest()
-                    }
-                    ToolTip { text: "닫기"; visible: parent.hovered; delay: 500 }
+                    onClicked: playerRoot._closePlayer()
+                    ToolTip { text: "닫기 (Esc)"; visible: parent.hovered; delay: 500 }
                 }
             }
         }
     }
 
+    // ── 시그널 & 초기화 ──────────────────────────────────────
     signal closeRequest()
+
+    function videoLocalPathFromSource() {
+        var vidStr = playerRoot.videoSource.toString()
+        if (!vidStr)
+            return ""
+        vidStr = vidStr.replace(/^file:\/\/\//, "").replace(/^file:\/\//, "")
+        try { vidStr = decodeURIComponent(vidStr) } catch (e1) {}
+        return vidStr
+    }
+
+    function reloadSubtitleTracks() {
+        playerRoot.loadSubtitle(-1)
+        playerRoot.subtitleTracks = []
+        var vidStr = playerRoot.videoLocalPathFromSource()
+        if (!vidStr)
+            return
+        var tracksJson = PlayerModel.findSubtitleFiles(vidStr)
+        try {
+            playerRoot.subtitleTracks = JSON.parse(tracksJson)
+            var pickedKo = false
+            for (var i = 0; i < playerRoot.subtitleTracks.length; i++) {
+                if (playerRoot.subtitleTracks[i].filename.indexOf(".ko.") >= 0) {
+                    playerRoot.loadSubtitle(i)
+                    pickedKo = true
+                    break
+                }
+            }
+            if (!pickedKo && playerRoot.subtitleTracks.length > 0)
+                playerRoot.loadSubtitle(0)
+        } catch (e2) {}
+    }
 
     function formatTime(ms) {
         if (ms <= 0) return "0:00"
         var totalSec = Math.floor(ms / 1000)
-        var min = Math.floor(totalSec / 60)
-        var sec = totalSec % 60
-        return min + ":" + (sec < 10 ? "0" + sec : sec)
+        var h = Math.floor(totalSec / 3600)
+        var m = Math.floor((totalSec % 3600) / 60)
+        var s = totalSec % 60
+        var mm = m < 10 ? "0" + m : m
+        var ss = s < 10 ? "0" + s : s
+        return h > 0 ? h + ":" + mm + ":" + ss : m + ":" + ss
     }
 
-    // 시작 시 애니메이션 트리거
     Component.onCompleted: {
         bgRect.state = "visible"
-        videoContainer.state = "fullscreen"
-        mediaPlayer.play()
-        // 별점·좋아요 상태 초기화
-        ratingWidget.rating = PlayerModel.getRatingForProduct(playerRoot.productCode)
+        playerRoot.state = "normal"
+        playerRoot.forceActiveFocus()
+        // productCode는 Qt.callLater로 나중에 주입됨 → onProductCodeChanged에서 초기화
     }
 
-    // PlayerModel 신호 연결
+    // productCode가 실제로 세팅된 시점에 DB에서 별점·좋아요 로드
+    onProductCodeChanged: {
+        if (productCode) {
+            PlayerModel.startWatch(productCode, 0)
+            ratingWidget.rating = PlayerModel.getRatingForProduct(productCode)
+        }
+    }
+
     Connections {
         target: PlayerModel
         function onRatingChanged(r) { ratingWidget.rating = r }
+        function onLikeStateChanged(liked, disliked) {}
     }
 }

@@ -85,12 +85,15 @@ async def ollama_ensure_model(
     try:
         async with httpx.AsyncClient(timeout=httpx.Timeout(300.0)) as client:
             # 1개 토큰만 예측하도록 하여 메모리에만 올림 (keep_alive: -1로 명시적 유지)
+            # num_ctx를 chat 호출과 동일하게 맞춰야 같은 컨텍스트로 로드됨(불일치 시 재로드 발생)
+            import os as _os
+            _num_ctx = int((_os.environ.get("OLLAMA_NUM_CTX") or "").strip() or 0) or 2048
             await client.post(gen_url, json={
-                "model": model, 
-                "prompt": ".", 
-                "stream": False, 
+                "model": model,
+                "prompt": ".",
+                "stream": False,
                 "keep_alive": -1,
-                "options": {"num_predict": 1}
+                "options": {"num_predict": 1, "num_ctx": _num_ctx}
             })
         log(f"[Ollama] 모델 VRAM 로딩 완료.")
         return True
@@ -299,7 +302,8 @@ class MultiTierRouter:
 
             # [추가] VRAM 효율을 위해 번역 시 불필요하게 큰 문맥(Context) 제한
             if "num_ctx" not in eb:
-                eb["num_ctx"] = 2048
+                _raw_ctx = (os.environ.get("OLLAMA_NUM_CTX") or "").strip()
+                eb["num_ctx"] = int(_raw_ctx) if _raw_ctx.isdigit() else 2048
             
             kwargs["extra_body"] = eb
         elif provider == "openrouter":

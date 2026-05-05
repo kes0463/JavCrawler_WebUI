@@ -19,6 +19,7 @@ Rectangle {
     property bool hasKoSrt: false
     property bool lampHardcoded: false
     property bool lampMopa: false
+    property int favoriteScore: 0
     property bool selectionMode: false
     property bool selected: false
 
@@ -177,45 +178,73 @@ Rectangle {
                 visible: root.actorsKo !== ""
             }
 
-            Row {
-                spacing: 4
+            Item {
+                width: parent.width
+                height: 22
+                clip: true
 
-                StatusBadge {
-                    visible: root.hasJaSrt
-                    status: "transcription"
-                    label: "S"
-                }
+                Flickable {
+                    anchors.fill: parent
+                    contentWidth: badgeRow.implicitWidth
+                    contentHeight: height
+                    flickableDirection: Flickable.HorizontalFlick
+                    boundsBehavior: Flickable.StopAtBounds
 
-                StatusBadge {
-                    visible: root.hasKoSrt
-                    status: "translation"
-                    label: "B"
-                }
+                    Row {
+                        id: badgeRow
+                        spacing: 4
+                        height: parent.height
 
-                StatusBadge {
-                    visible: root.lampHardcoded
-                    status: "canonical"
-                    label: "자"
-                }
+                        StatusBadge {
+                            visible: root.hasJaSrt
+                            status: "transcription"
+                            label: "S"
+                        }
 
-                StatusBadge {
-                    visible: root.lampMopa
-                    status: "canonical"
-                    label: "모파"
-                }
+                        StatusBadge {
+                            visible: root.hasKoSrt
+                            status: "translation"
+                            label: "B"
+                        }
 
-                StatusBadge {
-                    visible: root.partCount > 1
-                    status: "queued"
-                    label: "P" + root.partCount
-                }
+                        StatusBadge {
+                            visible: root.lampHardcoded
+                            status: "canonical"
+                            label: "자"
+                        }
 
-                Text {
-                    visible: root.sceneCount > 0
-                    text: root.sceneCount + " scenes"
-                    font.pixelSize: Theme.fontCaption - 2
-                    color: Theme.textMuted
-                    anchors.verticalCenter: parent.verticalCenter
+                        StatusBadge {
+                            visible: root.lampMopa
+                            status: "canonical"
+                            label: "모파"
+                        }
+
+                        StatusBadge {
+                            visible: root.partCount > 1
+                            status: "queued"
+                            label: "P" + root.partCount
+                        }
+
+                        Text {
+                            visible: root.sceneCount > 0
+                            text: root.sceneCount + " scenes"
+                            font.pixelSize: Theme.fontCaption - 2
+                            color: Theme.textMuted
+                            height: parent.height
+                            verticalAlignment: Text.AlignVCenter
+                        }
+
+                        Text {
+                            visible: root.favoriteScore > 0
+                            text: "♥ " + root.favoriteScore
+                            font.pixelSize: 13
+                            font.bold: true
+                            font.family: Theme.fontFamily
+                            color: "#FF4081"
+                            height: parent.height
+                            verticalAlignment: Text.AlignVCenter
+                        }
+                    }
                 }
             }
         }

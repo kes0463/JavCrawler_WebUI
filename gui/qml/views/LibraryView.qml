@@ -4,6 +4,7 @@ import QtQuick.Layouts
 import ".."
 import "../components"
 import QtQuick.Dialogs
+import QtQuick.Window
 import Qt5Compat.GraphicalEffects
 
 Item {
@@ -21,6 +22,7 @@ Item {
     property bool detailVisible: false
     property bool selectMode: false
     property var selectedSkus: []
+    property bool dragSelecting: false
 
     function _isSelected(pc) {
         for (var i = 0; i < selectedSkus.length; i++) {
@@ -45,6 +47,40 @@ Item {
         if (!exists && on === true)
             out.push(pc)
         selectedSkus = out
+    }
+
+    function _applyRangeSelection(a, b, paint) {
+        if (a < 0 || b < 0)
+            return
+        var lo = Math.min(a, b)
+        var hi = Math.max(a, b)
+        var set = ({})
+        for (var i = 0; i < selectedSkus.length; i++)
+            set[selectedSkus[i]] = true
+
+        for (var j = lo; j <= hi; j++) {
+            var code = LibraryModel.works.productCodeAt(j)
+            if (!code)
+                continue
+            if (paint)
+                set[code] = true
+            else
+                delete set[code]
+        }
+        var out = []
+        for (var k in set)
+            out.push(k)
+        selectedSkus = out
+    }
+
+    function _toggleAllSelection() {
+        if (grid.count <= 0)
+            return
+        if (selectedSkus.length === grid.count) {
+            selectedSkus = []
+            return
+        }
+        selectedSkus = LibraryModel.works.allProductCodes()
     }
 
     onDetailVisibleChanged: {
@@ -192,6 +228,12 @@ Item {
         onTriggered: ignoreGridScrollDirty = false
     }
 
+    Shortcut {
+        sequences: ["Ctrl+A"]
+        enabled: root.selectMode && !manualFolderPicker.visible
+        onActivated: root._toggleAllSelection()
+    }
+
     Component.onCompleted: LibraryModel.reload()
 
     Connections {
@@ -278,10 +320,11 @@ Item {
     /// 상세 화면에서 포커스가 스크롤/버튼 등에 있어도 목록으로 복귀 (루트 Keys는 포커스가 없으면 받지 못함)
     Shortcut {
         sequences: [StandardKey.Cancel]
-        enabled: (root.detailVisible && detailLoader.item
+        enabled: ((root.detailVisible && detailLoader.item
             && !detailLoader.item.lightboxVisible
             && !detailLoader.item.folderPickerOpen
-            && !manualFolderPicker.visible) || root.selectMode
+            && !manualFolderPicker.visible) || root.selectMode)
+            && !(root.Window.window && root.Window.window.isPlayerOpen)
         onActivated: {
             if (root.selectMode) {
                 root.selectMode = false
@@ -298,6 +341,7 @@ Item {
             && !detailLoader.item.lightboxVisible
             && !detailLoader.item.folderPickerOpen
             && !manualFolderPicker.visible
+            && !(root.Window.window && root.Window.window.isPlayerOpen)
         onActivated: root.detailVisible = false
     }
 
@@ -593,7 +637,7 @@ Item {
                 SearchBar {
                     id: libSearch
                     height: root.libToolbarH
-                    placeholderText: "품번 · 제목 · 배우 · 장르 검색..."
+                    placeholderText: "품번/제목/배우 · #장르 (AND), #A|#B (OR), -#장르 (제외)"
                     width: 380
                     text: LibraryModel.searchQuery
                     onAccepted: function(q) { LibraryModel.searchQuery = q; }
@@ -601,13 +645,259 @@ Item {
                     onNavigateUp: refreshBtn.forceActiveFocus()
                     onNavigateDown: focusGridFromToolbar(false)
                     onNavigateLeft: libFilterBtn.forceActiveFocus()
-                    onNavigateRight: {
-                        sortCombo.forceActiveFocus()
-                        Qt.callLater(function () { sortCombo.popup.open() })
-                    }
+                    onNavigateRight: libGenreBtn.forceActiveFocus()
                     onHasInputFocusChanged: {
                         if (libSearch.hasInputFocus)
                             resetGridNavigation()
+                    }
+                }
+
+                Button {
+                    id: libGenreBtn
+                    focusPolicy: Qt.StrongFocus
+                    height: root.libToolbarH
+                    padding: 0
+                    flat: true
+                    text: "#장르"
+                    Accessible.role: Accessible.Button
+                    Accessible.name: "장르 선택"
+
+                    function _genreState(name) {
+                        var q = (LibraryModel.searchQuery || "")
+                        if (!q || !name)
+                            return "none"
+                        var tokens = q.split(/\s+/)
+                        var nl = name.toLowerCase()
+                        for (var i = 0; i < tokens.length; i++) {
+                            var t = tokens[i]
+                            if (!t)
+                                continue
+                            var negative = t.charAt(0) === "-"
+                            var body = negative ? t.substring(1) : t
+                            if (body.indexOf("#") < 0)
+                                continue
+                            var parts = body.split("|")
+                            for (var j = 0; j < parts.length; j++) {
+                                var p = (parts[j] || "").trim()
+                                if (p.charAt(0) === "#")
+                                    p = p.substring(1)
+                                if (p.length >= 2 && p.charAt(0) === '"' && p.charAt(p.length - 1) === '"')
+                                    p = p.substring(1, p.length - 1)
+                                if (p.toLowerCase() === nl) {
+                                    if (negative)
+                                        return "not"
+                                    return parts.length > 1 ? "or" : "and"
+                                }
+                            }
+                        }
+                        return "none"
+                    }
+
+                    background: Rectangle {
+                        radius: Theme.radiusSm
+                        color: libGenreBtn.activeFocus ? Theme.accentGlow : Theme.surfaceLight
+                        border.color: libGenreBtn.activeFocus ? Theme.accentNeon : Theme.glassBorder
+                        border.width: 1
+                    }
+                    contentItem: Text {
+                        text: libGenreBtn.text
+                        font.pixelSize: Theme.fontCaption
+                        horizontalAlignment: Text.AlignHCenter
+                        verticalAlignment: Text.AlignVCenter
+                        color: libGenreBtn.activeFocus ? Theme.accentNeon : Theme.textPrimary
+                        leftPadding: Theme.spacingSm
+                        rightPadding: Theme.spacingSm
+                    }
+                    onClicked: {
+                        genrePopup.refresh()
+                        genrePopup.open()
+                    }
+
+                    Keys.onPressed: function(event) {
+                        if (event.key === Qt.Key_Left) {
+                            libSearch.focusSearchInput()
+                            event.accepted = true
+                            return
+                        }
+                        if (event.key === Qt.Key_Right) {
+                            sortCombo.forceActiveFocus()
+                            event.accepted = true
+                            return
+                        }
+                        if (event.key === Qt.Key_Down) {
+                            genrePopup.refresh()
+                            genrePopup.open()
+                            event.accepted = true
+                            return
+                        }
+                        if (event.key === Qt.Key_Up) {
+                            refreshBtn.forceActiveFocus()
+                            event.accepted = true
+                        }
+                    }
+
+                    Popup {
+                        id: genrePopup
+                        y: parent.height + 4
+                        width: 520
+                        height: 420
+                        modal: false
+                        focus: true
+                        padding: Theme.spacingSm
+                        property var genreList: []
+                        property string filterText: ""
+                        property int searchTick: 0
+
+                        function refresh() {
+                            try {
+                                genreList = LibraryModel.availableGenres()
+                            } catch (e) {
+                                genreList = []
+                            }
+                        }
+
+                        background: Rectangle {
+                            color: Theme.bgSecondary
+                            border.color: Theme.glassBorderHover
+                            border.width: 1
+                            radius: Theme.radiusSm
+                        }
+
+                        Connections {
+                            target: LibraryModel
+                            function onSearchQueryChanged() { genrePopup.searchTick++ }
+                        }
+
+                        contentItem: ColumnLayout {
+                            anchors.fill: parent
+                            spacing: Theme.spacingSm
+
+                            Row {
+                                Layout.fillWidth: true
+                                spacing: Theme.spacingSm
+                                Text {
+                                    text: "장르 (" + (genrePopup.genreList ? genrePopup.genreList.length : 0) + ")"
+                                    color: Theme.textPrimary
+                                    font.pixelSize: Theme.fontBody
+                                    anchors.verticalCenter: parent.verticalCenter
+                                }
+                                Item { width: 8; height: 1 }
+                                TextField {
+                                    id: chipFilter
+                                    width: 220
+                                    placeholderText: "장르 필터..."
+                                    onTextChanged: genrePopup.filterText = text
+                                    background: Rectangle {
+                                        radius: Theme.radiusSm
+                                        color: Theme.surfaceLight
+                                        border.color: Theme.glassBorder
+                                        border.width: 1
+                                    }
+                                    color: Theme.textPrimary
+                                }
+                            }
+
+                            Text {
+                                Layout.fillWidth: true
+                                text: "클릭=AND · Shift+클릭=OR · Ctrl+클릭=제외 · 활성 칩 클릭=해제"
+                                color: Theme.textSecondary
+                                font.pixelSize: Theme.fontCaption
+                                wrapMode: Text.WordWrap
+                            }
+
+                            Flickable {
+                                id: chipFlick
+                                Layout.fillWidth: true
+                                Layout.fillHeight: true
+                                contentWidth: width
+                                contentHeight: chipFlow.implicitHeight + Theme.spacingSm
+                                clip: true
+                                ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
+
+                                Flow {
+                                    id: chipFlow
+                                    width: chipFlick.width
+                                    spacing: Theme.spacingXs
+
+                                    Repeater {
+                                        model: {
+                                            var src = genrePopup.genreList || []
+                                            var ft = (genrePopup.filterText || "").trim().toLowerCase()
+                                            if (!ft)
+                                                return src
+                                            var out = []
+                                            for (var i = 0; i < src.length; i++) {
+                                                var n = (src[i].name || "").toLowerCase()
+                                                if (n.indexOf(ft) >= 0)
+                                                    out.push(src[i])
+                                            }
+                                            return out
+                                        }
+
+                                        delegate: Rectangle {
+                                            id: chip
+                                            property string chipName: modelData.name
+                                            property int chipCount: modelData.count
+                                            // searchTick에 의존해 LibraryModel.searchQuery 변화 시 재계산
+                                            property string state: (genrePopup.searchTick, libGenreBtn._genreState(chipName))
+                                            radius: 12
+                                            height: 26
+                                            implicitWidth: chipLabel.implicitWidth + 20
+                                            border.width: 1
+                                            color: state === "and" ? Theme.accentGlow
+                                                 : state === "or" ? Theme.accentGlow
+                                                 : state === "not" ? Theme.surfaceLight
+                                                 : Theme.surfaceLight
+                                            border.color: state === "and" ? Theme.accentNeon
+                                                        : state === "or" ? Theme.accentNeon
+                                                        : state === "not" ? Theme.danger
+                                                        : Theme.glassBorder
+
+                                            Text {
+                                                id: chipLabel
+                                                anchors.centerIn: parent
+                                                text: (chip.state === "not" ? "− " : (chip.state === "or" ? "| " : "")) + chip.chipName + " · " + chip.chipCount
+                                                color: chip.state === "not" ? Theme.danger
+                                                     : (chip.state === "and" || chip.state === "or") ? Theme.accentNeon
+                                                     : Theme.textPrimary
+                                                font.pixelSize: Theme.fontCaption
+                                            }
+
+                                            MouseArea {
+                                                anchors.fill: parent
+                                                acceptedButtons: Qt.LeftButton | Qt.RightButton
+                                                onClicked: function(mouse) {
+                                                    if (mouse.button === Qt.RightButton) {
+                                                        if (chip.state === "not")
+                                                            LibraryModel.removeGenreToken(chip.chipName)
+                                                        else
+                                                            LibraryModel.addGenreToken(chip.chipName, "not")
+                                                        return
+                                                    }
+                                                    var mods = mouse.modifiers
+                                                    if (mods & Qt.ControlModifier) {
+                                                        if (chip.state === "not")
+                                                            LibraryModel.removeGenreToken(chip.chipName)
+                                                        else
+                                                            LibraryModel.addGenreToken(chip.chipName, "not")
+                                                        return
+                                                    }
+                                                    if (mods & Qt.ShiftModifier) {
+                                                        LibraryModel.addGenreToken(chip.chipName, "or")
+                                                        return
+                                                    }
+                                                    if (chip.state === "and" || chip.state === "or") {
+                                                        LibraryModel.removeGenreToken(chip.chipName)
+                                                    } else {
+                                                        LibraryModel.addGenreToken(chip.chipName, "and")
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
 
@@ -616,7 +906,7 @@ Item {
                     height: root.libToolbarH
                     width: 190
                     focusPolicy: Qt.StrongFocus
-                    model: ["품번순", "날짜순 (최신)", "날짜순 (오래된)", "씬 수 (많은)", "최근 갱신순", "배우순 (ㄱ~ㅎ)", "배우순 (ㅎ~ㄱ)", "자막 있음 우선", "모파 우선"]
+                    model: ["품번순", "날짜순 (최신)", "날짜순 (오래된)", "씬 수 (많은)", "최근 갱신순", "배우순 (ㄱ~ㅎ)", "배우순 (ㅎ~ㄱ)", "자막 있음 우선", "모파 우선", "좋아요 ↓", "좋아요 ↑"]
                     currentIndex: LibraryModel.sortMode
                     onCurrentIndexChanged: LibraryModel.sortMode = currentIndex
 
@@ -641,12 +931,12 @@ Item {
 
                     Keys.onPressed: function(event) {
                         var mods = event.modifiers
-                        // ← : 검색창으로 (드롭다운 열림이면 먼저 닫음)
+                        // ← : 장르 버튼으로 (드롭다운 열림이면 먼저 닫음)
                         if (event.key === Qt.Key_Left
                                 && !(mods & (Qt.ShiftModifier | Qt.ControlModifier | Qt.AltModifier))) {
                             if (sortCombo.popup.open)
                                 sortCombo.popup.close()
-                            libSearch.focusSearchInput()
+                            libGenreBtn.forceActiveFocus()
                             event.accepted = true
                             return
                         }
@@ -666,6 +956,46 @@ Item {
                             focusGridFromToolbar(false)
                             event.accepted = true
                         }
+                    }
+                }
+
+                Button {
+                    flat: true
+                    focusPolicy: Qt.NoFocus
+                    height: root.libToolbarH
+                    contentItem: Text {
+                        text: "♡ 갱신"
+                        color: Theme.textMuted
+                        font.pixelSize: 12
+                        verticalAlignment: Text.AlignVCenter
+                        horizontalAlignment: Text.AlignHCenter
+                    }
+                    background: Rectangle { color: "transparent" }
+                    onClicked: HarvestModel.recrawlFavoritesAll()
+                    ToolTip {
+                        text: "전체 좋아요 점수 재수집. 직전에 좋아요 크롤에 실패한 품번은 쿨다운(기본 24h) 동안 제외됩니다. 강제는 작품 선택 후 ♡ 좋아요만."
+                        visible: parent.hovered
+                        delay: 500
+                    }
+                }
+
+                Button {
+                    flat: true
+                    focusPolicy: Qt.NoFocus
+                    height: root.libToolbarH
+                    contentItem: Text {
+                        text: "♡ 미수집"
+                        color: Theme.textMuted
+                        font.pixelSize: 12
+                        verticalAlignment: Text.AlignVCenter
+                        horizontalAlignment: Text.AlignHCenter
+                    }
+                    background: Rectangle { color: "transparent" }
+                    onClicked: HarvestModel.recrawlFavoritesMissing()
+                    ToolTip {
+                        text: "아직 좋아요 출처(favorite_sources)가 없는 작품만. 직전 실패 품번은 쿨다운(기본 24h) 동안 제외. 환경변수 JAVSTORY_FAV_CRAWL_FAIL_COOLDOWN_HOURS 로 조절(0=비활성)."
+                        visible: parent.hovered
+                        delay: 500
                     }
                 }
             }
@@ -811,6 +1141,7 @@ Item {
                             hasKoSrt: model.hasKoSrt
                             lampHardcoded: model.lampHardcoded
                             lampMopa: model.lampMopa
+                            favoriteScore: model.favoriteScore !== undefined ? model.favoriteScore : 0
                             selectionMode: root.selectMode
                             selected: root._isSelected(model.productCode)
 
@@ -838,6 +1169,120 @@ Item {
                                     root._toggleSelected(sku, true)
                                 }
                             }
+                        }
+                    }
+
+                    // 선택 모드: 드래그로 연속 선택(페인트) + 가장자리 자동 스크롤
+                    MouseArea {
+                        id: dragSelectArea
+                        anchors.fill: grid
+                        enabled: root.selectMode && !root.detailVisible && !manualFolderPicker.visible
+                        hoverEnabled: false
+                        preventStealing: true
+                        propagateComposedEvents: false
+                        z: 50
+
+                        property int anchorIdx: -1
+                        property int lastIdx: -1
+                        property bool dragModePaint: true
+                        property bool dragged: false
+                        property bool prevInteractive: true
+
+                        function _idxAt(mx, my) {
+                            var pt = dragSelectArea.mapToItem(grid.contentItem, mx, my)
+                            return grid.indexAt(pt.x, pt.y)
+                        }
+
+                        function recomputeIdxFromMouse() {
+                            if (!dragSelectArea.pressed)
+                                return
+                            var cur = _idxAt(mouseX, mouseY)
+                            if (cur < 0 || cur === lastIdx)
+                                return
+                            dragged = true
+                            root._applyRangeSelection(anchorIdx, cur, dragModePaint)
+                            lastIdx = cur
+                        }
+
+                        Timer {
+                            id: autoScrollTimer
+                            interval: 16
+                            repeat: true
+                            property real speedY: 0
+                            onTriggered: {
+                                if (Math.abs(speedY) < 0.5)
+                                    return
+                                var minY = 0
+                                var maxY = Math.max(0, grid.contentHeight - grid.height)
+                                var ny = Math.max(minY, Math.min(maxY, grid.contentY + speedY))
+                                grid.contentY = ny
+                                dragSelectArea.recomputeIdxFromMouse()
+                            }
+                        }
+
+                        function _updateAutoScrollSpeed() {
+                            var edge = 32
+                            var maxSpeed = 22
+                            var y = mouseY
+                            var sp = 0
+                            if (y < edge) {
+                                var dy = (edge - y)
+                                sp = -maxSpeed * (dy / edge)
+                            } else if (y > (height - edge)) {
+                                var dy2 = (y - (height - edge))
+                                sp = +maxSpeed * (dy2 / edge)
+                            }
+                            autoScrollTimer.speedY = sp
+                        }
+
+                        onPressed: function(mouse) {
+                            if (grid.count <= 0)
+                                return
+                            root.dragSelecting = true
+                            dragged = false
+                            anchorIdx = _idxAt(mouse.x, mouse.y)
+                            lastIdx = anchorIdx
+                            if (anchorIdx >= 0) {
+                                var pc = LibraryModel.works.productCodeAt(anchorIdx)
+                                dragModePaint = !root._isSelected(pc)
+                            }
+                            prevInteractive = grid.interactive
+                            grid.interactive = false
+                            _updateAutoScrollSpeed()
+                            autoScrollTimer.start()
+                        }
+
+                        onPositionChanged: function(mouse) {
+                            if (!pressed)
+                                return
+                            recomputeIdxFromMouse()
+                            _updateAutoScrollSpeed()
+                        }
+
+                        onReleased: function(mouse) {
+                            autoScrollTimer.stop()
+                            autoScrollTimer.speedY = 0
+                            grid.interactive = prevInteractive
+                            root.dragSelecting = false
+
+                            // 드래그가 아니면 탭 토글
+                            if (!dragged && anchorIdx >= 0) {
+                                var pc = LibraryModel.works.productCodeAt(anchorIdx)
+                                if (pc) {
+                                    root._toggleSelected(pc, !root._isSelected(pc))
+                                }
+                            }
+                            anchorIdx = -1
+                            lastIdx = -1
+                        }
+
+                        onCanceled: {
+                            autoScrollTimer.stop()
+                            autoScrollTimer.speedY = 0
+                            grid.interactive = prevInteractive
+                            root.dragSelecting = false
+                            anchorIdx = -1
+                            lastIdx = -1
                         }
                     }
 
@@ -903,6 +1348,7 @@ Item {
                 radius: 36
                 border.width: 2
                 border.color: Theme.accentNeon
+                clip: true
                 
                 RowLayout {
                     anchors.fill: parent
@@ -913,7 +1359,7 @@ Item {
                     Column {
                         Layout.alignment: Qt.AlignVCenter
                         Text {
-                            text: root.selectedSkus.length + "개 선택됨"
+                            text: root.selectedSkus.length + "개 선택됨 / 총 " + grid.count + "개"
                             font.pixelSize: Theme.fontSubtitle
                             font.weight: Font.Bold
                             color: Theme.textPrimary
@@ -925,74 +1371,119 @@ Item {
                         }
                     }
 
-                    Item { Layout.fillWidth: true }
+                    Flickable {
+                        id: selectionActions
+                        Layout.fillWidth: true
+                        Layout.alignment: Qt.AlignVCenter
+                        // RowLayout에서 Flickable 높이가 0으로 계산되는 케이스 방지
+                        Layout.preferredHeight: parent.height
+                        height: parent.height
+                        clip: true
+                        interactive: true
+                        boundsBehavior: Theme.boundsBehavior
+                        flickDeceleration: Theme.flickDeceleration
+                        maximumFlickVelocity: Theme.maxVelocity
+                        contentWidth: actionsRow.implicitWidth
+                        contentHeight: height
 
-                    ActionButton {
-                        text: "몽타주 생성"
-                        primary: true
-                        neonGlow: true
-                        enabled: root.selectedSkus.length >= 2
-                        onClicked: {
-                            MontageQueue.enqueue(root.selectedSkus)
-                            root.selectMode = false
-                            root.selectedSkus = []
+                        ScrollBar.horizontal: ScrollBar {
+                            policy: ScrollBar.AsNeeded
+                            interactive: true
                         }
-                    }
 
-                    ActionButton {
-                        text: "모자이크 제거"
-                        primary: true
-                        neonGlow: true
-                        enabled: root.selectedSkus.length >= 1
-                        onClicked: {
-                            LibraryModel.enqueueMosaicRemoval(root.selectedSkus)
-                            root.selectMode = false
-                            root.selectedSkus = []
-                        }
-                    }
+                        Row {
+                            id: actionsRow
+                            height: parent.height
+                            width: implicitWidth
+                            spacing: 12
 
-                    ActionButton {
-                        text: "재크롤링"
-                        primary: false
-                        neonGlow: true
-                        enabled: root.selectedSkus.length >= 1
-                        onClicked: {
-                            HarvestModel.recrawlProducts(root.selectedSkus, true)
-                            root.selectMode = false
-                            root.selectedSkus = []
-                        }
-                    }
+                            ActionButton {
+                                text: (root.selectedSkus.length === grid.count && grid.count > 0) ? "전체 해제" : "전체 선택"
+                                primary: false
+                                neonGlow: true
+                                enabled: grid.count > 0
+                                onClicked: root._toggleAllSelection()
+                            }
 
-                    ActionButton {
-                        text: "스토리 컨텍스트(Grok4.1)"
-                        primary: false
-                        neonGlow: true
-                        enabled: root.selectedSkus.length >= 1
-                        onClicked: {
-                            LibraryModel.createStoryContextCacheForProducts(root.selectedSkus, false)
-                            root.selectMode = false
-                            root.selectedSkus = []
-                        }
-                    }
+                            ActionButton {
+                                text: "몽타주 생성"
+                                primary: true
+                                neonGlow: true
+                                enabled: root.selectedSkus.length >= 2
+                                onClicked: {
+                                    MontageQueue.enqueue(root.selectedSkus)
+                                    root.selectMode = false
+                                    root.selectedSkus = []
+                                }
+                            }
 
-                    ActionButton {
-                        text: "임베딩 생성"
-                        primary: false
-                        neonGlow: true
-                        enabled: root.selectedSkus.length >= 1
-                        onClicked: {
-                            LibraryModel.createEmbeddingsForProducts(root.selectedSkus, false)
-                            root.selectMode = false
-                            root.selectedSkus = []
-                        }
-                    }
+                            ActionButton {
+                                text: "모자이크 제거"
+                                primary: true
+                                neonGlow: true
+                                enabled: root.selectedSkus.length >= 1
+                                onClicked: {
+                                    LibraryModel.enqueueMosaicRemoval(root.selectedSkus)
+                                    root.selectMode = false
+                                    root.selectedSkus = []
+                                }
+                            }
 
-                    ActionButton {
-                        text: "취소"
-                        primary: false
-                        onClicked: {
-                            root.selectMode = false
-                            root.selectedSkus = []
+                            ActionButton {
+                                text: "재크롤링"
+                                primary: false
+                                neonGlow: true
+                                enabled: root.selectedSkus.length >= 1
+                                onClicked: {
+                                    HarvestModel.recrawlProducts(root.selectedSkus, true)
+                                    root.selectMode = false
+                                    root.selectedSkus = []
+                                }
+                            }
+
+                            ActionButton {
+                                text: "♡ 좋아요만"
+                                primary: false
+                                enabled: root.selectedSkus.length >= 1
+                                onClicked: {
+                                    HarvestModel.recrawlFavoritesOnly(root.selectedSkus)
+                                    root.selectMode = false
+                                    root.selectedSkus = []
+                                }
+                            }
+
+                            ActionButton {
+                                text: "스토리 컨텍스트(Grok4.1)"
+                                primary: false
+                                neonGlow: true
+                                enabled: root.selectedSkus.length >= 1
+                                onClicked: {
+                                    LibraryModel.createStoryContextCacheForProducts(root.selectedSkus, false)
+                                    root.selectMode = false
+                                    root.selectedSkus = []
+                                }
+                            }
+
+                            ActionButton {
+                                text: "임베딩 생성"
+                                primary: false
+                                neonGlow: true
+                                enabled: root.selectedSkus.length >= 1
+                                onClicked: {
+                                    LibraryModel.createEmbeddingsForProducts(root.selectedSkus, false)
+                                    root.selectMode = false
+                                    root.selectedSkus = []
+                                }
+                            }
+
+                            ActionButton {
+                                text: "취소"
+                                primary: false
+                                onClicked: {
+                                    root.selectMode = false
+                                    root.selectedSkus = []
+                                }
+                            }
                         }
                     }
                 }

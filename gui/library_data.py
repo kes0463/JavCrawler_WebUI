@@ -44,6 +44,7 @@ class LibraryWorkSummary:
     cover_needs_download_flag: bool
     updated_at_iso: str
     folder_path: str | None
+    favorite_score: int = 0
 
 
 def _read_json(path: Path) -> dict[str, Any]:
@@ -570,6 +571,7 @@ def _row_to_summary_impl(row: Any, fast: bool = False) -> LibraryWorkSummary:
         cover_needs_download_flag=need_dl,
         updated_at_iso=_row_updated_at_iso(row),
         folder_path=folder_path,
+        favorite_score=int(getattr(row, "favorite_score", 0) or 0),
     )
 
 

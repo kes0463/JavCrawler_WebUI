@@ -807,7 +807,7 @@ Item {
                         spacing: Theme.spacingSm
                         width: parent.width
                         Text {
-                            text: "제외할 장르"
+                            text: "제외할 장르 태그"
                             font.pixelSize: Theme.fontBody
                             color: Theme.textSecondary
                             width: 160
@@ -836,7 +836,7 @@ Item {
                     }
 
                     Text {
-                        text: "유사도 분석 시 '공통 장르' 항목에서 무시할 키워드들입니다."
+                        text: "유사도 분석 및 인사이트 선호 장르 TOP 8에서 제외할 태그입니다. (예: 단독작품, 독점, 검열 완료)"
                         font.pixelSize: Theme.fontCaption
                         color: Theme.textMuted
                         leftPadding: 168

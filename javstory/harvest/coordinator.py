@@ -140,6 +140,8 @@ async def run_crawler_for_video_path(
     raw_title, raw_synopsis, raw_maker = "", "", ""
     raw_actors, raw_genres = [], []
     db_cover_url, db_release_date = "", ""
+    db_favorite_score = 0
+    db_favorite_sources = None
     original_title = ""
     trans_res = {}
     did_translate = False
@@ -175,6 +177,8 @@ async def run_crawler_for_video_path(
                         db_cover_url = row.cover_image_url
                         db_release_date = row.release_date or ""
                         original_title = row.original_title or raw_title
+                        db_favorite_score = int(getattr(row, "favorite_score", 0) or 0)
+                        db_favorite_sources = getattr(row, "favorite_sources", None)
                         log_ts(f"✅ {code} 원본 메타데이터가 완벽하여 웹 수집(크롤링)을 생략합니다.")
                     
                     # 2. 번역(KO) 데이터 확인
@@ -249,6 +253,14 @@ async def run_crawler_for_video_path(
             db_cover_url = res.get("cover_url", "")
             db_release_date = res.get("release_date", "")
             original_title = res.get("original_title") or raw_title
+            db_favorite_score = int(res.get("favorite_score") or 0)
+            _fav_parts = {
+                k.removeprefix("_fav_src_"): v
+                for k, v in res.items() if k.startswith("_fav_src_")
+            }
+            db_favorite_sources = ",".join(
+                f"{site}:{score}" for site, score in _fav_parts.items() if score
+            ) or None
 
         # 2. 배우/장르/제작사 해결 (Mapping)
         resolved_actors = resolver.resolve_names(raw_actors) # JA, KO, Romaji
@@ -355,6 +367,8 @@ async def run_crawler_for_video_path(
                     genres=genres_ko,
                     maker=maker_ko,
                     folder_path=stored_folder_path if stored_folder_path else None,
+                    favorite_score=db_favorite_score,
+                    favorite_sources=db_favorite_sources,
                 )
 
                 # 폴더/영상 경로가 확정되는 시점에 1회 마커 감지 후 DB 저장

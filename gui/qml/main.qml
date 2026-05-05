@@ -176,12 +176,19 @@ ApplicationWindow {
         LibraryModel.loadDetail(productCode)
     }
 
+    function navigateToLibrarySearch(query) {
+        LibraryModel.searchQuery = query
+        sidebar.currentIndex = 4
+        viewStack.currentIndex = 4
+    }
+
     // ── 전역 플레이어 제어 ───────────────────────────
     function playVideo(sku, videoPath, title, startRect) {
         if (!videoPath) {
             showToast("재생 가능한 영상 파일을 찾을 수 없습니다.", "error")
             return
         }
+        var resumePos = PlayerModel.getLastPosition(sku)
         playerLoader.active = true
         // Loader가 로드되는 시간을 기다렸다가 속성 설정
         Qt.callLater(function() {
@@ -190,6 +197,9 @@ ApplicationWindow {
                 playerLoader.item.videoSource = Theme.pathToUrl(videoPath)
                 playerLoader.item.title = title
                 playerLoader.item.startRect = startRect
+                playerLoader.item.resumePosition = resumePos
+                // 속성 주입 후 포커스 재확보 (mediaPlayer 로드가 포커스를 빼앗을 수 있음)
+                playerLoader.item.forceActiveFocus()
             }
         })
     }
@@ -200,12 +210,42 @@ ApplicationWindow {
         active: false
         z: 200
         source: "views/PlayerView.qml"
+        onActiveChanged: PlayerModel.setPlayerOpen(active)
         onLoaded: {
             if (item) {
+                item.forceActiveFocus()
                 item.closeRequest.connect(function() {
                     playerLoader.active = false
                 })
             }
+        }
+    }
+
+    /// 전체창 플레이어 오버레이 열림 — 라이브러리 등 다른 Escape/Backspace 단축키와 충돌 방지
+    readonly property bool isPlayerOpen: playerLoader.active
+
+    // 플레이어가 열려 있을 때 슬라이더 등 자식 포커스와 무관하게 종료
+    // _closePlayer() 신호 체인을 거치지 않고 Loader를 직접 비활성화해 확실히 닫음
+    Shortcut {
+        sequence: "Escape"
+        context: Qt.ApplicationShortcut
+        enabled: playerLoader.active
+        onActivated: {
+            if (window.visibility === Window.FullScreen)
+                window.visibility = Window.Windowed
+            else
+                playerLoader.active = false
+        }
+    }
+    Shortcut {
+        sequence: "Backspace"
+        context: Qt.ApplicationShortcut
+        enabled: playerLoader.active
+        onActivated: {
+            if (window.visibility === Window.FullScreen)
+                window.visibility = Window.Windowed
+            else
+                playerLoader.active = false
         }
     }
 
@@ -293,6 +333,15 @@ ApplicationWindow {
         function onCurrentIndexChanged() {
             if (viewStack.currentIndex === 4 && libraryLoader.item)
                 libraryLoader.item.forceLibraryFocus()
+        }
+    }
+
+    Connections {
+        target: PlayerModel
+        function onClosePlayerRequested() {
+            if (window.visibility === Window.FullScreen)
+                window.visibility = Window.Windowed
+            playerLoader.active = false
         }
     }
 

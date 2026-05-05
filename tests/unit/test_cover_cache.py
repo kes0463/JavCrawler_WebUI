@@ -29,6 +29,21 @@ def test_resolve_cover_finds_media_files(tmp_path: Path, monkeypatch: pytest.Mon
     assert r == cover.resolve()
 
 
+def test_resolve_cover_finds_works_folder(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """data/works/{품번}/cover.jpg — E_MEDIA_ROOT."""
+    from javstory.config import app_config
+
+    root_works = tmp_path / "worksroot"
+    w = root_works / "XYZ-100"
+    w.mkdir(parents=True)
+    cover = w / "cover.jpg"
+    cover.write_bytes(b"jpeg")
+    monkeypatch.setattr(app_config, "E_MEDIA_ROOT", root_works)
+    monkeypatch.setattr(app_config, "MEDIA_ROOT", tmp_path / "empty_media")
+    r = resolve_cover_path("XYZ-100", None)
+    assert r == cover.resolve()
+
+
 def test_cover_needs_download(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from javstory.config import app_config
 

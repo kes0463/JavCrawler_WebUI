@@ -340,12 +340,27 @@ def _start_end_ok(seg: SimpleSegment, item: dict[str, Any]) -> bool:
     return ok
 
 
+# 한글 호환 자모 + 음절(가-힣): 동일 문자 4회 이상 연속 → 1회 + … (신음·의성 과다 반복 완화)
+_RE_KO_SAME_CHAR_RUN = re.compile(r"([\u3131-\u318E\uAC00-\uD7A3])\1{3,}")
+
+
+def collapse_repeated_vocal_sounds(text: str) -> str:
+    """같은 한글 음절/자모가 한 줄에 과도 반복될 때(아아아아…) 짧게 접는다. JAVSTORY_SUBTITLE_COLLAPSE_VOCAL_REPEAT=0 이면 비활성."""
+    if not text:
+        return text
+    v = (os.environ.get("JAVSTORY_SUBTITLE_COLLAPSE_VOCAL_REPEAT", "1") or "1").strip().lower()
+    if v in ("0", "false", "no", "off"):
+        return text
+    return _RE_KO_SAME_CHAR_RUN.sub(r"\1…", text)
+
+
 def _apply_json_chunk(
     tgt_segs: List[SimpleSegment],
     raw: str,
     *,
     log: Callable[[str], None],
     log_prefix: str = "[CORRECTION]",
+    postprocess_text: Optional[Callable[[str], str]] = None,
 ) -> bool:
     arr = parse_json_array(raw)
     if not arr:
@@ -369,7 +384,10 @@ def _apply_json_chunk(
             continue
         tx = item.get("text")
         if isinstance(tx, str) and tx.strip():
-            tgt_segs[j].text = tx.strip()
+            t = tx.strip()
+            if postprocess_text is not None:
+                t = postprocess_text(t)
+            tgt_segs[j].text = t
             applied += 1
     if applied == 0 and n > 0:
         return False

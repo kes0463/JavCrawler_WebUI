@@ -9,6 +9,13 @@ from dataclasses import asdict, dataclass, field
 from typing import Any, Dict, List, Optional
 from urllib.parse import urljoin
 
+try:
+    from curl_cffi import requests as _cffi_requests
+    _USE_CFFI = True
+except ImportError:
+    import requests as _cffi_requests  # type: ignore[no-redef]
+    _USE_CFFI = False
+
 import requests
 from bs4 import BeautifulSoup
 
@@ -62,6 +69,7 @@ class VideoInfo:
     genres: List[str] = field(default_factory=list)
     release_date: str = ""
     maker: str = ""
+    favourite_count: int = 0
 
     def to_dict(self, *, korean_keys: bool = True) -> Dict[str, Any]:
         raw = asdict(self)
@@ -168,6 +176,47 @@ def _code_from_favourite(soup: BeautifulSoup) -> str:
     return (btn.get("data-code") or "").strip()
 
 
+def _favourite_count_from_button(soup: BeautifulSoup) -> int:
+    span = soup.select_one("button.btn-action.favourite[data-code] span")
+    if not span:
+        return 0
+    try:
+        return int(span.get_text(strip=True).replace(",", "").replace(".", "") or 0)
+    except (ValueError, TypeError):
+        return 0
+
+
+def _slug_candidates(product_id: str) -> List[str]:
+    """
+    상세 URL 경로는 품번 슬러그인데, 무수정/리크 등은 `-uncensored-leaked` 접미가 붙는다.
+    예: /ja/v/vrtm-131-uncensored-leaked (기본 vrtm-131 만으로는 404·빈 페이지)
+    """
+    raw = (product_id or "").strip().lower()
+    raw = re.sub(r"\s+", "-", raw)
+    slug = re.sub(r"-+", "-", raw.strip("-"))
+    if not slug:
+        return []
+    out: List[str] = []
+    seen: set[str] = set()
+
+    def add(x: str) -> None:
+        if x and x not in seen:
+            seen.add(x)
+            out.append(x)
+
+    add(slug)
+    for suf in ("-uncensored-leaked", "-uncensored", "-leaked", "-censored"):
+        if not slug.endswith(suf):
+            add(slug + suf)
+    return out
+
+
+def _detail_has_content(info: VideoInfo) -> bool:
+    title = str(getattr(info, "title", "") or "").strip()
+    code = str(getattr(info, "code", "") or "").strip()
+    return bool(title or code)
+
+
 def parse_video_html(
     html: str,
     *,
@@ -190,6 +239,7 @@ def parse_video_html(
         info.description = _text(desc)
 
     info.code = _code_from_favourite(soup)
+    info.favourite_count = _favourite_count_from_button(soup)
 
     for row in _iter_detail_rows(soup):
         label, value_node = _row_label_and_value_container(row)
@@ -217,14 +267,11 @@ def fetch_video_info(
     base_url: str = BASE_URL,
     path_template: str = VIDEO_PATH_TEMPLATE,
     timeout: float = 30.0,
-    session: Optional[requests.Session] = None,
+    session=None,
 ) -> VideoInfo:
     product_id = product_id.strip()
     if not product_id:
         raise ValueError("product_id is empty")
-    path = path_template.format(product_id=product_id)
-    url = base_url.rstrip("/") + path
-    sess = session or requests.Session()
     headers = {
         "User-Agent": (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -233,10 +280,42 @@ def fetch_video_info(
         ),
         "Accept-Language": "ja,en-US;q=0.9,en;q=0.8",
     }
-    r = sess.get(url, headers=headers, timeout=timeout)
-    r.raise_for_status()
-    r.encoding = r.apparent_encoding or "utf-8"
-    return parse_video_html(r.text, base_url=base_url)
+    last_exc: Optional[BaseException] = None
+    candidates = _slug_candidates(product_id)
+    if not candidates:
+        raise ValueError("product_id is empty")
+
+    for slug in candidates:
+        path = path_template.format(product_id=slug)
+        url = base_url.rstrip("/") + path
+        try:
+            if _USE_CFFI and session is None:
+                r = _cffi_requests.get(url, headers=headers, timeout=timeout, impersonate="chrome131")
+            else:
+                sess = session or requests.Session()
+                r = sess.get(url, headers=headers, timeout=timeout)
+                r.encoding = r.apparent_encoding or "utf-8"
+        except Exception as e:
+            last_exc = e
+            continue
+        if r.status_code == 404:
+            continue
+        try:
+            r.raise_for_status()
+        except Exception as e:
+            last_exc = e
+            continue
+        try:
+            info = parse_video_html(r.text, base_url=base_url)
+        except Exception as e:
+            last_exc = e
+            continue
+        if _detail_has_content(info):
+            return info
+
+    if last_exc is not None:
+        raise last_exc
+    raise RuntimeError(f"123av: 유효한 상세 페이지 없음 ({product_id!r})")
 
 
 if __name__ == "__main__":

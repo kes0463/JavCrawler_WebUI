@@ -52,6 +52,22 @@ def _title_placeholder(title: str) -> bool:
     return False
 
 
+def njavtv_detail_urls(product_code: str) -> list[str]:
+    """
+    njavtv.com 상세 URL 후보. 기본 슬러그가 404일 때 `-uncensored-leaked` 접미 경로를 쓴다.
+    (하이픈 슬러그가 표준; `_` 품번은 앞에서 `-` 로 통일됨)
+    """
+    slug = (product_code or "").strip().lower().replace("_", "-")
+    slug = re.sub(r"-+", "-", slug.strip("-"))
+    if not slug:
+        return []
+    primary = f"https://njavtv.com/ja/{slug}"
+    suf = "-uncensored-leaked"
+    if slug.endswith(suf):
+        return [primary]
+    return [primary, f"https://njavtv.com/ja/{slug}{suf}"]
+
+
 def _click_age_gate(page: Any) -> None:
     for txt in ("18歳以上", "確認", "확인", "Enter", "Yes"):
         try:
@@ -216,12 +232,15 @@ async def scrape_njavtv_playwright_async(
     from playwright.async_api import async_playwright
 
     code = product_code.strip()
-    slug = code.lower().replace("_", "-")
-    url = (entry_url or "").strip() or f"https://njavtv.com/ja/{slug}"
+    entry = (entry_url or "").strip()
+    urls_to_try = [entry] if entry else njavtv_detail_urls(code)
     if settle_seconds is None:
         settle_seconds = float(os.getenv("JAVSTORY_NJAV_SETTLE_SECONDS", "7"))
 
     data: dict[str, Any] = {"code_requested": code}
+    if not urls_to_try:
+        data["error"] = "empty product_code"
+        return data
 
     async def _click_age_gate_async(page: Any) -> None:
         for txt in ("18歳以上", "確認", "확인", "Enter", "Yes"):
@@ -377,10 +396,23 @@ async def scrape_njavtv_playwright_async(
             )
             page = await context.new_page()
             try:
-                try:
-                    await page.goto(url, wait_until="domcontentloaded", timeout=goto_timeout_ms)
-                except Exception as e:
-                    data["error"] = f"goto: {e}"
+                url = urls_to_try[0]
+                for attempt_url in urls_to_try:
+                    try:
+                        response = await page.goto(
+                            attempt_url,
+                            wait_until="domcontentloaded",
+                            timeout=goto_timeout_ms,
+                        )
+                    except Exception as e:
+                        data["error"] = f"goto: {e}"
+                        return data
+                    if response is not None and response.status == 404:
+                        continue
+                    url = attempt_url
+                    break
+                else:
+                    data["error"] = "404: njavtv page not found"
                     return data
 
                 try:
@@ -450,12 +482,15 @@ def scrape_njavtv_playwright(
     from playwright.sync_api import sync_playwright
 
     code = product_code.strip()
-    slug = code.lower().replace("_", "-")
-    url = (entry_url or "").strip() or f"https://njavtv.com/ja/{slug}"
+    entry = (entry_url or "").strip()
+    urls_to_try = [entry] if entry else njavtv_detail_urls(code)
     if settle_seconds is None:
         settle_seconds = float(os.getenv("JAVSTORY_NJAV_SETTLE_SECONDS", "7"))
 
     data: dict[str, Any] = {"code_requested": code}
+    if not urls_to_try:
+        data["error"] = "empty product_code"
+        return data
 
     browser = None
     context = None
@@ -469,10 +504,21 @@ def scrape_njavtv_playwright(
             )
             page = context.new_page()
             try:
-                try:
-                    page.goto(url, wait_until="domcontentloaded", timeout=goto_timeout_ms)
-                except Exception as e:
-                    data["error"] = f"goto: {e}"
+                url = urls_to_try[0]
+                for attempt_url in urls_to_try:
+                    try:
+                        response = page.goto(
+                            attempt_url, wait_until="domcontentloaded", timeout=goto_timeout_ms
+                        )
+                    except Exception as e:
+                        data["error"] = f"goto: {e}"
+                        return data
+                    if response is not None and response.status == 404:
+                        continue
+                    url = attempt_url
+                    break
+                else:
+                    data["error"] = "404: njavtv page not found"
                     return data
 
                 try:

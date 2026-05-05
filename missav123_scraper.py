@@ -14,6 +14,13 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 from urllib.parse import urljoin
 
+try:
+    from curl_cffi import requests as _cffi_requests
+    _USE_CFFI = True
+except ImportError:
+    import requests as _cffi_requests  # type: ignore[no-redef]
+    _USE_CFFI = False
+
 import requests
 from bs4 import BeautifulSoup
 
@@ -67,6 +74,7 @@ class MissavVideoInfo:
     genres: List[str] = field(default_factory=list)
     release_date: str = ""
     maker: str = ""
+    favourite_count: int = 0
 
     def to_text(self) -> str:
         blocks: List[str] = []
@@ -99,6 +107,72 @@ class MissavVideoInfo:
                 add_line(key, val)
 
         return "\n\n".join(blocks) + ("\n" if blocks else "")
+
+
+def _favourite_count_missav(soup: BeautifulSoup) -> int:
+    # 1차: #video-info d-tag.actions[favorites] 어트리뷰트 (현행 DOM)
+    actions = soup.select_one("#video-info d-tag.actions[favorites]")
+    if actions:
+        val = (actions.get("favorites") or "").strip()
+        if val:
+            try:
+                return int(val.replace(",", ""))
+            except (ValueError, TypeError):
+                pass
+
+    # 2차: d-tag.actions[favorites] (id 없이도 탐색)
+    for dtag in soup.select("d-tag.actions[favorites]"):
+        val = (dtag.get("favorites") or "").strip()
+        if val:
+            try:
+                return int(val.replace(",", ""))
+            except (ValueError, TypeError):
+                pass
+
+    # 3차: 구버전 DOM — 버튼 텍스트 fallback
+    for btn in soup.select("div.act button.btn, div.addtolist button, button.btn"):
+        icon = btn.select_one(".fa-heart, .fa-thumbs-up")
+        if not icon:
+            continue
+        text = btn.get_text(separator=" ", strip=True)
+        m = re.search(r"\d[\d,]*", text)
+        if m:
+            try:
+                return int(m.group(0).replace(",", ""))
+            except (ValueError, TypeError):
+                pass
+    return 0
+
+
+def _slug_candidates(product_id: str) -> List[str]:
+    """
+    상세 URL이 품번만이 아니라 `-uncensored-leaked` 등 접미를 붙는 경우가 있다.
+    (123av / missav123 동일 패턴) — `vrtm-131` 대신 `vrtm-131-uncensored-leaked` 가 실제 경로.
+    """
+    raw = (product_id or "").strip().lower()
+    raw = re.sub(r"\s+", "-", raw)
+    slug = re.sub(r"-+", "-", raw.strip("-"))
+    if not slug:
+        return []
+    out: List[str] = []
+    seen: set[str] = set()
+
+    def add(x: str) -> None:
+        if x and x not in seen:
+            seen.add(x)
+            out.append(x)
+
+    add(slug)
+    for suf in ("-uncensored-leaked", "-uncensored", "-leaked", "-censored"):
+        if not slug.endswith(suf):
+            add(slug + suf)
+    return out
+
+
+def _missav_detail_has_content(info: MissavVideoInfo) -> bool:
+    title = str(getattr(info, "title", "") or "").strip()
+    code = str(getattr(info, "code", "") or "").strip()
+    return bool(title or code)
 
 
 def parse_video_html(html: str, *, base_url: str = BASE_URL) -> MissavVideoInfo:
@@ -173,6 +247,7 @@ def parse_video_html(html: str, *, base_url: str = BASE_URL) -> MissavVideoInfo:
         if m:
             info.code = m.group(1)
 
+    info.favourite_count = _favourite_count_missav(soup)
     return info
 
 
@@ -182,13 +257,11 @@ def fetch_video_info(
     base_url: str = BASE_URL,
     path_template: str = VIDEO_PATH_TEMPLATE,
     timeout: float = 30.0,
-    session: Optional[requests.Session] = None,
+    session=None,
 ) -> MissavVideoInfo:
     product_id = (product_id or "").strip()
     if not product_id:
         raise ValueError("product_id is empty")
-    url = base_url.rstrip("/") + path_template.format(product_id=product_id)
-    sess = session or requests.Session()
     headers = {
         "User-Agent": (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -197,10 +270,41 @@ def fetch_video_info(
         ),
         "Accept-Language": "ja,en-US;q=0.9,en;q=0.8",
     }
-    r = sess.get(url, headers=headers, timeout=timeout)
-    r.raise_for_status()
-    r.encoding = r.apparent_encoding or "utf-8"
-    return parse_video_html(r.text, base_url=base_url)
+    last_exc: Optional[BaseException] = None
+    candidates = _slug_candidates(product_id)
+    if not candidates:
+        raise ValueError("product_id is empty")
+
+    for slug in candidates:
+        url = base_url.rstrip("/") + path_template.format(product_id=slug)
+        try:
+            if _USE_CFFI and session is None:
+                r = _cffi_requests.get(url, headers=headers, timeout=timeout, impersonate="chrome131")
+            else:
+                sess = session or requests.Session()
+                r = sess.get(url, headers=headers, timeout=timeout)
+                r.encoding = r.apparent_encoding or "utf-8"
+        except Exception as e:
+            last_exc = e
+            continue
+        if r.status_code == 404:
+            continue
+        try:
+            r.raise_for_status()
+        except Exception as e:
+            last_exc = e
+            continue
+        try:
+            info = parse_video_html(r.text, base_url=base_url)
+        except Exception as e:
+            last_exc = e
+            continue
+        if _missav_detail_has_content(info):
+            return info
+
+    if last_exc is not None:
+        raise last_exc
+    raise RuntimeError(f"missav123: 유효한 상세 페이지 없음 ({product_id!r})")
 
 
 if __name__ == "__main__":

@@ -9,7 +9,12 @@
       "Bash(/d/App/JAVSTORY/venv/Scripts/pip install *)",
       "Bash(/d/App/JAVSTORY/venv/Scripts/python *)",
       "Bash(npm run *)",
-      "Bash(xargs wc *)"
+      "Bash(xargs wc *)",
+      "Bash(Get-ChildItem -Path \"D:\\\\App\\\\JAVSTORY\\\\javstory\\\\harvest\" -Force)",
+      "Bash(Select-Object Name, PSIsContainer)",
+      "Bash(curl *)",
+      "Bash(nvidia-smi *)",
+      "Bash(ollama *)"
     ]
   }
 }

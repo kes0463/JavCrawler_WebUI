@@ -2,20 +2,51 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 from javstory.config import app_config
 
 
-def _media_root() -> Path:
-    """테스트에서 app_config.MEDIA_ROOT를 바꿀 수 있도록 런타임 조회."""
-    return app_config.MEDIA_ROOT
+def _cover_search_roots() -> list[Path]:
+    """
+    표지 파일 탐색 루트(중복 경로 제거).
+    - JAVSTORY_MEDIA_ROOT: 설정에서 지정한 미디어 루트
+    - E_MEDIA_ROOT: data/works (품번 폴더 직하에 cover.jpg 두는 경우)
+    - MEDIA_ROOT: 레거시 data/media/{품번}/
+    """
+    roots: list[Path] = []
+    seen: set[str] = set()
+
+    def add(p: Path | None) -> None:
+        if p is None:
+            return
+        try:
+            rp = Path(p).expanduser().resolve()
+        except Exception:
+            rp = Path(p).expanduser()
+        key = str(rp).lower()
+        if key in seen:
+            return
+        seen.add(key)
+        roots.append(rp)
+
+    env = (os.environ.get("JAVSTORY_MEDIA_ROOT") or "").strip()
+    if env:
+        add(Path(env))
+    try:
+        add(getattr(app_config, "E_MEDIA_ROOT", None))
+    except Exception:
+        pass
+    add(app_config.MEDIA_ROOT)
+    return roots
 
 
 def resolve_cover_path(product_code: str, cover_local_path: str | None = None) -> Path | None:
     """
     DB의 cover_local_path가 유효하면 우선.
-    그다음 `data/media/{품번}/` 아래 cover.jpg → poster.jpg → thumb.jpg 순.
+    그다음 각 미디어 루트 아래 `{품번}/cover.jpg` → `poster.jpg` → `thumb.jpg` 순으로 탐색.
+    (`works/{품번}/cover.jpg` 는 E_MEDIA_ROOT·JAVSTORY_MEDIA_ROOT 쪽에 해당)
     """
     pc = (product_code or "").strip().upper()
     if not pc:
@@ -24,11 +55,12 @@ def resolve_cover_path(product_code: str, cover_local_path: str | None = None) -
         p = Path(cover_local_path).expanduser()
         if p.is_file() and p.stat().st_size > 0:
             return p.resolve()
-    base = _media_root() / pc
-    for name in ("cover.jpg", "poster.jpg", "thumb.jpg"):
-        cand = base / name
-        if cand.is_file() and cand.stat().st_size > 0:
-            return cand.resolve()
+    names = ("cover.jpg", "poster.jpg", "thumb.jpg")
+    for root in _cover_search_roots():
+        for name in names:
+            cand = root / pc / name
+            if cand.is_file() and cand.stat().st_size > 0:
+                return cand.resolve()
     return None
 
 

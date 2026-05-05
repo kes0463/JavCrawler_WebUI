@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from dataclasses import replace
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Callable, Optional
 
 from javstory.library.canonical.schema import LibraryCanonical, SceneEntry
 from javstory.library.paths import work_library_dir
@@ -367,7 +367,7 @@ def probe_video_duration_seconds(video_path: Path | str) -> float:
         if os.name == 'nt':
             startupinfo = subprocess.STARTUPINFO()
             startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-        cp = subprocess.run(cmd, capture_output=True, text=True, startupinfo=startupinfo, timeout=5)
+        cp = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", startupinfo=startupinfo, timeout=5)
         v = (cp.stdout or "").strip()
         if v: return float(v)
     except:
@@ -387,8 +387,8 @@ def extract_snapshots_cuda(
     progress_callback: Optional[Callable[[int], None]] = None
 ) -> list[Path]:
     """
-    [RTX 3080Ti 전용] 고속 시크(Fast Seek)와 병렬 처리를 이용해 스냅샷을 광속으로 추출합니다.
-    사용자 제안에 따라 전체를 읽지 않고 목표 시점으로 '점프'하여 추출하므로 매우 빠르고 균등한 분할을 보장합니다.
+    ffmpeg 빠른 시크(-ss)로 JPEG 추출. 병렬 시 `-hwaccel auto`가 동시 디코드 세션 한계로
+    전부 실패하는 경우가 있어, 부족하면 순차 재시도 → 소프트 디코드(가속 없음) 순으로 폴백한다.
     """
     import subprocess
     import os
@@ -397,10 +397,11 @@ def extract_snapshots_cuda(
     vp = Path(video_path)
     out_dir = Path(output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    
+
     dur = probe_video_duration_seconds(vp)
-    if dur <= 0: return []
-    
+    if dur <= 0:
+        return []
+
     # 1. 타임스탬프 계산 (정밀 균등 분할)
     margin = dur * 0.02
     start = margin
@@ -411,48 +412,96 @@ def extract_snapshots_cuda(
     else:
         timestamps = [dur / 2]
 
-    def _extract_single_frame(idx, t):
+    qv = str(min(31, max(1, int((100 - quality) / 2))))
+
+    def _extract_single_frame(idx: int, t: float, *, use_hwaccel: bool) -> Optional[Path]:
         dest = out_dir / f"{prefix}_{idx + 1:03d}.jpg"
-        # [고도화] 일부 깨진 MP4(Invalid sample size 등) 대응을 위해 ignore_editlist, err_detect 추가
-        cmd = [
-            "ffmpeg", "-y",
-            "-hwaccel", "auto",
-            "-ignore_editlist", "1",
-            "-err_detect", "ignore_err",
-            "-ss", str(round(t, 3)),
-            "-i", str(vp),
-            "-vframes", "1",
-            "-vf", "scale=860:-2",
-            "-q:v", str(min(31, max(1, int((100 - quality) / 2)))),
-            "-f", "image2",
-            str(dest)
+        cmd = ["ffmpeg", "-y"]
+        if use_hwaccel:
+            cmd += ["-hwaccel", "auto"]
+        cmd += [
+            "-ignore_editlist",
+            "1",
+            "-err_detect",
+            "ignore_err",
+            "-ss",
+            str(round(t, 3)),
+            "-i",
+            str(vp),
+            "-vframes",
+            "1",
+            "-vf",
+            "scale=860:-2",
+            "-q:v",
+            qv,
+            "-f",
+            "image2",
+            str(dest),
         ]
         try:
             startupinfo = None
-            if os.name == 'nt':
+            if os.name == "nt":
                 startupinfo = subprocess.STARTUPINFO()
                 startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-            subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, startupinfo=startupinfo)
+            subprocess.run(
+                cmd,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                startupinfo=startupinfo,
+            )
             return dest if dest.is_file() else None
-        except:
+        except Exception:
             return None
 
-
-    # 소비자용 NVIDIA 그래픽카드는 동시 비디오 디코딩 세션 수 제한(보통 5~8개)이 있습니다.
-    # 8개를 꽉 채우면 다음 배치가 시작되기 전에 세션이 해제되지 않아 이후 추출이 실패할 수 있으므로,
-    # 안전하게 4개 병렬로 제한하여 안정성을 높입니다. (RTX 3080Ti 기준 4개로도 충분히 빠름)
-    results = []
     total = len(timestamps)
-    with ThreadPoolExecutor(max_workers=4) as executor:
-        futures = [executor.submit(_extract_single_frame, i, t) for i, t in enumerate(timestamps)]
-        for i, future in enumerate(futures):
-            res = future.result()
-            if res: results.append(res)
+    ok_need = max(1, int(round(total * 0.9)))
+    results: list[Path] = []
+
+    # 1) 병렬 (hwaccel) — NVDEC 동시 세션 제한으로 0건 나오는 경우 있음
+    def _parallel(hw: bool) -> list[Path]:
+        acc: list[Path] = []
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            futures = [
+                executor.submit(_extract_single_frame, i, t, use_hwaccel=hw)
+                for i, t in enumerate(timestamps)
+            ]
+            for i, future in enumerate(futures):
+                res = future.result()
+                if res:
+                    acc.append(res)
+                if progress_callback:
+                    progress_callback(int((i + 1) / total * 100))
+        return acc
+
+    results = _parallel(True)
+
+    # 2) 순차 hwaccel — 병렬 레이스/세션 고갈 회피
+    if len(results) < ok_need:
+        seq: list[Path] = []
+        for i, t in enumerate(timestamps):
+            r = _extract_single_frame(i, t, use_hwaccel=True)
+            if r:
+                seq.append(r)
             if progress_callback:
                 progress_callback(int((i + 1) / total * 100))
+        if len(seq) > len(results):
+            results = seq
+
+    # 3) 순차 소프트 디코드 — 일부 코덱/GPU 조합에서만 실패할 때
+    if len(results) < ok_need:
+        seq2: list[Path] = []
+        for i, t in enumerate(timestamps):
+            r = _extract_single_frame(i, t, use_hwaccel=False)
+            if r:
+                seq2.append(r)
+            if progress_callback:
+                progress_callback(int((i + 1) / total * 100))
+        if len(seq2) > len(results):
+            results = seq2
 
     if results:
-        if progress_callback: progress_callback(100)
+        if progress_callback:
+            progress_callback(100)
         return sorted(results)
     return []
 
@@ -466,22 +515,41 @@ def extract_snapshots_auto_adaptive(
     progress_callback: Optional[Callable[[int], None]] = None
 ) -> list[Path]:
     """duration 기반 개수 정책으로 스냅샷 자동 추출."""
-    print(f"[Snapshot] Processing: {video_path}")
-    dur = probe_video_duration_seconds(video_path)
-    print(f"[Snapshot] Duration detected: {dur}s")
+    import os
 
+    quiet = (os.environ.get("JAVSTORY_SNAPSHOT_QUIET", "") or "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+    if not quiet:
+        print(f"[Snapshot] Processing: {video_path}")
+    dur = probe_video_duration_seconds(video_path)
+    if not quiet:
+        print(f"[Snapshot] Duration detected: {dur}s")
 
     count = suggest_snapshot_target_count(dur)
-    
-    # [우선순위] CUDA 가속 시도
-    res = extract_snapshots_cuda(video_path, output_dir, target_count=count, prefix=prefix, quality=quality, progress_callback=progress_callback)
-    
+
+    # ffmpeg 빠른 추출(병렬·순차·소프트 디코드 내장 폴백)
+    res = extract_snapshots_cuda(
+        video_path,
+        output_dir,
+        target_count=count,
+        prefix=prefix,
+        quality=quality,
+        progress_callback=progress_callback,
+    )
+
     # 추출된 개수가 목표치의 90% 이상일 때만 성공으로 간주
     if res and len(res) >= (count * 0.9):
         return res
-        
-    print(f"[Snapshot] GPU 가속 결과 부족({len(res)}/{count}). CPU 방식으로 폴백합니다.")
-    # [Fallback] GPU 실패하거나 결과가 부족할 경우 기존 CPU(OpenCV) 방식 사용
+
+    if not quiet:
+        got = len(res) if res else 0
+        print(
+            f"[Snapshot] ffmpeg 스냅샷 부족({got}/{count}). OpenCV(CPU) 방식으로 폴백합니다."
+        )
     return extract_snapshots_auto(
         video_path,
         output_dir,

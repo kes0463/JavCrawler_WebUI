@@ -24,7 +24,7 @@ _ROOT = Path(__file__).resolve().parent.parent.parent
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-from javstory.utils.njav_playwright import scrape_njavtv_playwright_async
+from javstory.utils.njav_playwright import njavtv_detail_urls, scrape_njavtv_playwright_async
 from javstory.utils.common import log_ts
 
 # 폴백 스크레이퍼(순서: 123av -> missav123 -> avwiki -> njavtv)
@@ -356,6 +356,12 @@ def _merge_empty_only(base: dict[str, Any], extra: dict[str, Any], *, source: st
         if merged:
             base[k] = merged
 
+    # favorite_score — 항상 합산 (비어있음 여부와 무관)
+    base["favorite_score"] = int(base.get("favorite_score") or 0) + int(extra.get("favorite_score") or 0)
+    for k, v in extra.items():
+        if k.startswith("_fav_src_"):
+            base[k] = int(v or 0)
+
     # 디버그용: 최종 URL / 소스
     if _empty_str(base.get("_final_url")) and isinstance(extra.get("_final_url"), str) and extra["_final_url"].strip():
         base["_final_url"] = extra["_final_url"].strip()
@@ -389,6 +395,7 @@ def _scrape_123av(product_code: str) -> dict[str, Any]:
     except Exception:
         actresses = []
     poster = str(getattr(info, "poster_url", "") or "").strip()
+    fav = int(getattr(info, "favourite_count", 0) or 0)
     return {
         "title": str(getattr(info, "title", "") or "").strip(),
         "original_title": str(getattr(info, "title", "") or "").strip(),
@@ -398,6 +405,8 @@ def _scrape_123av(product_code: str) -> dict[str, Any]:
         "genres": _ensure_list_str(getattr(info, "genres", None)),
         "release_date": str(getattr(info, "release_date", "") or "").strip(),
         "maker": str(getattr(info, "maker", "") or "").strip(),
+        "favorite_score": fav,
+        "_fav_src_123av": fav,
         "_source": "123av",
     }
 
@@ -406,6 +415,7 @@ def _scrape_missav123(product_code: str) -> dict[str, Any]:
     if missav123_scraper is None:
         return {}
     info = missav123_scraper.fetch_video_info(product_code)
+    fav = int(getattr(info, "favourite_count", 0) or 0)
     return {
         "title": str(getattr(info, "title", "") or "").strip(),
         "original_title": str(getattr(info, "title", "") or "").strip(),
@@ -415,6 +425,8 @@ def _scrape_missav123(product_code: str) -> dict[str, Any]:
         "genres": _ensure_list_str(getattr(info, "genres", None)),
         "release_date": str(getattr(info, "release_date", "") or "").strip(),
         "maker": str(getattr(info, "maker", "") or "").strip(),
+        "favorite_score": fav,
+        "_fav_src_missav123": fav,
         "_source": "missav123",
     }
 
@@ -642,30 +654,34 @@ class HybridJavCrawler:
 
         if _needs_fallback(out):
             log_ts(f"[Hybrid] 4순위(njavtv): DrissionPage(Headless) 정밀 수집 시도: {code}")
-            raw2 = await asyncio.to_thread(
-                self.get_local_page_data,
-                f"https://njavtv.com/ja/{code.lower()}",
-                code,
-                False,
-            )
-            if _raw_has_any_content(raw2):
-                nj2 = _scrape_dict_for_db(raw2, code)
-                nj2["_final_url"] = raw2.get("_final_url") or raw2.get("final_url")
-                out = _merge_empty_only(out, nj2, source="njavtv_dp")
+            for nj_url in njavtv_detail_urls(code):
+                raw2 = await asyncio.to_thread(
+                    self.get_local_page_data,
+                    nj_url,
+                    code,
+                    False,
+                )
+                if _raw_has_any_content(raw2):
+                    nj2 = _scrape_dict_for_db(raw2, code)
+                    nj2["_final_url"] = raw2.get("_final_url") or raw2.get("final_url")
+                    out = _merge_empty_only(out, nj2, source="njavtv_dp")
+                    break
 
         if _needs_fallback(out):
             log_ts(f"[Hybrid] 4순위(njavtv): 최종 재시도(Headless) : {code}")
             await asyncio.sleep(4)
-            raw3 = await asyncio.to_thread(
-                self.get_local_page_data,
-                f"https://njavtv.com/ja/{code.lower()}",
-                code,
-                False,
-            )
-            if _raw_has_any_content(raw3):
-                nj3 = _scrape_dict_for_db(raw3, code)
-                nj3["_final_url"] = raw3.get("_final_url") or raw3.get("final_url")
-                out = _merge_empty_only(out, nj3, source="njavtv_dp_retry")
+            for nj_url in njavtv_detail_urls(code):
+                raw3 = await asyncio.to_thread(
+                    self.get_local_page_data,
+                    nj_url,
+                    code,
+                    False,
+                )
+                if _raw_has_any_content(raw3):
+                    nj3 = _scrape_dict_for_db(raw3, code)
+                    nj3["_final_url"] = raw3.get("_final_url") or raw3.get("final_url")
+                    out = _merge_empty_only(out, nj3, source="njavtv_dp_retry")
+                    break
 
         # 최소 결과 검증: title/synopsis/cover_url 중 하나라도 있어야 성공으로 취급
         if not _raw_has_any_content(out):

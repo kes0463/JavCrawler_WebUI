@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections import deque
 import os
 import re
+import threading
 import time
 from pathlib import Path
 
@@ -81,6 +82,7 @@ class HarvestModel(QObject):
     logMessage = Signal(str)
     toastMessage = Signal(str, str)  # message, level
     _plan_done = Signal(str, list, list)  # action, entries, warns
+    _fav_codes_ready = Signal(list, str)  # product_codes, 배치 요약 제목(Harvest 탭 태스크)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -101,6 +103,50 @@ class HarvestModel(QObject):
         self._plan_pool = QThreadPool(self)
         self._plan_pool.setMaxThreadCount(1)
         self._plan_done.connect(self._on_plan_done)
+        self._fav_codes_ready.connect(self._on_fav_codes_ready)
+
+        # FavoritesOnly(좋아요만) 대량 실행 시 UI 업데이트를 배치 처리해 렌더링 랙 방지
+        self._fav_pending_updates: dict[str, tuple[str, int, str]] = {}
+        self._fav_pending_order: deque[str] = deque()
+        self._fav_flush_timer = QTimer(self)
+        self._fav_flush_timer.setSingleShot(True)
+        self._fav_flush_timer.setInterval(120)
+        self._fav_flush_timer.timeout.connect(self._flush_fav_updates)
+        self._fav_last_toast_ms = 0.0
+
+    def _queue_fav_update(self, sku: str, status: str, prog: int, msg: str) -> None:
+        s = (sku or "").strip().upper()
+        if not s:
+            return
+        is_new = s not in self._fav_pending_updates
+        self._fav_pending_updates[s] = (str(status or ""), int(prog or 0), str(msg or ""))
+        if is_new:
+            self._fav_pending_order.append(s)
+        if not self._fav_flush_timer.isActive():
+            self._fav_flush_timer.start()
+
+    def _flush_fav_updates(self) -> None:
+        if not self._fav_pending_updates:
+            return
+        # 한 번에 너무 많이 upsert하면 UI가 멈출 수 있어 tick당 처리량을 제한한다.
+        max_per_tick = 80
+        n = 0
+        while self._fav_pending_order and n < max_per_tick:
+            sku = self._fav_pending_order.popleft()
+            payload = self._fav_pending_updates.pop(sku, None)
+            if payload is None:
+                continue
+            status, prog, msg = payload
+            self._tasks.upsert(sku, status, prog, msg)
+            n += 1
+
+        # 신호는 묶어서 1회만
+        self.taskCountChanged.emit()
+        self.finishedCountChanged.emit()
+
+        # 남은 항목이 있으면 다음 tick 예약
+        if self._fav_pending_updates:
+            self._fav_flush_timer.start()
 
     @Property(QObject, constant=True)
     def tasks(self):
@@ -333,6 +379,167 @@ class HarvestModel(QObject):
             self._tasks.remove(sku)
         self.finishedCountChanged.emit()
         self.toastMessage.emit(f"{len(finished)}건 완료 항목 제거", "info")
+
+    def _on_fav_codes_ready(self, codes: list, batch_key: str) -> None:
+        """백그라운드 DB 조회 후 UI 스레드에서 좋아요 전용 워커를 연다."""
+        pcs = [str(c).strip() for c in (codes or []) if str(c).strip()]
+        if not pcs:
+            self.toastMessage.emit("[♡ 좋아요] 대상 품번이 없습니다.", "warning")
+            return
+        self._run_favorites_only_worker(pcs, batch_key)
+
+    def _run_favorites_only_worker(self, pcs: list[str], batch_key: str) -> None:
+        """좋아요 점수만 재수집 (번역/Grok/스냅샷 없음). `batch_key`: Harvest 탭 요약 행 제목."""
+        from gui.workers.favorites_only_worker import FavoritesOnlyWorker
+        w = FavoritesOnlyWorker(pcs, parent=self)
+        # 대량 실행 시 모든 품번을 즉시 tasks에 올리면 UI가 멈출 수 있어,
+        # 1) 요약 태스크 1개만 먼저 올리고
+        # 2) 개별 품번 태스크는 실제 처리 시작(running) 시점부터 순차적으로 추가한다.
+        self._queue_fav_update(batch_key, "running", 0, "시작 중…")
+
+        def _on_item(sku: str, status: str, prog: int, msg: str) -> None:
+            self._queue_fav_update(sku, status, prog, msg)
+
+        def _on_progress(cur: int, tot: int) -> None:
+            # 요약 태스크 진행률 갱신 (0~100)
+            try:
+                pct = int((float(cur) / float(tot)) * 100.0) if tot else 0
+            except Exception:
+                pct = 0
+            self._queue_fav_update(batch_key, "running", pct, f"{cur}/{tot} 진행 중…")
+            # 토스트 스팸 방지: 1초에 1번 정도만
+            try:
+                now = time.time()
+            except Exception:
+                now = 0.0
+            if (now - float(getattr(self, "_fav_last_toast_ms", 0.0))) >= 1.0:
+                self._fav_last_toast_ms = now
+                self.toastMessage.emit(f"[♡ 좋아요] {cur}/{tot}…", "info")
+        w.progress.connect(_on_progress)
+        # updated/zero/failed: 0점수는 실패와 분리해 사용자에게 구분해 보여준다.
+        w.finished.connect(lambda upd, zero, fail:
+            self.toastMessage.emit(
+                f"[♡ 좋아요] 완료: 갱신 {upd}건 / 0점수 {zero}건 / 실패 {fail}건"
+                + (f" (자세한 로그를 확인하세요)" if fail > 0 else ""),
+                "success" if fail == 0 else "warning"
+            ))
+        w.logMessage.connect(self.logMessage)
+        w.itemUpdate.connect(_on_item)
+
+        # removeTask에서 중단할 수 있도록 워커 등록
+        key = f"favonly:{int(time.time() * 1000)}"
+        self._workers[key] = w
+        self._active_refs.append(w)
+        w.finished.connect(lambda upd, zero, fail: self._queue_fav_update(
+            batch_key,
+            "done" if fail == 0 else "error",
+            100,
+            f"완료: 갱신 {upd} / 0점수 {zero} / 실패 {fail}",
+        ))
+        w.finished.connect(lambda *_: self._on_thread_done(w))
+        w.start()
+
+    @Slot("QStringList")
+    def recrawlFavoritesOnly(self, product_codes) -> None:
+        """선택한 품번들의 좋아요 점수만 재수집 (번역/Grok/스냅샷 없음)."""
+        pcs = [str(p).strip() for p in (product_codes or []) if str(p).strip()]
+        if not pcs:
+            self.toastMessage.emit("품번이 없습니다.", "warning")
+            return
+        self._run_favorites_only_worker(pcs, f"♡ 좋아요 선택({len(pcs)})")
+
+    @Slot()
+    def recrawlFavoritesAll(self) -> None:
+        """전체 DB 좋아요 점수 재수집."""
+        # UI 스레드에서 전체 DB 조회를 하면 렌더링이 멈출 수 있어 백그라운드로 조회한다.
+        self.toastMessage.emit("[♡ 좋아요] 전체 목록 로드 중…", "info")
+
+        def _job():
+            try:
+                from sqlalchemy import or_
+                from javstory.harvest.database import (
+                    get_db_session,
+                    JAVMetadata,
+                    favorite_crawl_failure_cutoff,
+                    fav_crawl_cooldown_hours,
+                )
+                co = favorite_crawl_failure_cutoff()
+                with get_db_session() as session:
+                    q = session.query(JAVMetadata.product_code)
+                    if co is not None:
+                        q = q.filter(
+                            or_(
+                                JAVMetadata.favorite_crawl_failed_at.is_(None),
+                                JAVMetadata.favorite_crawl_failed_at < co,
+                            )
+                        )
+                    codes = [r[0] for r in q.all()]
+                if co is not None:
+                    self.logMessage.emit(
+                        f"[♡ 좋아요] 실패 쿨다운 {fav_crawl_cooldown_hours():g}시간 적용 — "
+                        "최근 실패 품번은 제외(강제는 작품 선택 후 ♡ 좋아요만)."
+                    )
+            except Exception as e:
+                self.toastMessage.emit(f"DB 조회 실패: {e}", "error")
+                return
+
+            # UI 스레드에서 워커 시작 (Qt signal로 queued invoke)
+            try:
+                self._fav_codes_ready.emit(codes, f"♡ 좋아요 전체({len(codes)})")
+            except Exception as e:
+                # 마지막 fallback
+                self.toastMessage.emit(f"[♡ 좋아요] 시작 실패: {e}", "error")
+
+        threading.Thread(target=_job, daemon=True).start()
+
+    @Slot()
+    def recrawlFavoritesMissing(self) -> None:
+        """
+        DB에 좋아요 출처(`favorite_sources`)가 아직 없는 작품만 좋아요 점수 수집.
+        (전체 갱신 대비 네트워크 부하 절감)
+        """
+        self.toastMessage.emit("[♡ 좋아요] 미수집 목록 조회 중…", "info")
+
+        def _job():
+            try:
+                from sqlalchemy import or_
+                from javstory.harvest.database import (
+                    get_db_session,
+                    JAVMetadata,
+                    favorite_crawl_failure_cutoff,
+                    fav_crawl_cooldown_hours,
+                )
+                co = favorite_crawl_failure_cutoff()
+                with get_db_session() as session:
+                    q = session.query(JAVMetadata.product_code).filter(
+                        or_(
+                            JAVMetadata.favorite_sources.is_(None),
+                            JAVMetadata.favorite_sources == "",
+                        )
+                    )
+                    if co is not None:
+                        q = q.filter(
+                            or_(
+                                JAVMetadata.favorite_crawl_failed_at.is_(None),
+                                JAVMetadata.favorite_crawl_failed_at < co,
+                            )
+                        )
+                    codes = [r[0] for r in q.all()]
+                if co is not None:
+                    self.logMessage.emit(
+                        f"[♡ 좋아요] 실패 쿨다운 {fav_crawl_cooldown_hours():g}시간 적용 — "
+                        "최근 실패 품번은 제외(강제는 작품 선택 후 ♡ 좋아요만)."
+                    )
+            except Exception as e:
+                self.toastMessage.emit(f"DB 조회 실패: {e}", "error")
+                return
+
+            try:
+                self._fav_codes_ready.emit(codes, f"♡ 미수집 좋아요({len(codes)})")
+            except Exception as e:
+                self.toastMessage.emit(f"[♡ 좋아요] 시작 실패: {e}", "error")
+
+        threading.Thread(target=_job, daemon=True).start()
 
     # ── 내부 ─────────────────────────────────────────
 

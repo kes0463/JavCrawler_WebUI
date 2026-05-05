@@ -117,6 +117,7 @@ class InsightModel(QObject):
 
         def _worker():
             try:
+                import os
                 from javstory.analytics.preference_engine import (
                     get_top_actors, get_top_genres, get_top_makers, compute_recent_trend
                 )
@@ -124,12 +125,19 @@ class InsightModel(QObject):
                     get_library_stats, get_today_recommendation, get_monthly_genre_trend,
                     get_library_distribution
                 )
+
+                # 설정의 "제외할 장르" 값을 공용으로 적용 (env 변수는 저장 시 반영됨)
+                _raw = os.environ.get("JAVSTORY_SIMILARITY_EXCLUDED_GENRES", "")
+                excluded_genres: set[str] = {
+                    g.strip() for g in _raw.split(",") if g.strip()
+                }
+
                 results = {
                     "actors":  json.dumps(get_top_actors(5), ensure_ascii=False),
-                    "genres":  json.dumps(get_top_genres(8), ensure_ascii=False),
+                    "genres":  json.dumps(get_top_genres(8, excluded=excluded_genres), ensure_ascii=False),
                     "makers":  json.dumps(get_top_makers(5), ensure_ascii=False),
                     "stats":   json.dumps(get_library_stats(), ensure_ascii=False),
-                    "trend":   json.dumps(compute_recent_trend(), ensure_ascii=False),
+                    "trend":   json.dumps(compute_recent_trend(excluded_genres=excluded_genres), ensure_ascii=False),
                     "recs":    json.dumps(get_today_recommendation(6), ensure_ascii=False),
                     "monthly": json.dumps(get_monthly_genre_trend(3), ensure_ascii=False),
                     "dist":    json.dumps(get_library_distribution(), ensure_ascii=False),

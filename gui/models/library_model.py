@@ -38,6 +38,107 @@ def _preview_path_for(pc: str, e_root: Path | None, legacy_root: Path | None) ->
     return ""
 
 
+# ---------------------------------------------------------------------------
+# 검색 토큰 문법 (#장르 AND, |로 OR 그룹, -#장르 NOT, "#"붙지 않은 토큰은 substring)
+# ---------------------------------------------------------------------------
+
+def _norm_token(s: str) -> str:
+    return (s or "").strip().lower()
+
+
+def _tokenize_search_expr(q: str) -> list[str]:
+    """공백 구분 토큰화. 큰따옴표로 공백 포함 인용 허용."""
+    out: list[str] = []
+    buf: list[str] = []
+    in_quote = False
+    for ch in q or "":
+        if ch == '"':
+            in_quote = not in_quote
+            continue
+        if ch.isspace() and not in_quote:
+            if buf:
+                out.append("".join(buf))
+                buf = []
+            continue
+        buf.append(ch)
+    if buf:
+        out.append("".join(buf))
+    return [t for t in out if t]
+
+
+def parse_search_expr(q: str) -> tuple[list[list[str]], set[str], list[str]]:
+    """검색 문자열을 (genre_and_groups, genre_excludes, text_terms)로 분해.
+
+    - `#xxx` → 장르 AND 토큰. `#a|#b`처럼 `|` 결합 시 OR 그룹 1개.
+    - `-#xxx` 또는 `-xxx` (장르만, '#' 권장) → 제외 집합.
+    - 그 외 토큰 → 자유 substring(소문자).
+    """
+    and_groups: list[list[str]] = []
+    excludes: set[str] = set()
+    text_terms: list[str] = []
+    for tok in _tokenize_search_expr(q):
+        t = tok.strip()
+        if not t:
+            continue
+        if t.startswith("-"):
+            rest = t[1:]
+            if rest.startswith("#"):
+                rest = rest[1:]
+            if rest:
+                excludes.add(_norm_token(rest))
+            continue
+        if t.startswith("#"):
+            parts = [p for p in t.split("|") if p.strip()]
+            group: list[str] = []
+            for p in parts:
+                p = p.strip()
+                if p.startswith("#"):
+                    p = p[1:]
+                if p:
+                    group.append(_norm_token(p))
+            if group:
+                and_groups.append(group)
+            continue
+        text_terms.append(_norm_token(t))
+    return and_groups, excludes, text_terms
+
+
+def _summary_genre_set(s: Any) -> set[str]:
+    raw = getattr(s, "genres_ko", None) or ""
+    return {_norm_token(g) for g in str(raw).split(",") if g and g.strip()}
+
+
+def _summary_text_blob(s: Any) -> str:
+    pc = getattr(s, "product_code", "") or ""
+    tk = getattr(s, "title_ko", "") or ""
+    tj = getattr(s, "title_ja", "") or ""
+    ak = getattr(s, "actors_ko", "") or ""
+    gk = getattr(s, "genres_ko", None) or ""
+    mk = getattr(s, "maker_ko", None) or ""
+    return f"{pc} {tk} {tj} {ak} {gk} {mk}".lower()
+
+
+def match_summary(
+    s: Any,
+    genre_groups: list[list[str]],
+    excludes: set[str],
+    text_terms: list[str],
+) -> bool:
+    if genre_groups or excludes:
+        gset = _summary_genre_set(s)
+        for group in genre_groups:
+            if not any(g in gset for g in group):
+                return False
+        if excludes and (excludes & gset):
+            return False
+    if text_terms:
+        blob = _summary_text_blob(s)
+        for term in text_terms:
+            if term and term not in blob:
+                return False
+    return True
+
+
 class WorkListModel(QAbstractListModel):
     ProductCodeRole = Qt.ItemDataRole.UserRole + 1
     TitleKoRole = Qt.ItemDataRole.UserRole + 2
@@ -55,6 +156,7 @@ class WorkListModel(QAbstractListModel):
     HasKoSrtRole = Qt.ItemDataRole.UserRole + 13
     LampHardcodedRole = Qt.ItemDataRole.UserRole + 14
     LampMopaRole = Qt.ItemDataRole.UserRole + 16
+    FavoriteScoreRole = Qt.ItemDataRole.UserRole + 17
 
     _ROLE_MAP = {
         ProductCodeRole: "product_code",
@@ -73,6 +175,7 @@ class WorkListModel(QAbstractListModel):
         HasKoSrtRole: "has_ko_srt",
         LampHardcodedRole: "lamp_hardcoded",
         LampMopaRole: "lamp_mopa",
+        FavoriteScoreRole: "favorite_score",
     }
 
     def __init__(self, parent=None):
@@ -97,6 +200,7 @@ class WorkListModel(QAbstractListModel):
             self.HasKoSrtRole: b"hasKoSrt",
             self.LampHardcodedRole: b"lampHardcoded",
             self.LampMopaRole: b"lampMopa",
+            self.FavoriteScoreRole: b"favoriteScore",
         }
 
     def rowCount(self, parent=QModelIndex()):
@@ -114,6 +218,31 @@ class WorkListModel(QAbstractListModel):
         self.beginResetModel()
         self._items = items
         self.endResetModel()
+
+    @Slot(int, result=str)
+    def productCodeAt(self, idx: int) -> str:
+        try:
+            i = int(idx)
+        except Exception:
+            return ""
+        if i < 0 or i >= len(self._items):
+            return ""
+        try:
+            return str(self._items[i].get("product_code") or "")
+        except Exception:
+            return ""
+
+    @Slot(result="QStringList")
+    def allProductCodes(self):
+        out = []
+        try:
+            for it in (self._items or []):
+                pc = str((it or {}).get("product_code") or "").strip()
+                if pc:
+                    out.append(pc)
+        except Exception:
+            return []
+        return out
 
 
 class LibraryDetailObject(QObject):
@@ -187,6 +316,14 @@ class LibraryDetailObject(QObject):
     def digestPath(self): return self._get("digest_path", "")
     @Property(str, notify=changed)
     def highlightPath(self): return self._get("highlight_path", "")
+    @Property(int, notify=changed)
+    def watchCount(self): return self._get("watch_count", 0)
+    @Property(int, notify=changed)
+    def watchDuration(self): return self._get("watch_duration", 0)
+    @Property(int, notify=changed)
+    def lastPosition(self): return self._get("last_position", 0)
+    @Property(int, notify=changed)
+    def favoriteScore(self): return int(self._get("favorite_score", 0) or 0)
 
 
 class LibraryReloadWorker(QThread):
@@ -541,6 +678,9 @@ class LibraryModel(QObject):
         # (base_pc -> preview_path) 캐시: `_rebuild()`에서 per-item disk stat 폭탄 방지용
         self._preview_path_cache: dict[str, str] = {}
         self._detail_history: list[str] = []
+        # availableGenres() 빈도 집계 캐시 — _all_summaries 길이가 바뀌면 무효화
+        self._genres_cache_sig: int = -1
+        self._genres_cache: list[dict] = []
 
 
         self._debounce = QTimer(self)
@@ -963,6 +1103,21 @@ class LibraryModel(QObject):
             if vp:
                 data["video_path"] = str(vp)
         except Exception: pass
+
+        try:
+            from javstory.harvest.database import get_db_session_ctx, WatchHistory
+            with get_db_session_ctx() as sess:
+                wh = sess.query(WatchHistory).filter_by(
+                    product_code=s.product_code
+                ).first()
+                if wh:
+                    data["watch_count"] = int(wh.session_count or 0)
+                    data["watch_duration"] = int(wh.watch_duration or 0)
+                    data["last_position"] = int(wh.last_position or 0)
+        except Exception:
+            pass
+
+        data["favorite_score"] = int(getattr(s, "favorite_score", 0) or 0)
 
         self._detail.load(data)
         self.detailLoaded.emit()
@@ -1698,6 +1853,143 @@ class LibraryModel(QObject):
         except Exception as e:
             self.toastMessage.emit(f"장르 추가 실패: {e}", "error")
 
+    @Slot(result=list)
+    def availableGenres(self):
+        """`_all_summaries`에 등장한 한국어 장르 빈도(상위 200). [{name, count}]."""
+        sig = len(self._all_summaries or [])
+        if sig == self._genres_cache_sig and self._genres_cache:
+            return self._genres_cache
+        counts: dict[str, int] = {}
+        for s in self._all_summaries or []:
+            raw = getattr(s, "genres_ko", None) or ""
+            for g in str(raw).split(","):
+                name = (g or "").strip()
+                if not name:
+                    continue
+                counts[name] = counts.get(name, 0) + 1
+        items = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))[:200]
+        self._genres_cache = [{"name": n, "count": c} for n, c in items]
+        self._genres_cache_sig = sig
+        return self._genres_cache
+
+    @Slot(str, str)
+    def addGenreToken(self, name: str, mode: str):
+        """검색창에 `#name` 토큰을 추가/병합. mode ∈ {'and','or','not'}."""
+        nm = (name or "").strip()
+        if not nm:
+            return
+        m = (mode or "and").strip().lower()
+        if m not in ("and", "or", "not"):
+            m = "and"
+        cur = (self._search_query or "").strip()
+        tokens = _tokenize_search_expr(cur)
+
+        def _quote(g: str) -> str:
+            return f'"{g}"' if any(ch.isspace() for ch in g) else g
+
+        nm_norm = _norm_token(nm)
+
+        def _strip_tok(t: str) -> set[str]:
+            res: set[str] = set()
+            t2 = t
+            negative = t2.startswith("-")
+            if negative:
+                t2 = t2[1:]
+            for p in t2.split("|"):
+                p = p.strip()
+                if p.startswith("#"):
+                    p = p[1:]
+                if p:
+                    res.add(_norm_token(p))
+            return res
+
+        new_tokens: list[str] = []
+        for t in tokens:
+            if not t:
+                continue
+            owners = _strip_tok(t)
+            if nm_norm in owners:
+                continue
+            new_tokens.append(t)
+        tokens = new_tokens
+
+        if m == "not":
+            tokens.append(f"-#{_quote(nm)}")
+        elif m == "or":
+            attached = False
+            for i in range(len(tokens) - 1, -1, -1):
+                t = tokens[i]
+                if t.startswith("#"):
+                    tokens[i] = t + f"|#{_quote(nm)}"
+                    attached = True
+                    break
+            if not attached:
+                tokens.append(f"#{_quote(nm)}")
+        else:
+            tokens.append(f"#{_quote(nm)}")
+
+        new_q = " ".join(tokens).strip()
+        if new_q != self._search_query:
+            self._search_query = new_q
+            self.searchQueryChanged.emit()
+            self._debounce.start()
+
+    @Slot(str)
+    def removeGenreToken(self, name: str):
+        """검색창에서 `name`이 들어간 모든 장르 토큰을 제거(OR 그룹 내 부분 제거 포함)."""
+        nm = (name or "").strip()
+        if not nm:
+            return
+        nm_norm = _norm_token(nm)
+        cur = (self._search_query or "").strip()
+        if not cur:
+            return
+        tokens = _tokenize_search_expr(cur)
+        out: list[str] = []
+        changed = False
+
+        def _strip_quotes(s: str) -> str:
+            s = s.strip()
+            if len(s) >= 2 and s[0] == '"' and s[-1] == '"':
+                return s[1:-1]
+            return s
+
+        for t in tokens:
+            negative = t.startswith("-")
+            body = t[1:] if negative else t
+            if not body.startswith("#") and "|" not in body:
+                out.append(t)
+                continue
+            parts = [p.strip() for p in body.split("|") if p.strip()]
+            if not parts:
+                out.append(t)
+                continue
+            kept: list[str] = []
+            for p in parts:
+                p2 = p
+                if p2.startswith("#"):
+                    p2 = p2[1:]
+                p2u = _strip_quotes(p2)
+                if _norm_token(p2u) == nm_norm:
+                    changed = True
+                    continue
+                kept.append(p)
+            if not kept:
+                changed = True
+                continue
+            rebuilt = "|".join(kept)
+            if negative:
+                rebuilt = "-" + rebuilt
+            out.append(rebuilt)
+
+        if not changed:
+            return
+        new_q = " ".join(out).strip()
+        if new_q != self._search_query:
+            self._search_query = new_q
+            self.searchQueryChanged.emit()
+            self._debounce.start()
+
     @Slot(str, result=list)
     def searchGenres(self, query: str):
         try:
@@ -2197,7 +2489,8 @@ class LibraryModel(QObject):
                 return strip_split_suffixes(u) or u
             except Exception: return (pc or "").strip().upper()
 
-        q = (self._search_query or "").strip().lower()
+        genre_groups, genre_excludes, text_terms = parse_search_expr(self._search_query or "")
+        has_query = bool(genre_groups or genre_excludes or text_terms)
         fm = self._filter_mode
         filtered = []
         for s in self._all_summaries:
@@ -2207,12 +2500,8 @@ class LibraryModel(QObject):
             if fm == 3 and not getattr(s, "folder_path", None): continue
             if fm == 4 and not (getattr(s, "has_ko_srt", False) or getattr(s, "has_ja_srt", False)): continue
 
-            if q:
-                gk = getattr(s, "genres_ko", None) or ""
-                mk = getattr(s, "maker_ko", None) or ""
-                blob = f"{s.product_code} {s.title_ko} {s.actors_ko} {gk} {mk}".lower()
-                if q not in blob:
-                    continue
+            if has_query and not match_summary(s, genre_groups, genre_excludes, text_terms):
+                continue
             filtered.append(s)
 
         groups = {}
@@ -2274,6 +2563,7 @@ class LibraryModel(QObject):
                 "lamp_hardcoded": any(bool(getattr(x, "lamp_hardcoded", False)) for x in lst),
                 "lamp_mopa": any(bool(getattr(x, "lamp_mopa", False)) for x in lst),
                 "updated_at_iso": max((getattr(x, "updated_at_iso", "") or "" for x in lst), default=""),
+                "favorite_score": sum(int(getattr(x, "favorite_score", 0) or 0) for x in lst),
             })
 
         mode = self._sort_mode
@@ -2286,6 +2576,8 @@ class LibraryModel(QObject):
         elif mode == 6: merged_items.sort(key=lambda it: it.get("actors_ko", "") or "\uffff", reverse=True)
         elif mode == 7: merged_items.sort(key=lambda it: (0 if (it.get("has_ko_srt") or it.get("has_ja_srt") or it.get("lamp_hardcoded")) else 1, it.get("product_code", "")))
         elif mode == 8: merged_items.sort(key=lambda it: (0 if it.get("lamp_mopa") else 1, it.get("product_code", "")))
+        elif mode == 9: merged_items.sort(key=lambda it: int(it.get("favorite_score") or 0), reverse=True)
+        elif mode == 10: merged_items.sort(key=lambda it: int(it.get("favorite_score") or 0))
 
         self._works.refresh(merged_items)
         self.workCountChanged.emit()

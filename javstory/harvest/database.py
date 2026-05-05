@@ -18,7 +18,7 @@ Base = declarative_base()
 # DB 스키마/마이그레이션 가드 버전.
 # - SQLite `PRAGMA user_version`에 저장한다.
 # - 테이블/컬럼 마이그레이션 로직을 변경하면 이 값을 올려서 1회 재실행되게 한다.
-_APP_DB_SCHEMA_VERSION = 3
+_APP_DB_SCHEMA_VERSION = 5
 
 class JAVMetadata(Base):
     """
@@ -85,6 +85,12 @@ class JAVMetadata(Base):
     actors = Column(Text, nullable=True)
     genres = Column(Text, nullable=True)
     maker = Column(String(200), nullable=True)
+
+    # v4: 인기도 점수
+    favorite_score   = Column(Integer, default=0)
+    favorite_sources = Column(Text, nullable=True)  # "123av:634,missav123:102"
+    # v5: 좋아요 전용 크롤 실패 시각 — 일정 기간 재시도 스킵용 (`JAVSTORY_FAV_CRAWL_FAIL_COOLDOWN_HOURS`)
+    favorite_crawl_failed_at = Column(DateTime, nullable=True)
 
 class Actress(Base):
     """배우 정보 테이블 (actresses)"""
@@ -214,6 +220,59 @@ def get_db_session_ctx():
     finally:
         session.close()
 
+
+def fav_crawl_cooldown_hours() -> float:
+    """좋아요 전용 크롤 재시도 간격(시간). `JAVSTORY_FAV_CRAWL_FAIL_COOLDOWN_HOURS`, 0=쿨다운 비활성."""
+    import os
+
+    raw = (os.environ.get("JAVSTORY_FAV_CRAWL_FAIL_COOLDOWN_HOURS", "24") or "").strip()
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        return 24.0
+
+
+def favorite_crawl_failure_cutoff() -> datetime.datetime | None:
+    """
+    SQL 필터 기준 시각: 이 시각 **이전**에 실패 기록된 행만 재시도 대상.
+    None이면 쿨다운 비활성(favorite_crawl_failed_at 조건 없음).
+    """
+    h = fav_crawl_cooldown_hours()
+    if h <= 0:
+        return None
+    return datetime.datetime.now() - datetime.timedelta(hours=h)
+
+
+def record_favorite_crawl_failed(product_code: str) -> None:
+    """좋아요 전용 크롤이 실패한 시각을 기록한다."""
+    pc = (product_code or "").strip().upper()
+    if not pc:
+        return
+    try:
+        with get_db_session_ctx() as session:
+            row = session.query(JAVMetadata).filter_by(product_code=pc).first()
+            if row:
+                row.favorite_crawl_failed_at = datetime.datetime.now()
+                session.commit()
+    except Exception:
+        pass
+
+
+def clear_favorite_crawl_failed(product_code: str) -> None:
+    """수집 성공(점수 갱신 또는 0점 확정) 시 실패 기록을 지운다."""
+    pc = (product_code or "").strip().upper()
+    if not pc:
+        return
+    try:
+        with get_db_session_ctx() as session:
+            row = session.query(JAVMetadata).filter_by(product_code=pc).first()
+            if row and getattr(row, "favorite_crawl_failed_at", None) is not None:
+                row.favorite_crawl_failed_at = None
+                session.commit()
+    except Exception:
+        pass
+
+
 def init_db():
     """테이블 생성 및 기존 DB 컬럼 자동 마이그레이션"""
     _DB.parent.mkdir(parents=True, exist_ok=True)
@@ -241,6 +300,8 @@ def init_db():
     print("[DB] Running migration checks...")
     _migrate_add_needs_review_columns()
     _migrate_v3_analytics_columns()
+    _migrate_v4_favorite_columns()
+    _migrate_v5_favorite_crawl_failed_at()
     _ensure_indexes_and_optimize()
     try:
         with sqlite3.connect(DB_PATH) as conn:
@@ -325,6 +386,42 @@ def _migrate_v3_analytics_columns():
         print(f"[DB Migration v3] 실패: {e}")
 
 
+def _migrate_v4_favorite_columns():
+    """v4: jav_metadata.favorite_score / favorite_sources 컬럼 추가"""
+    import sqlite3
+    try:
+        with sqlite3.connect(DB_PATH) as conn:
+            cursor = conn.cursor()
+            cols = [row[1] for row in cursor.execute("PRAGMA table_info(jav_metadata)")]
+            for col, typedef in [
+                ("favorite_score",   "INTEGER DEFAULT 0"),
+                ("favorite_sources", "TEXT"),
+            ]:
+                if col not in cols:
+                    cursor.execute(f"ALTER TABLE jav_metadata ADD COLUMN {col} {typedef}")
+                    print(f"[DB Migration v4] jav_metadata.{col} 컬럼 추가 완료")
+            conn.commit()
+    except Exception as e:
+        print(f"[DB Migration v4] 실패: {e}")
+
+
+def _migrate_v5_favorite_crawl_failed_at():
+    """v5: jav_metadata.favorite_crawl_failed_at — 좋아요 크롤 실패 후 쿨다운 기록"""
+    import sqlite3
+    try:
+        with sqlite3.connect(DB_PATH) as conn:
+            cursor = conn.cursor()
+            cols = [row[1] for row in cursor.execute("PRAGMA table_info(jav_metadata)")]
+            if "favorite_crawl_failed_at" not in cols:
+                cursor.execute(
+                    "ALTER TABLE jav_metadata ADD COLUMN favorite_crawl_failed_at DATETIME"
+                )
+                print("[DB Migration v5] jav_metadata.favorite_crawl_failed_at 컬럼 추가 완료")
+            conn.commit()
+    except Exception as e:
+        print(f"[DB Migration v5] 실패: {e}")
+
+
 def _ensure_indexes_and_optimize() -> None:
     """
     조회 핫패스용 인덱스/옵션을 보장한다.
@@ -342,6 +439,8 @@ def _ensure_indexes_and_optimize() -> None:
         "CREATE INDEX IF NOT EXISTS idx_jav_metadata_release_date ON jav_metadata(release_date);",
         # 폴더 바인딩 조회/필터
         "CREATE INDEX IF NOT EXISTS idx_jav_metadata_folder_path ON jav_metadata(folder_path);",
+        # 인기도 정렬
+        "CREATE INDEX IF NOT EXISTS idx_jav_favorite_score ON jav_metadata(favorite_score);",
     ]
     try:
         with sqlite3.connect(DB_PATH) as conn:
@@ -387,6 +486,10 @@ def upsert_jav_metadata(session, product_code, merge_empty_only=False, **kwargs)
     for key, value in kwargs.items():
         if hasattr(row, key):
             if merge_empty_only:
+                # favorite 필드는 항상 최신값으로 덮어씀 (비어있음 여부 무관)
+                if key in {"favorite_score", "favorite_sources"}:
+                    setattr(row, key, value)
+                    continue
                 existing_val = getattr(row, key)
                 empty_like = (not existing_val) or (isinstance(existing_val, str) and not existing_val.strip())
 

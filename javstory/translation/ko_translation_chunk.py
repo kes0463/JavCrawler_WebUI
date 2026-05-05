@@ -12,6 +12,7 @@
 `JAVSTORY_TRANSLATION_CHUNK_TARGET_SEC` / `_OVERLAP_SEC` (미설정 시 `JAVSTORY_CORRECTION_CHUNK_*` → 티어 기본: DeepSeek V3.2 18s/5s, DeepSeek Chat 16s/4s, GLM-5.1 14s/4s, Ollama는 `correction_chunk._ollama_chunk_params_by_model` 과 동일 — Qwen3:14B 18/5, Qwen3.5:9B 16/4.5, Qwen3:8B 15/4, Qwen2.5:14B 17/4.5, Gemma3:12B 16/4.5, Gemma4 16/4, 기타 Ollama 300s/20s, 그 외 OpenRouter 50s/10s),
 `JAVSTORY_TRANSLATION_QWEN_MAX_TOKENS`(Qwen만, `JAVSTORY_TRANSLATION_OLLAMA_MAX_TOKENS` 미설정 시 기본 2048),
 `JAVSTORY_TRANSLATION_CONCURRENCY`, `JAVSTORY_LOG_FULL_TRANSLATION_PROMPT`(1/true 시 system+user 전체 로그),
+`JAVSTORY_SUBTITLE_COLLAPSE_VOCAL_REPEAT`(0/false 시 번역 직후 동일 한글 반복 압축 비활성; 기본 1),
 `JAVSTORY_TRANSLATION_QWEN_TEMPERATURE`(Ollama+Qwen 번역 시 온도, 기본 0.22 — 다국어 혼입 완화)
 `JAVSTORY_TRANSLATION_OLLAMA_NO_NEUTRAL_FALLBACK`(1/true 시 Ollama+Qwen도 기존 강한 system으로만 재시도; 기본은 JSON 실패 시 완화 system)
 
@@ -29,6 +30,7 @@ from javstory.translation.correction_chunk import (
     _apply_json_chunk,
     _chunk_json_for_segments,
     _ollama_chunk_params_by_model,
+    collapse_repeated_vocal_sounds,
 )
 from javstory.translation.llm_backoff import route_with_backoff
 from javstory.translation.story_context_prompts import resolve_grok_scene_for_chunk
@@ -72,6 +74,8 @@ def system_prompt_translation_chunk(tier: Dict[str, Any]) -> str:
         "- 口語的・会話的な韓国語を使うこと(字幕なので文語体は不可)\n"
         "- 敬語/半語は文脈と話者の関係に合わせること\n"
         "- 感嘆詞・擬音語は韓国語の自然な等価表現に変換\n"
+        "- 呻き・喘ぎ・意味のない発声: 同じハングル音節の連続は最大2回まで。"
+        "長い場合は「…」1つにまとめる(例: 아…)。同一文字を何十回も繰り返して画面幅を埋めないこと\n"
         "- text値は100%韓国語のみ(日本語・英語混入禁止)\n"
     )
     if prov == "ollama" and "gemma" in model:
@@ -92,6 +96,8 @@ def system_prompt_translation_ollama_qwen_neutral() -> str:
         "- Keep index values unchanged\n"
         "- Translate all text to 100% Korean (no Japanese/English)\n"
         "- Use colloquial Korean suitable for subtitles\n"
+        "- Moans, gasps, non-lexical sounds: at most 2 repeated syllables, or one syllable + “…”; "
+        "never fill the line with the same character dozens of times\n"
     )
 
 
@@ -458,7 +464,13 @@ async def translate_ja_segments_to_ko_async(
                         f"[KO-TRANSLATE] 현재 {idx + 1} / {total_chunks} — 응답 뒤 {cap//2}자:\n{pr[-(cap // 2) :]}"
                     )
             lp = "[KO-TRANSLATE]"
-            if not _apply_json_chunk(tgt_segs, processed, log=log, log_prefix=lp):
+            if not _apply_json_chunk(
+                tgt_segs,
+                processed,
+                log=log,
+                log_prefix=lp,
+                postprocess_text=collapse_repeated_vocal_sounds,
+            ):
                 log(f"[KO-TRANSLATE] 현재 {idx + 1} / {total_chunks} — JSON 적용 실패 — 재시도")
                 use_neutral_ollama_qwen = (
                     str(tier.get("provider") or "").lower() == "ollama"
@@ -507,7 +519,13 @@ async def translate_ja_segments_to_ko_async(
                         f"[KO-TRANSLATE] 현재 {idx + 1} / {total_chunks} — 재시도 응답 본문:\n"
                         f"{p2[:12000]}{'…' if len(p2) > 12000 else ''}"
                     )
-                if not _apply_json_chunk(tgt_segs, processed2, log=log, log_prefix=lp):
+                if not _apply_json_chunk(
+                    tgt_segs,
+                    processed2,
+                    log=log,
+                    log_prefix=lp,
+                    postprocess_text=collapse_repeated_vocal_sounds,
+                ):
                     log(f"[KO-TRANSLATE] 현재 {idx + 1} / {total_chunks} — JSON 적용 실패 — 2차 재시도")
                     retry2 = base_for_retry + [
                         {"role": "user", "content": _retry_translation_user_content(tier, attempt=1)},
@@ -531,7 +549,13 @@ async def translate_ja_segments_to_ko_async(
                             f"[KO-TRANSLATE] 현재 {idx + 1} / {total_chunks} — 2차 재시도 응답 본문:\n"
                             f"{p3[:12000]}{'…' if len(p3) > 12000 else ''}"
                         )
-                    if not _apply_json_chunk(tgt_segs, processed3, log=log, log_prefix=lp):
+                    if not _apply_json_chunk(
+                        tgt_segs,
+                        processed3,
+                        log=log,
+                        log_prefix=lp,
+                        postprocess_text=collapse_repeated_vocal_sounds,
+                    ):
                         log(
                             f"[KO-TRANSLATE] 현재 {idx + 1} / {total_chunks} — 최종 실패 — 해당 구간 일본어 유지"
                         )

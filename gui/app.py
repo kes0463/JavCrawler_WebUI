@@ -375,21 +375,27 @@ def create_engine(app) -> QQmlApplicationEngine:
     library.summariesReloaded.connect(_folder_watch.refresh_paths_from_db)
     QTimer.singleShot(2500, _folder_watch.refresh_paths_from_db)
 
+    # Harvest 수집/크롤링 로그를 실행 CMD(터미널)에도 출력 (QML 로그와 동일 내용)
+    try:
+        harvest.logMessage.connect(lambda msg: print(msg, flush=True))
+    except Exception:
+        pass
+
     # 하이라이트 큐 로그를 실행 터미널에 출력
     try:
-        highlight_queue.logMessage.connect(lambda msg: print(msg))
+        highlight_queue.logMessage.connect(lambda msg: print(msg, flush=True))
     except Exception:
         pass
 
     # 프리뷰 큐 로그를 실행 터미널에 출력
     try:
-        preview_queue.logMessage.connect(lambda msg: print(msg))
+        preview_queue.logMessage.connect(lambda msg: print(msg, flush=True))
     except Exception:
         pass
 
     # 몽타주 큐 로그를 실행 터미널에 출력
     try:
-        montage_queue.logMessage.connect(lambda msg: print(msg))
+        montage_queue.logMessage.connect(lambda msg: print(msg, flush=True))
     except Exception:
         pass
 
@@ -411,7 +417,7 @@ def create_engine(app) -> QQmlApplicationEngine:
                         jid2, s if f"(job={jid2})" in s else f"{s} (job={jid2})"
                     )
                     return
-                print(s)
+                print(s, flush=True)
                 return
             _mosaic_renderer.update(m.group(1), s)
 
