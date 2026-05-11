@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import datetime
 import json
 import os
+import re
 import threading
 from pathlib import Path
 from typing import Any
@@ -203,6 +205,78 @@ def match_summary(
     return True
 
 
+_RE_MONTH = re.compile(r"^\s*(\d{4})[-/.](\d{2})")
+
+
+def release_month_key(release_date: Any) -> str:
+    """
+    release_date(문자열)에서 YYYY-MM 월 키를 추출한다.
+    - "2026-05-07", "2026/05/07", "2026.05.07" → "2026-05"
+    - 실패/빈 값 → "unknown"
+    """
+    s = str(release_date or "").strip()
+    if not s:
+        return "unknown"
+    m = _RE_MONTH.match(s)
+    if not m:
+        return "unknown"
+    y = m.group(1)
+    mm = m.group(2)
+    try:
+        mi = int(mm)
+        if mi < 1 or mi > 12:
+            return "unknown"
+    except Exception:
+        return "unknown"
+    return f"{y}-{mm}"
+
+
+def _build_watch_feedback_by_base() -> dict[str, dict]:
+    """base 품번 → 사용자 평가(별점·하트)·최근 평가 시각."""
+    out: dict[str, dict] = {}
+    try:
+        from javstory.harvest.database import get_db_session_ctx, WatchHistory
+        from javstory.utils.product_code import strip_split_suffixes
+
+        with get_db_session_ctx() as session:
+            rows = session.query(WatchHistory).all()
+
+        mn = datetime.datetime.min.replace(tzinfo=None)
+        for wh in rows:
+            raw = (wh.product_code or "").strip().upper()
+            if not raw:
+                continue
+            try:
+                base = strip_split_suffixes(raw) or raw
+            except Exception:
+                base = raw
+            rating = int(wh.rating or 0)
+            liked = bool(wh.liked)
+            ua = getattr(wh, "updated_at", None) or mn
+
+            rec = out.get(base)
+            if not rec:
+                out[base] = {"rating": rating, "liked": liked, "updated_at": ua}
+            else:
+                rec["rating"] = max(int(rec.get("rating") or 0), rating)
+                rec["liked"] = bool(rec.get("liked")) or liked
+                if ua > (rec.get("updated_at") or mn):
+                    rec["updated_at"] = ua
+
+        for _, rec in out.items():
+            ua = rec.get("updated_at") or mn
+            if ua and ua != mn:
+                try:
+                    rec["feedback_iso"] = ua.replace(microsecond=0).isoformat(sep=" ")
+                except Exception:
+                    rec["feedback_iso"] = ""
+            else:
+                rec["feedback_iso"] = ""
+    except Exception:
+        return {}
+    return out
+
+
 class WorkListModel(QAbstractListModel):
     ProductCodeRole = Qt.ItemDataRole.UserRole + 1
     TitleKoRole = Qt.ItemDataRole.UserRole + 2
@@ -221,6 +295,9 @@ class WorkListModel(QAbstractListModel):
     LampHardcodedRole = Qt.ItemDataRole.UserRole + 14
     LampMopaRole = Qt.ItemDataRole.UserRole + 16
     FavoriteScoreRole = Qt.ItemDataRole.UserRole + 17
+    FavoriteDeltaRole = Qt.ItemDataRole.UserRole + 18
+    UserRatingRole = Qt.ItemDataRole.UserRole + 19
+    UserLikedRole = Qt.ItemDataRole.UserRole + 20
 
     _ROLE_MAP = {
         ProductCodeRole: "product_code",
@@ -240,6 +317,9 @@ class WorkListModel(QAbstractListModel):
         LampHardcodedRole: "lamp_hardcoded",
         LampMopaRole: "lamp_mopa",
         FavoriteScoreRole: "favorite_score",
+        FavoriteDeltaRole: "favorite_delta",
+        UserRatingRole: "user_rating",
+        UserLikedRole: "user_liked",
     }
 
     def __init__(self, parent=None):
@@ -265,6 +345,9 @@ class WorkListModel(QAbstractListModel):
             self.LampHardcodedRole: b"lampHardcoded",
             self.LampMopaRole: b"lampMopa",
             self.FavoriteScoreRole: b"favoriteScore",
+            self.FavoriteDeltaRole: b"favoriteDelta",
+            self.UserRatingRole: b"userRating",
+            self.UserLikedRole: b"userLiked",
         }
 
     def rowCount(self, parent=QModelIndex()):
@@ -388,6 +471,26 @@ class LibraryDetailObject(QObject):
     def lastPosition(self): return self._get("last_position", 0)
     @Property(int, notify=changed)
     def favoriteScore(self): return int(self._get("favorite_score", 0) or 0)
+
+    @Property(int, notify=changed)
+    def userRating(self) -> int:
+        return int(self._get("user_rating", 0) or 0)
+
+    @Property(bool, notify=changed)
+    def userLiked(self) -> bool:
+        return bool(self._get("user_liked", False))
+
+    @Property(bool, notify=changed)
+    def hasFavoriteSiteDelta(self) -> bool:
+        return bool(self._get("has_favorite_site_delta", False))
+
+    @Property(int, notify=changed)
+    def favoriteSiteDelta(self) -> int:
+        return int(self._get("favorite_site_delta", 0) or 0)
+
+    @Property(int, notify=changed)
+    def favoriteSiteDeltaDays(self) -> int:
+        return int(self._get("favorite_site_delta_days", 0) or 0)
 
 
 class LibraryReloadWorker(QThread):
@@ -683,6 +786,11 @@ class LibraryModel(QObject):
     searchQueryChanged = Signal()
     filterModeChanged = Signal()
     sortModeChanged = Signal()
+    favoriteDeltaDaysChanged = Signal()
+    monthFilterChanged = Signal()
+    monthFilterInputChanged = Signal()
+    monthFilterErrorChanged = Signal()
+    unknownOnlyChanged = Signal()
     workCountChanged = Signal()
     detailLoaded = Signal()
     summariesReloaded = Signal()  # DB 요약·연결 경로 갱신 시 (폴더 감시 목록 리프레시용)
@@ -714,8 +822,13 @@ class LibraryModel(QObject):
         super().__init__(parent)
         LibraryModel._instance = self
         self._search_query = ""
-        self._filter_mode = 0  # 0:All, 1:Analyzed, 2:Pending, 3:Linked, 4:Subtitled
+        self._filter_mode = 0  # 0:All, 1:Analyzed, 2:Pending, 3:Linked, 4:Subtitled, 5:내 평가, 6:하트만
         self._sort_mode = 0
+        self._favorite_delta_days = 0  # 0:기간 ♥ 증감 표시 안 함, 7/30/90
+        self._month_filter = ""  # ""=전체, "YYYY-MM"=특정 월, "unknown"=출시일 미상
+        self._month_filter_input = ""
+        self._month_filter_error = ""
+        self._unknown_only = False
         self._all_summaries: list = []
         self._works = WorkListModel(self)
         self._detail = LibraryDetailObject(self)
@@ -815,6 +928,88 @@ class LibraryModel(QObject):
             self._sort_mode = v
             self.sortModeChanged.emit()
             self._rebuild()
+
+    @Property(int, notify=favoriteDeltaDaysChanged)
+    def favoriteDeltaDays(self) -> int:
+        return int(self._favorite_delta_days or 0)
+
+    @favoriteDeltaDays.setter
+    def favoriteDeltaDays(self, v: int):
+        choices = {0, 7, 30, 90}
+        try:
+            nv = int(v)
+        except Exception:
+            nv = 0
+        if nv not in choices:
+            nv = 0
+        if nv != self._favorite_delta_days:
+            self._favorite_delta_days = nv
+            self.favoriteDeltaDaysChanged.emit()
+            self._rebuild()
+
+    @Property(str, notify=monthFilterChanged)
+    def monthFilter(self) -> str:
+        return self._month_filter
+
+    @monthFilter.setter
+    def monthFilter(self, v: str):
+        nv = str(v or "").strip()
+        if nv != self._month_filter:
+            self._month_filter = nv
+            self.monthFilterChanged.emit()
+            self._rebuild()
+
+    @Property(str, notify=monthFilterInputChanged)
+    def monthFilterInput(self) -> str:
+        return self._month_filter_input
+
+    @monthFilterInput.setter
+    def monthFilterInput(self, v: str):
+        nv = str(v or "")
+        if nv != self._month_filter_input:
+            self._month_filter_input = nv
+            self.monthFilterInputChanged.emit()
+
+    @Property(str, notify=monthFilterErrorChanged)
+    def monthFilterError(self) -> str:
+        return self._month_filter_error
+
+    @Property(bool, notify=unknownOnlyChanged)
+    def unknownOnly(self) -> bool:
+        return bool(self._unknown_only)
+
+    @unknownOnly.setter
+    def unknownOnly(self, v: bool):
+        nv = bool(v)
+        if nv != self._unknown_only:
+            self._unknown_only = nv
+            self.unknownOnlyChanged.emit()
+            self._rebuild()
+
+    @Slot()
+    def clearMonthFilter(self) -> None:
+        self._month_filter_error = ""
+        self.monthFilterErrorChanged.emit()
+        self.monthFilterInput = ""
+        self.monthFilter = ""
+        self.unknownOnly = False
+
+    @Slot()
+    def applyMonthFilterInput(self) -> None:
+        raw = (self._month_filter_input or "").strip()
+        if not raw:
+            self._month_filter_error = ""
+            self.monthFilterErrorChanged.emit()
+            self.monthFilter = ""
+            return
+        key = release_month_key(raw)
+        if key == "unknown":
+            self._month_filter_error = "형식 오류: YYYY-MM"
+            self.monthFilterErrorChanged.emit()
+            return
+        self._month_filter_error = ""
+        self.monthFilterErrorChanged.emit()
+        self.monthFilter = key
 
     @Property(int, notify=workCountChanged)
     def workCount(self): return self._works.rowCount()
@@ -1176,7 +1371,12 @@ class LibraryModel(QObject):
         except Exception: pass
 
         try:
-            from javstory.harvest.database import get_db_session_ctx, WatchHistory
+            from javstory.harvest.database import (
+                get_db_session_ctx,
+                WatchHistory,
+                favorite_score_delta_one,
+            )
+
             with get_db_session_ctx() as sess:
                 wh = sess.query(WatchHistory).filter_by(
                     product_code=s.product_code
@@ -1185,10 +1385,42 @@ class LibraryModel(QObject):
                     data["watch_count"] = int(wh.session_count or 0)
                     data["watch_duration"] = int(wh.watch_duration or 0)
                     data["last_position"] = int(wh.last_position or 0)
+                    data["user_rating"] = int(wh.rating or 0)
+                    data["user_liked"] = bool(wh.liked)
+                else:
+                    data["user_rating"] = 0
+                    data["user_liked"] = False
         except Exception:
-            pass
+            data["user_rating"] = 0
+            data["user_liked"] = False
 
-        data["favorite_score"] = int(getattr(s, "favorite_score", 0) or 0)
+        fav_row = int(getattr(s, "favorite_score", 0) or 0)
+        data["favorite_score"] = fav_row
+
+        try:
+            fd_days = int(getattr(self, "_favorite_delta_days", 0) or 0)
+            if fd_days > 0:
+                delta = favorite_score_delta_one(
+                    str(s.product_code or ""),
+                    fd_days,
+                    fallback_score=fav_row,
+                )
+                if delta is not None:
+                    data["favorite_site_delta"] = int(delta)
+                    data["favorite_site_delta_days"] = fd_days
+                    data["has_favorite_site_delta"] = True
+                else:
+                    data["favorite_site_delta"] = 0
+                    data["favorite_site_delta_days"] = fd_days
+                    data["has_favorite_site_delta"] = False
+            else:
+                data["favorite_site_delta"] = 0
+                data["favorite_site_delta_days"] = 0
+                data["has_favorite_site_delta"] = False
+        except Exception:
+            data["favorite_site_delta"] = 0
+            data["favorite_site_delta_days"] = 0
+            data["has_favorite_site_delta"] = False
 
         self._detail.load(data)
         self.detailLoaded.emit()
@@ -2739,6 +2971,33 @@ class LibraryModel(QObject):
 
         threading.Thread(target=_job, daemon=True).start()
 
+    @Slot(result="QVariantList")
+    def availableReleaseMonths(self):
+        """
+        라이브러리 내 release_date에서 YYYY-MM 목록을 만들고 반환한다.
+        반환 형식: [{"key":"2026-05","label":"2026-05","count":123}, ...] + {"key":"unknown","label":"미상",...}
+        """
+        counts: dict[str, int] = {}
+        try:
+            for s in (self._all_summaries or []):
+                k = release_month_key(getattr(s, "release_date", "") or "")
+                counts[k] = int(counts.get(k, 0) or 0) + 1
+        except Exception:
+            counts = {}
+
+        months = [k for k in counts.keys() if k not in ("unknown", "")]
+        months.sort(reverse=True)  # 최신월 우선
+
+        out: list[dict] = []
+        for k in months:
+            out.append({"key": k, "label": k, "count": int(counts.get(k) or 0)})
+
+        # 미상은 항상 포함(있을 때만)
+        unk = int(counts.get("unknown") or 0)
+        if unk > 0:
+            out.append({"key": "unknown", "label": "미상", "count": unk})
+        return out
+
     def _rebuild(self):
         def _base_code(pc: str) -> str:
             try:
@@ -2750,6 +3009,9 @@ class LibraryModel(QObject):
         genre_groups, genre_excludes, text_terms = parse_search_expr(self._search_query or "")
         has_query = bool(genre_groups or genre_excludes or text_terms)
         fm = self._filter_mode
+        mf = (self._month_filter or "").strip()
+        if self._unknown_only:
+            mf = "unknown"
         filtered = []
         for s in self._all_summaries:
             # 필터 적용
@@ -2757,6 +3019,10 @@ class LibraryModel(QObject):
             if fm == 2 and getattr(s, "has_canonical", False): continue
             if fm == 3 and not getattr(s, "folder_path", None): continue
             if fm == 4 and not (getattr(s, "has_ko_srt", False) or getattr(s, "has_ja_srt", False)): continue
+            if mf:
+                rk = release_month_key(getattr(s, "release_date", "") or "")
+                if rk != mf:
+                    continue
 
             if has_query and not match_summary(s, genre_groups, genre_excludes, text_terms):
                 continue
@@ -2796,6 +3062,29 @@ class LibraryModel(QObject):
             self._preview_path_cache[key] = v
             return v
 
+        watch_map = _build_watch_feedback_by_base()
+
+        mode = self._sort_mode
+        eff_delta_days = int(self._favorite_delta_days or 0)
+        if eff_delta_days <= 0 and mode in (11, 12):
+            eff_delta_days = 7
+        deltas_map: dict[str, int | None] = {}
+        if eff_delta_days > 0:
+            try:
+                from javstory.harvest.database import favorite_score_deltas_for_period
+
+                meta_by_code: dict[str, int] = {}
+                for s2 in filtered:
+                    pc2 = (getattr(s2, "product_code", "") or "").strip().upper()
+                    if pc2:
+                        meta_by_code[pc2] = int(getattr(s2, "favorite_score", 0) or 0)
+                deltas_map = favorite_score_deltas_for_period(
+                    meta_scores_by_code=meta_by_code,
+                    period_days=eff_delta_days,
+                )
+            except Exception:
+                deltas_map = {}
+
         for base_pc, lst in groups.items():
             rep = pick_rep(lst)
             max_scene = max((getattr(x, "scene_count", 0) or 0) for x in lst) if lst else 0
@@ -2803,6 +3092,22 @@ class LibraryModel(QObject):
             for x in lst:
                 st = getattr(x, "pipeline_stage", "none") or "none"
                 if stage_rank.get(st, 0) > stage_rank.get(max_stage, 0): max_stage = st
+
+            part_pcs: list[str] = []
+            for x in lst:
+                pcp = (getattr(x, "product_code", "") or "").strip().upper()
+                if pcp and pcp not in part_pcs:
+                    part_pcs.append(pcp)
+
+            fd_acc: list[int] = []
+            if eff_delta_days > 0 and deltas_map:
+                for pcp in part_pcs:
+                    dv = deltas_map.get(pcp)
+                    if dv is not None:
+                        fd_acc.append(int(dv))
+            favorite_delta = sum(fd_acc) if fd_acc else None
+
+            wm = watch_map.get(base_pc) or {}
             merged_items.append({
                 "product_code": base_pc,
                 "title_ko": getattr(rep, "title_ko", "") or "",
@@ -2822,9 +3127,21 @@ class LibraryModel(QObject):
                 "lamp_mopa": any(bool(getattr(x, "lamp_mopa", False)) for x in lst),
                 "updated_at_iso": max((getattr(x, "updated_at_iso", "") or "" for x in lst), default=""),
                 "favorite_score": sum(int(getattr(x, "favorite_score", 0) or 0) for x in lst),
+                "favorite_delta": favorite_delta,
+                "user_rating": int(wm.get("rating") or 0),
+                "user_liked": bool(wm.get("liked")),
+                "user_feedback_iso": str(wm.get("feedback_iso") or ""),
             })
 
-        mode = self._sort_mode
+        if fm == 5:
+            merged_items = [
+                it
+                for it in merged_items
+                if int(it.get("user_rating") or 0) > 0 or bool(it.get("user_liked"))
+            ]
+        if fm == 6:
+            merged_items = [it for it in merged_items if bool(it.get("user_liked"))]
+
         if mode == 0: merged_items.sort(key=lambda it: it.get("product_code", ""))
         elif mode == 1: merged_items.sort(key=lambda it: it.get("release_date", ""), reverse=True)
         elif mode == 2: merged_items.sort(key=lambda it: it.get("release_date", ""))
@@ -2836,6 +3153,28 @@ class LibraryModel(QObject):
         elif mode == 8: merged_items.sort(key=lambda it: (0 if it.get("lamp_mopa") else 1, it.get("product_code", "")))
         elif mode == 9: merged_items.sort(key=lambda it: int(it.get("favorite_score") or 0), reverse=True)
         elif mode == 10: merged_items.sort(key=lambda it: int(it.get("favorite_score") or 0))
+        elif mode == 11:
+            merged_items.sort(
+                key=lambda it: (0, int(it.get("favorite_delta") or 0))
+                if it.get("favorite_delta") is not None
+                else (-1, 0),
+                reverse=True,
+            )
+        elif mode == 12:
+            merged_items.sort(
+                key=lambda it: (0, int(it.get("favorite_delta") or 0))
+                if it.get("favorite_delta") is not None
+                else (1, 0),
+            )
+        elif mode == 13:
+            # 별점 높은 순, 미평가(0점)는 뒤로
+            merged_items.sort(
+                key=lambda it: (
+                    0 if int(it.get("user_rating") or 0) > 0 else 1,
+                    -int(it.get("user_rating") or 0),
+                    it.get("product_code", ""),
+                ),
+            )
 
         self._works.refresh(merged_items)
         self.workCountChanged.emit()

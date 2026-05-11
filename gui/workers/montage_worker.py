@@ -9,6 +9,8 @@ from pathlib import Path
 
 from PySide6.QtCore import QThread, Signal as pyqtSignal
 
+from javstory.utils.ffmpeg_path import get_ffmpeg
+
 
 def _startupinfo_hidden() -> object | None:
     if os.name != "nt":
@@ -98,7 +100,7 @@ class MontageWorker(QThread):
 
                     if bgm:
                         cmd = [
-                            "ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(concat_list),
+                            get_ffmpeg(), "-y", "-f", "concat", "-safe", "0", "-i", str(concat_list),
                             "-stream_loop", "-1", "-i", str(bgm),
                             "-filter_complex", "[0:a]volume=0.30[a0];[1:a]volume=0.75[bgm];[a0][bgm]amix=inputs=2:duration=first:dropout_transition=2[a]",
                             "-map", "0:v:0", "-map", "[a]",
@@ -109,7 +111,7 @@ class MontageWorker(QThread):
                         ]
                     else:
                         cmd = [
-                            "ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(concat_list),
+                            get_ffmpeg(), "-y", "-f", "concat", "-safe", "0", "-i", str(concat_list),
                             "-filter:a", "volume=0.30",
                             "-c:v", "h264_nvenc", "-preset", "p6", "-rc", "vbr_hq", "-cq", "21",
                             "-b:v", "0", "-profile:v", "high", "-pix_fmt", "yuv420p",

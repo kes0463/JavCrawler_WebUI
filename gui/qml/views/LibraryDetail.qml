@@ -2030,12 +2030,45 @@ Item {
                                 }
                             }
 
-                            Text {
-                                visible: LibraryModel.detail.favoriteScore > 0
-                                text: "♥ " + LibraryModel.detail.favoriteScore
-                                font.pixelSize: 13
-                                font.family: Theme.fontFamily
-                                color: "#FF4081"
+                            Row {
+                                spacing: 10
+                                Text {
+                                    visible: LibraryModel.detail.favoriteScore > 0
+                                    text: "♥ " + LibraryModel.detail.favoriteScore
+                                    font.pixelSize: 13
+                                    font.family: Theme.fontFamily
+                                    color: "#FF4081"
+                                    verticalAlignment: Text.AlignVCenter
+                                }
+                                Text {
+                                    visible: LibraryModel.detail.userLiked
+                                    text: "내 \u2764"
+                                    font.pixelSize: 12
+                                    color: Theme.accentNeon
+                                    verticalAlignment: Text.AlignVCenter
+                                }
+                                Text {
+                                    visible: LibraryModel.detail.userRating > 0
+                                    text: "\u2605 " + LibraryModel.detail.userRating + "/5"
+                                    font.pixelSize: 12
+                                    color: Theme.warning
+                                    verticalAlignment: Text.AlignVCenter
+                                }
+                                Text {
+                                    visible: LibraryModel.detail.hasFavoriteSiteDelta
+                                    text: {
+                                        var d = LibraryModel.detail.favoriteSiteDelta
+                                        var days = LibraryModel.detail.favoriteSiteDeltaDays
+                                        var pre = d > 0 ? ("+\u0394 " + d) : (d < 0 ? ("\u0394 " + d) : "\u0394 0")
+                                        return pre + " (" + days + "\uC77C)"
+                                    }
+                                    font.pixelSize: 12
+                                    font.family: Theme.fontFamily
+                                    color: LibraryModel.detail.favoriteSiteDelta > 0 ? Theme.accentNeon
+                                        : LibraryModel.detail.favoriteSiteDelta < 0 ? "#FF7043"
+                                        : Theme.textMuted
+                                    verticalAlignment: Text.AlignVCenter
+                                }
                             }
 
                             SelectableText {

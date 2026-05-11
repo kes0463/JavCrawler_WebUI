@@ -12,6 +12,7 @@ from javstory.library.paths import work_library_dir
 from javstory.library.stills.equal_split import equal_split_seconds
 from javstory.library.stills.time_range import parse_time_range
 from javstory.config.app_config import SCENE_TARGET_COUNT
+from javstory.utils.ffmpeg_path import get_ffmpeg, get_ffprobe
 
 if TYPE_CHECKING:
     pass
@@ -360,7 +361,7 @@ def probe_video_duration_seconds(video_path: Path | str) -> float:
     import os
     try:
         cmd = [
-            "ffprobe", "-v", "error", "-show_entries", "format=duration",
+            get_ffprobe(), "-v", "error", "-show_entries", "format=duration",
             "-of", "default=noprint_wrappers=1:nokey=1", str(vp)
         ]
         startupinfo = None
@@ -416,7 +417,7 @@ def extract_snapshots_cuda(
 
     def _extract_single_frame(idx: int, t: float, *, use_hwaccel: bool) -> Optional[Path]:
         dest = out_dir / f"{prefix}_{idx + 1:03d}.jpg"
-        cmd = ["ffmpeg", "-y"]
+        cmd = [get_ffmpeg(), "-y"]
         if use_hwaccel:
             cmd += ["-hwaccel", "auto"]
         cmd += [

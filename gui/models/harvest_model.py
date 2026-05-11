@@ -436,6 +436,18 @@ class HarvestModel(QObject):
             100,
             f"완료: 갱신 {upd} / 0점수 {zero} / 실패 {fail}",
         ))
+
+        def _refresh_library_grid(*_args) -> None:
+            try:
+                from gui.models.library_model import LibraryModel
+
+                lm = LibraryModel.instance()
+                if lm is not None:
+                    lm.reload()
+            except Exception:
+                pass
+
+        w.finished.connect(_refresh_library_grid)
         w.finished.connect(lambda *_: self._on_thread_done(w))
         w.start()
 

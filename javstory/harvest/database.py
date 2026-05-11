@@ -18,7 +18,7 @@ Base = declarative_base()
 # DB 스키마/마이그레이션 가드 버전.
 # - SQLite `PRAGMA user_version`에 저장한다.
 # - 테이블/컬럼 마이그레이션 로직을 변경하면 이 값을 올려서 1회 재실행되게 한다.
-_APP_DB_SCHEMA_VERSION = 6
+_APP_DB_SCHEMA_VERSION = 7
 
 class JAVMetadata(Base):
     """
@@ -155,6 +155,17 @@ class WatchHistory(Base):
     created_at = Column(DateTime, default=datetime.datetime.now)
     updated_at = Column(DateTime, default=datetime.datetime.now, onupdate=datetime.datetime.now)
 
+class FavoriteScoreHistory(Base):
+    """사이트 좋아요(♥) 점수 스냅샷 — 기간 증감(Δ) 계산용."""
+
+    __tablename__ = "favorite_score_history"
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    product_code = Column(String(50), nullable=False, index=True)
+    observed_at = Column(DateTime, nullable=False, index=True)
+    total_score = Column(Integer, nullable=False)
+    sources = Column(Text, nullable=True)
+
+
 class UserPreference(Base):
     """배우, 장르별 선호도 가중치 점수 (시간대 분리 지원)"""
     __tablename__ = "user_preferences"
@@ -261,6 +272,125 @@ def record_favorite_crawl_failed(product_code: str) -> None:
         pass
 
 
+def record_favorite_score_snapshot(product_code: str, total_score: int, sources: str | None = None) -> None:
+    """좋아요 전용 크롤 등 성공 시 스냅샷 한 건 추가."""
+    pc = (product_code or "").strip().upper()
+    if not pc:
+        return
+    try:
+        ts = int(total_score)
+    except Exception:
+        return
+    try:
+        with get_db_session_ctx() as session:
+            session.add(
+                FavoriteScoreHistory(
+                    product_code=pc,
+                    observed_at=datetime.datetime.now(),
+                    total_score=max(0, ts),
+                    sources=(s if (s := (sources or "").strip()) else None),
+                )
+            )
+            session.commit()
+    except Exception:
+        pass
+
+
+def favorite_score_deltas_for_period(
+    *,
+    meta_scores_by_code: dict[str, int],
+    period_days: int,
+    now: datetime.datetime | None = None,
+) -> dict[str, int | None]:
+    """
+    jav_metadata 행별 product_code 기준 Δ.
+    Δ = (기간 종료 시점 근처 점수) − (기간 시작 시점 이전 또는 첫 진입값).
+    해당 품번에 스냅샷이 한 건도 없으면 None.
+    meta_scores_by_code: product_code.upper() → 현재 favorite_score (종료값 폴백).
+    """
+    if period_days <= 0 or not meta_scores_by_code:
+        return {}
+
+    now = now or datetime.datetime.now()
+    t_end = now
+    t_start = now - datetime.timedelta(days=int(period_days))
+
+    pcs = sorted({str(k or "").strip().upper() for k in meta_scores_by_code.keys() if str(k or "").strip()})
+
+    snapshots: dict[str, list[tuple[datetime.datetime, int]]] = {p: [] for p in pcs}
+    try:
+        with get_db_session_ctx() as session:
+            rows = (
+                session.query(FavoriteScoreHistory)
+                .filter(FavoriteScoreHistory.product_code.in_(pcs))
+                .order_by(FavoriteScoreHistory.product_code, FavoriteScoreHistory.observed_at)
+                .all()
+            )
+        for r in rows:
+            pc = (r.product_code or "").strip().upper()
+            if pc not in snapshots:
+                snapshots[pc] = []
+            if r.observed_at is None:
+                continue
+            snapshots[pc].append((r.observed_at, int(r.total_score or 0)))
+    except Exception:
+        return {p: None for p in pcs}
+
+    out: dict[str, int | None] = {}
+    for pc in pcs:
+        rows_pc = snapshots.get(pc) or []
+        if not rows_pc:
+            out[pc] = None
+            continue
+        fb_end = int(meta_scores_by_code.get(pc, 0) or 0)
+
+        def _score_at_or_before(t: datetime.datetime) -> int | None:
+            v: int | None = None
+            for dt, sc in rows_pc:
+                if dt <= t:
+                    v = sc
+                else:
+                    continue
+            return v
+
+        def _first_strictly_after(t: datetime.datetime) -> int | None:
+            for dt, sc in rows_pc:
+                if dt > t:
+                    return sc
+            return None
+
+        start_val = _score_at_or_before(t_start)
+        if start_val is None:
+            start_val = _first_strictly_after(t_start)
+        if start_val is None:
+            start_val = 0
+
+        end_val = _score_at_or_before(t_end)
+        if end_val is None:
+            end_val = fb_end
+
+        out[pc] = int(end_val) - int(start_val)
+    return out
+
+
+def favorite_score_delta_one(
+    product_code: str,
+    period_days: int,
+    *,
+    fallback_score: int,
+    now: datetime.datetime | None = None,
+) -> int | None:
+    """단일 품번에 대한 기간 ♥ 증감. 스냅샷 없으면 None."""
+    pc = (product_code or "").strip().upper()
+    if not pc or period_days <= 0:
+        return None
+    return favorite_score_deltas_for_period(
+        meta_scores_by_code={pc: int(fallback_score or 0)},
+        period_days=int(period_days),
+        now=now,
+    ).get(pc)
+
+
 def clear_favorite_crawl_failed(product_code: str) -> None:
     """수집 성공(점수 갱신 또는 0점 확정) 시 실패 기록을 지운다."""
     pc = (product_code or "").strip().upper()
@@ -306,6 +436,7 @@ def init_db():
     _migrate_v4_favorite_columns()
     _migrate_v5_favorite_crawl_failed_at()
     _migrate_v6_actress_translation_note()
+    _migrate_v7_favorite_score_history()
     _ensure_indexes_and_optimize()
     try:
         with sqlite3.connect(DB_PATH) as conn:
@@ -426,6 +557,30 @@ def _migrate_v5_favorite_crawl_failed_at():
         print(f"[DB Migration v5] 실패: {e}")
 
 
+def _migrate_v7_favorite_score_history():
+    """v7: favorite_score_history — 사이트 ♥ 스냅샷 시계열"""
+    import sqlite3
+
+    try:
+        with sqlite3.connect(DB_PATH) as conn:
+            cur = conn.cursor()
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS favorite_score_history (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                    product_code VARCHAR(50) NOT NULL,
+                    observed_at DATETIME NOT NULL,
+                    total_score INTEGER NOT NULL,
+                    sources TEXT
+                )
+                """
+            )
+            conn.commit()
+            print("[DB Migration v7] favorite_score_history 준비 완료")
+    except Exception as e:
+        print(f"[DB Migration v7] 실패: {e}")
+
+
 def _migrate_v6_actress_translation_note():
     """v6: actresses.translation_note — 배우 단위 번역 노트(페르소나/말투/표기 가이드)"""
     import sqlite3
@@ -460,6 +615,7 @@ def _ensure_indexes_and_optimize() -> None:
         "CREATE INDEX IF NOT EXISTS idx_jav_metadata_folder_path ON jav_metadata(folder_path);",
         # 인기도 정렬
         "CREATE INDEX IF NOT EXISTS idx_jav_favorite_score ON jav_metadata(favorite_score);",
+        "CREATE INDEX IF NOT EXISTS idx_fav_hist_pc_time ON favorite_score_history(product_code, observed_at);",
     ]
     try:
         with sqlite3.connect(DB_PATH) as conn:

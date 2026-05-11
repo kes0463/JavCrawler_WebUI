@@ -232,10 +232,32 @@ class HarvestWorker(QThread):
                     self.msleep(50)
                 else:
                     log(f"[HarvestWorker] {sku}는 뼈대 정보이므로 번역 큐 등록을 스킵합니다.")
+
+                # 2) 미디어 관련 큐에는 "원본 영상 파일 경로"가 필요함.
+                # recrawlProducts는 item에 품번 문자열만 들어오므로, 바인딩된 folder_path에서 원본 영상을 추정해 넣는다.
+                media_video_path: Path | None = None
+                try:
+                    direct = Path(item)
+                    if direct.is_file():
+                        media_video_path = direct
+                    else:
+                        from gui.library_data import guess_video_path_for_product
+                        from javstory.harvest.database import JAVMetadata
+                        folder_path = None
+                        with get_db_session_ctx() as session:
+                            row = session.query(JAVMetadata).filter_by(product_code=sku).first()
+                            if row:
+                                folder_path = getattr(row, "folder_path", None)
+                        guessed = guess_video_path_for_product(sku, folder_path or None)
+                        if guessed and Path(guessed).is_file():
+                            media_video_path = Path(guessed)
+                except Exception:
+                    media_video_path = None
                 
                 # 2. 프리뷰 큐
                 pq = PreviewQueueController.instance()
-                if pq: pq.enqueue(sku, item)
+                if pq and media_video_path:
+                    pq.enqueue(sku, str(media_video_path))
                 self.msleep(50)
                 
                 # 3. 다이제스트 큐 (매니저 직접 호출)
@@ -246,13 +268,15 @@ class HarvestWorker(QThread):
                 digest_dir = base_root / sku / "Digest"
                 digest_dir.mkdir(parents=True, exist_ok=True)
                 digest_path = digest_dir / "digest.mp4"
-                digest_queue_manager.push_job(Path(item), digest_path, product_code=sku)
+                if media_video_path:
+                    digest_queue_manager.push_job(media_video_path, digest_path, product_code=sku)
                 self.msleep(50)
                 
                 # 4. 스냅샷 큐 (자동 추출 폴더 계산)
                 out_dir = base_root / sku / "Snapshots"
                 out_dir.mkdir(parents=True, exist_ok=True)
-                snapshot_queue_manager.push_job(Path(item), out_dir, product_code=sku)
+                if media_video_path:
+                    snapshot_queue_manager.push_job(media_video_path, out_dir, product_code=sku)
                 self.msleep(50)
                 
             except Exception as ph_e:

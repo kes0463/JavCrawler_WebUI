@@ -23,6 +23,7 @@ from PySide6.QtCore import (
     QTimer,
 )
 from gui.utils.queue_persistence import clear_queue_state, load_queue_state, save_queue_state
+from javstory.utils.ffmpeg_path import get_ffprobe
 
 PERSIST_NAME = "mosaic"
 
@@ -96,14 +97,7 @@ def _estimate_remaining_seconds(
 
 
 def _ffprobe_path() -> str:
-    try:
-        root = Path(__file__).resolve().parents[2]  # .../JAVSTORY
-        cand = root / "tools" / "lada" / "_internal" / "bin" / ("ffprobe.exe" if os.name == "nt" else "ffprobe")
-        if cand.is_file():
-            return str(cand)
-    except Exception:
-        pass
-    return "ffprobe"
+    return get_ffprobe()
 
 
 def _probe_video_duration_sec(path: str) -> float | None:

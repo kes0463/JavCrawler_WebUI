@@ -20,6 +20,10 @@ Rectangle {
     property bool lampHardcoded: false
     property bool lampMopa: false
     property int favoriteScore: 0
+    property var favoriteDelta: null
+    property bool showFavoriteDelta: false
+    property int userRating: 0
+    property bool userLiked: false
     property bool selectionMode: false
     property bool selected: false
 
@@ -241,6 +245,40 @@ Rectangle {
                             font.bold: true
                             font.family: Theme.fontFamily
                             color: "#FF4081"
+                            height: parent.height
+                            verticalAlignment: Text.AlignVCenter
+                        }
+
+                        Text {
+                            visible: root.showFavoriteDelta && root.favoriteDelta !== null && root.favoriteDelta !== undefined
+                            text: {
+                                var d = Number(root.favoriteDelta)
+                                if (d === 0) return "Δ 0"
+                                return d > 0 ? ("Δ +" + d) : ("Δ " + d)
+                            }
+                            font.pixelSize: Theme.fontCaption - 2
+                            font.family: Theme.fontFamily
+                            color: Number(root.favoriteDelta) > 0 ? Theme.accentNeon
+                                : Number(root.favoriteDelta) < 0 ? "#FF7043"
+                                : Theme.textMuted
+                            height: parent.height
+                            verticalAlignment: Text.AlignVCenter
+                            font.bold: true
+                        }
+
+                        Text {
+                            visible: root.userLiked && !root.selectionMode
+                            text: "\u2764\uFE0F"
+                            font.pixelSize: 13
+                            height: parent.height
+                            verticalAlignment: Text.AlignVCenter
+                        }
+
+                        Text {
+                            visible: root.userRating > 0 && !root.selectionMode
+                            text: "\u2605" + root.userRating
+                            font.pixelSize: Theme.fontCaption - 1
+                            color: Theme.warning
                             height: parent.height
                             verticalAlignment: Text.AlignVCenter
                         }

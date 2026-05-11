@@ -4,7 +4,9 @@
 """
 from __future__ import annotations
 
+import os
 import re
+import time
 from dataclasses import asdict, dataclass, field
 from typing import Any, Dict, List, Optional
 from urllib.parse import urljoin
@@ -288,15 +290,54 @@ def fetch_video_info(
     for slug in candidates:
         path = path_template.format(product_id=slug)
         url = base_url.rstrip("/") + path
-        try:
-            if _USE_CFFI and session is None:
-                r = _cffi_requests.get(url, headers=headers, timeout=timeout, impersonate="chrome131")
-            else:
-                sess = session or requests.Session()
-                r = sess.get(url, headers=headers, timeout=timeout)
-                r.encoding = r.apparent_encoding or "utf-8"
-        except Exception as e:
-            last_exc = e
+        # 네트워크/WAF 환경에서 curl_cffi가 curl(35)로 자주 죽는 케이스가 있어
+        # - 짧은 재시도
+        # - curl_cffi 실패 시 requests로 폴백
+        max_tries = 3
+        backoffs = (0.0, 0.8, 1.6)
+        disable_cffi = (os.environ.get("JAVSTORY_CURL_CFFI_DISABLED", "") or "").strip().lower() in (
+            "1",
+            "true",
+            "yes",
+            "on",
+        )
+
+        r = None
+        for i in range(max_tries):
+            if i > 0:
+                try:
+                    time.sleep(backoffs[min(i, len(backoffs) - 1)])
+                except Exception:
+                    pass
+            try:
+                if _USE_CFFI and (session is None) and (not disable_cffi):
+                    r = _cffi_requests.get(
+                        url,
+                        headers=headers,
+                        timeout=timeout,
+                        impersonate="chrome131",
+                    )
+                else:
+                    sess = session or requests.Session()
+                    r = sess.get(url, headers=headers, timeout=timeout)
+                    r.encoding = r.apparent_encoding or "utf-8"
+                break
+            except Exception as e:
+                last_exc = e
+                # curl_cffi 경로에서 리셋이 나면 requests로 1회 즉시 폴백
+                msg = str(e)
+                is_curl_reset = ("curl:" in msg.lower()) and ("(35)" in msg or "recv failure" in msg.lower())
+                if is_curl_reset and (_USE_CFFI and (session is None)) and (not disable_cffi):
+                    try:
+                        sess = requests.Session()
+                        r = sess.get(url, headers=headers, timeout=timeout)
+                        r.encoding = r.apparent_encoding or "utf-8"
+                        break
+                    except Exception as e2:
+                        last_exc = e2
+                continue
+
+        if r is None:
             continue
         if r.status_code == 404:
             continue

@@ -467,22 +467,50 @@ class PlayerModel(QObject):
         return 0
 
     def _parse_srt(self, text: str) -> list:
-        cues = []
-        blocks = re.split(r"\n\s*\n", text.strip())
-        for block in blocks:
-            lines = block.strip().splitlines()
-            if len(lines) < 3:
+        """SRT를 큐 목록으로 파싱.
+
+        기존 구현은 블록을 ``\\n\\n``(빈 줄)로만 나눠서, 블록 사이 빈 줄이 없는 SRT(연속 큐)에서
+        여러 자막이 한 덩어리로 합쳐져 번호·타임코드·대사가 한꺼번에 표시되는 문제가 있었다.
+        """
+        cues: list[dict] = []
+        raw = (text or "").replace("\r\n", "\n").replace("\r", "\n")
+        lines = raw.split("\n")
+        n = len(lines)
+        i = 0
+
+        def _is_timing_line(s: str) -> bool:
+            s = (s or "").strip()
+            return bool(re.match(r"^[\d:,\.]+\s*-->\s*[\d:,\.]+", s))
+
+        while i < n:
+            while i < n and not lines[i].strip():
+                i += 1
+            if i >= n:
+                break
+            if lines[i].strip().isdigit():
+                i += 1
+                if i >= n:
+                    break
+            if not _is_timing_line(lines[i]):
+                i += 1
                 continue
-            arrow_idx = next((i for i, l in enumerate(lines) if "-->" in l), None)
-            if arrow_idx is None:
-                continue
-            timing = lines[arrow_idx]
-            m = re.match(r"([\d:,\.]+)\s*-->\s*([\d:,\.]+)", timing)
+            m = re.match(r"([\d:,\.]+)\s*-->\s*([\d:,\.]+)", lines[i].strip())
             if not m:
+                i += 1
                 continue
             start_ms = self._ts_to_ms(m.group(1))
             end_ms = self._ts_to_ms(m.group(2))
-            txt = "\n".join(lines[arrow_idx + 1:]).strip()
+            i += 1
+            body: list[str] = []
+            while i < n:
+                if _is_timing_line(lines[i]):
+                    break
+                nxt = lines[i].strip()
+                if nxt.isdigit() and i + 1 < n and _is_timing_line(lines[i + 1]):
+                    break
+                body.append(lines[i])
+                i += 1
+            txt = "\n".join(body).strip()
             txt = re.sub(r"<[^>]+>", "", txt)
             if txt:
                 cues.append({"start_ms": start_ms, "end_ms": end_ms, "text": txt})

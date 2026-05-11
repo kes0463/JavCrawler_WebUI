@@ -7,7 +7,10 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from PySide6.QtCore import QThread, Signal
 
-from javstory.harvest.database import record_favorite_crawl_failed as _record_favorite_crawl_failed
+from javstory.harvest.database import (
+    record_favorite_crawl_failed as _record_favorite_crawl_failed,
+    record_favorite_score_snapshot,
+)
 
 
 class FavoritesOnlyWorker(QThread):
@@ -154,6 +157,8 @@ class FavoritesOnlyWorker(QThread):
                 row.favorite_sources = sources
                 row.favorite_crawl_failed_at = None
                 session.commit()
+
+                record_favorite_score_snapshot(pc, total_score, sources)
                 self.itemUpdate.emit(pc, "done", 100, f"갱신 완료 (♥ {total_score})")
                 return "updated", pc
             self.itemUpdate.emit(pc, "error", 100, "DB에 품번이 없음")

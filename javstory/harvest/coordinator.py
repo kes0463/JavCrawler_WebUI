@@ -143,6 +143,7 @@ async def run_crawler_for_video_path(
     db_favorite_score = 0
     db_favorite_sources = None
     original_title = ""
+    db_folder_path: str | None = None
     trans_res = {}
     did_translate = False
     # 번역 스킵 판단은 DB가 채워졌는지 뿐 아니라 "KO 필드가 한국어로 저장됐는지"를 함께 본다.
@@ -154,6 +155,7 @@ async def run_crawler_for_video_path(
             with get_db_session_ctx() as session:
                 row = session.query(JAVMetadata).filter_by(product_code=code).first()
                 if row:
+                    db_folder_path = getattr(row, "folder_path", None)
                     # 1. 원본(JA) 데이터 확인
                     # - 크롤링(웹 수집) 스킵은 커버 URL까지 포함한 "완전한 원본"을 요구한다.
                     # - 번역 스킵은 제목/시놉시스 JA 텍스트만 있으면 충분하다(커버 URL 부재로 번역을 매번 다시 돌지 않게).
@@ -237,7 +239,7 @@ async def run_crawler_for_video_path(
                 with get_db_session_ctx() as session:
                     upsert_jav_metadata(session, code, 
                         title_ko=f"[{code}] (수집 실패/정보 없음)", 
-                        folder_path=stored_folder_path,
+                        folder_path=(stored_folder_path or db_folder_path),
                         cover_image_local_path=local_cover, # 로컬 이미지 경로 등록
                         analysis_status="FAILED_CRAWL"
                     )
@@ -295,9 +297,22 @@ async def run_crawler_for_video_path(
             if not isinstance(trans_res, dict) or not trans_res:
                 log_ts(f"❌ {code} 번역 실패: 번역 결과가 비어 있습니다.")
                 return {"error": "translation_failed_empty", "product_code": code}
-            # 핵심 필드가 없으면 실패로 간주 (JSON 파싱 실패 등으로 {}가 내려오는 케이스 포함)
-            if not (str(trans_res.get("title_ko") or "").strip() and str(trans_res.get("synopsis_ko") or "").strip()):
-                log_ts(f"❌ {code} 번역 실패: KO 필드가 비어 있습니다.")
+            # 검증:
+            # - 제목 KO는 필수
+            # - 시놉시스 KO는 "원문 시놉시스가 비어있던 케이스"면 비어있어도 부분 성공으로 허용
+            _title_ko = str((trans_res or {}).get("title_ko") or "").strip()
+            _syn_ko = str((trans_res or {}).get("synopsis_ko") or "").strip()
+            _raw_syn = str(raw_synopsis or "").strip()
+
+            if not _title_ko:
+                log_ts(f"❌ {code} 번역 실패: KO 제목이 비어 있습니다.")
+                return {"error": "translation_failed_missing_ko", "product_code": code}
+
+            if (not _syn_ko) and (not _raw_syn):
+                # 원문 시놉시스 자체가 없어서(혹은 추출 실패) 번역 결과도 KO 시놉시스가 비어 내려오는 케이스
+                pass
+            elif not _syn_ko:
+                log_ts(f"❌ {code} 번역 실패: KO 시놉시스가 비어 있습니다.")
                 return {"error": "translation_failed_missing_ko", "product_code": code}
 
         # 4. DB Upsert (Persistence)
@@ -366,7 +381,7 @@ async def run_crawler_for_video_path(
                     synopsis=synopses["synopsis_ko"],
                     genres=genres_ko,
                     maker=maker_ko,
-                    folder_path=stored_folder_path if stored_folder_path else None,
+                    folder_path=(stored_folder_path or db_folder_path),
                     favorite_score=db_favorite_score,
                     favorite_sources=db_favorite_sources,
                 )

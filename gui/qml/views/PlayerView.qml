@@ -38,6 +38,14 @@ Item {
     // 전체화면 여부 (ApplicationWindow 기준)
     readonly property bool isFullscreen: window.visibility === Window.FullScreen
 
+    // 하단 컨트롤 바: 아이콘·별·볼륨 축 통일
+    readonly property int playerBarIconPx: 28
+    readonly property int playerBarPlayPx: 36
+    readonly property int playerSeekIconPx: 30
+    readonly property int playerStarSize: 26
+    readonly property int playerVolSliderW: 108
+    readonly property int playerVolIconBox: 34
+
     // ── 볼륨 영구 저장 ──────────────────────────────────────
     Settings {
         id: playerSettings
@@ -894,16 +902,26 @@ Item {
             // ── 버튼 행 ─────────────────────────────────────
             RowLayout {
                 spacing: 10
+                Layout.minimumHeight: playerRoot.playerVolIconBox + 8
 
                 // 재생/일시정지
                 Button {
-                    id: playPauseBtn; flat: true; font.pixelSize: 28; focusPolicy: Qt.NoFocus
+                    id: playPauseBtn
+                    flat: true
+                    focusPolicy: Qt.NoFocus
+                    Layout.alignment: Qt.AlignVCenter
+                    font.pixelSize: playerRoot.playerBarPlayPx
+                    topPadding: 4
+                    bottomPadding: 4
                     onClicked: mediaPlayer.playbackState === MediaPlayer.PlayingState
                         ? mediaPlayer.pause() : mediaPlayer.play()
                     contentItem: Text {
                         text: mediaPlayer.playbackState === MediaPlayer.PlayingState ? "" : ""
-                        color: "#FFF"; font.pixelSize: parent.font.pixelSize; font.family: Theme.iconFont
+                        color: "#FFF"
+                        font.pixelSize: playPauseBtn.font.pixelSize
+                        font.family: Theme.iconFont
                         horizontalAlignment: Text.AlignHCenter
+                        verticalAlignment: Text.AlignVCenter
                     }
                     background: Rectangle { color: "transparent" }
                     scale: playPauseBtn.hovered ? 1.15 : 1.0
@@ -912,17 +930,28 @@ Item {
 
                 // 시간
                 Text {
+                    Layout.alignment: Qt.AlignVCenter
                     text: formatTime(mediaPlayer.position) + " / " + formatTime(mediaPlayer.duration)
                     color: Qt.rgba(1, 1, 1, 0.75)
-                    font.pixelSize: 13; font.family: Theme.fontFamily
+                    font.pixelSize: 14
+                    font.family: Theme.fontFamily
                 }
 
                 // 10초 뒤로
                 Button {
-                    flat: true; font.pixelSize: 24; focusPolicy: Qt.NoFocus
+                    id: seekBackBtn
+                    flat: true
+                    focusPolicy: Qt.NoFocus
+                    Layout.alignment: Qt.AlignVCenter
+                    font.pixelSize: playerRoot.playerSeekIconPx
+                    topPadding: 4
+                    bottomPadding: 4
                     contentItem: Text {
-                        text: ""; color: "#FFF"; font.pixelSize: parent.font.pixelSize; font.family: Theme.iconFont
-                        
+                        text: ""
+                        color: "#FFF"
+                        font.pixelSize: seekBackBtn.font.pixelSize
+                        font.family: Theme.iconFont
+                        verticalAlignment: Text.AlignVCenter
                     }
                     background: Rectangle { color: "transparent" }
                     onClicked: mediaPlayer.setPosition(Math.max(0, mediaPlayer.position - 10000))
@@ -931,10 +960,19 @@ Item {
 
                 // 10초 앞으로
                 Button {
-                    flat: true; font.pixelSize: 24; focusPolicy: Qt.NoFocus
+                    id: seekFwdBtn
+                    flat: true
+                    focusPolicy: Qt.NoFocus
+                    Layout.alignment: Qt.AlignVCenter
+                    font.pixelSize: playerRoot.playerSeekIconPx
+                    topPadding: 4
+                    bottomPadding: 4
                     contentItem: Text {
-                        text: ""; color: "#FFF"; font.pixelSize: parent.font.pixelSize; font.family: Theme.iconFont
-                        
+                        text: ""
+                        color: "#FFF"
+                        font.pixelSize: seekFwdBtn.font.pixelSize
+                        font.family: Theme.iconFont
+                        verticalAlignment: Text.AlignVCenter
                     }
                     background: Rectangle { color: "transparent" }
                     onClicked: mediaPlayer.setPosition(Math.min(mediaPlayer.duration, mediaPlayer.position + 10000))
@@ -947,11 +985,13 @@ Item {
                 Row {
                     spacing: 4
                     visible: playerRoot.subtitleTracks.length > 0
+                    Layout.alignment: Qt.AlignVCenter
 
                     Text {
                         text: "자막:"
                         color: Qt.rgba(1, 1, 1, 0.65)
-                        font.pixelSize: 12; font.family: Theme.fontFamily
+                        font.pixelSize: 14
+                        font.family: Theme.fontFamily
                         anchors.verticalCenter: parent.verticalCenter
                     }
 
@@ -962,12 +1002,15 @@ Item {
                             flat: true
                             focusPolicy: Qt.NoFocus
                             text: modelData.label
-                            font.pixelSize: 11
+                            font.pixelSize: 13
+                            topPadding: 4
+                            bottomPadding: 4
                             checked: playerRoot.activeSubtitleIdx === index
                             contentItem: Text {
                                 text: parent.text
                                 color: parent.checked ? Theme.accentNeon : Qt.rgba(1, 1, 1, 0.6)
                                 font: parent.font
+                                verticalAlignment: Text.AlignVCenter
                             }
                             background: Rectangle {
                                 color: parent.checked ? Qt.rgba(0, 168, 255, 0.15) : "transparent"
@@ -986,12 +1029,17 @@ Item {
 
                     // 자막 끄기
                     Button {
-                        flat: true; font.pixelSize: 11; focusPolicy: Qt.NoFocus
+                        flat: true
+                        focusPolicy: Qt.NoFocus
+                        font.pixelSize: 13
+                        topPadding: 4
+                        bottomPadding: 4
                         visible: playerRoot.activeSubtitleIdx >= 0
                         contentItem: Text {
                             text: "OFF"
                             color: Qt.rgba(1, 1, 1, 0.5)
                             font: parent.font
+                            verticalAlignment: Text.AlignVCenter
                         }
                         background: Rectangle { color: "transparent" }
                         onClicked: playerRoot.loadSubtitle(-1)
@@ -1002,13 +1050,22 @@ Item {
                 // 자막 글꼴·크기 설정 (항상 표시)
                 Button {
                     id: subtitleSettingBtn
-                    flat: true; font.pixelSize: 22; focusPolicy: Qt.NoFocus
+                    flat: true
+                    focusPolicy: Qt.NoFocus
+                    Layout.alignment: Qt.AlignVCenter
+                    font.pixelSize: playerRoot.playerBarIconPx
+                    topPadding: 4
+                    bottomPadding: 4
+                    leftPadding: 6
+                    rightPadding: 6
                     contentItem: Text {
                         text: ""
                         color: subtitleSettingsPopup.visible
                                ? Theme.accentNeon : Qt.rgba(1, 1, 1, 0.55)
-                        font.pixelSize: parent.font.pixelSize; font.family: Theme.iconFont
+                        font.pixelSize: subtitleSettingBtn.font.pixelSize
+                        font.family: Theme.iconFont
                         horizontalAlignment: Text.AlignHCenter
+                        verticalAlignment: Text.AlignVCenter
                     }
                     background: Rectangle {
                         color: subtitleSettingsPopup.visible
@@ -1036,7 +1093,7 @@ Item {
                 RatingWidget {
                     id: ratingWidget
                     rating: PlayerModel.currentRating
-                    starSize: 18
+                    starSize: playerRoot.playerStarSize
                     Layout.alignment: Qt.AlignVCenter
                     onRatingSelected: function(r) {
                         PlayerModel.setRating(playerRoot.productCode, r)
@@ -1046,12 +1103,21 @@ Item {
 
                 // 좋아요
                 Button {
-                    id: likeBtn; flat: true; font.pixelSize: 22; focusPolicy: Qt.NoFocus
+                    id: likeBtn
+                    flat: true
+                    focusPolicy: Qt.NoFocus
+                    Layout.alignment: Qt.AlignVCenter
+                    font.pixelSize: playerRoot.playerBarIconPx
+                    topPadding: 4
+                    bottomPadding: 4
                     property bool active: PlayerModel.isLiked
                     contentItem: Text {
-                        text: ""; font.pixelSize: parent.font.pixelSize; font.family: Theme.iconFont
-                        
+                        text: ""
+                        font.pixelSize: likeBtn.font.pixelSize
+                        font.family: Theme.iconFont
                         color: likeBtn.active ? "#FF4081" : Qt.rgba(1, 1, 1, 0.45)
+                        verticalAlignment: Text.AlignVCenter
+                        horizontalAlignment: Text.AlignHCenter
                         Behavior on color { ColorAnimation { duration: 200 } }
                     }
                     background: Rectangle { color: "transparent" }
@@ -1066,11 +1132,20 @@ Item {
 
                 // 싫어요
                 Button {
-                    id: dislikeBtn; flat: true; font.pixelSize: 22; focusPolicy: Qt.NoFocus
+                    id: dislikeBtn
+                    flat: true
+                    focusPolicy: Qt.NoFocus
+                    Layout.alignment: Qt.AlignVCenter
+                    font.pixelSize: playerRoot.playerBarIconPx
+                    topPadding: 4
+                    bottomPadding: 4
                     property bool active: PlayerModel.isDisliked
                     contentItem: Text {
-                        text: ""; font.pixelSize: parent.font.pixelSize; font.family: Theme.iconFont
-                        
+                        text: ""
+                        font.pixelSize: dislikeBtn.font.pixelSize
+                        font.family: Theme.iconFont
+                        verticalAlignment: Text.AlignVCenter
+                        horizontalAlignment: Text.AlignHCenter
                         color: dislikeBtn.active ? "#FF6B6B" : Qt.rgba(1, 1, 1, 0.45)
                         Behavior on color { ColorAnimation { duration: 200 } }
                     }
@@ -1084,11 +1159,18 @@ Item {
                     ToolTip { text: "싫어요"; visible: parent.hovered; delay: 500 }
                 }
 
-                // 볼륨
-                RowLayout {
+                Row {
+                    id: volumeControlRow
                     spacing: 6
+                    height: playerRoot.playerVolIconBox
+                    Layout.alignment: Qt.AlignVCenter
+                    Layout.minimumWidth: playerRoot.playerVolIconBox + 6 + playerRoot.playerVolSliderW
+                    Layout.preferredWidth: playerRoot.playerVolIconBox + 6 + playerRoot.playerVolSliderW
+
                     Rectangle {
-                        width: 22; height: 22
+                        id: volIconBox
+                        width: playerRoot.playerVolIconBox
+                        height: playerRoot.playerVolIconBox
                         radius: 6
                         color: volIconMa.containsMouse ? Qt.rgba(255, 255, 255, 0.10) : "transparent"
                         border.color: volIconMa.containsMouse ? Qt.rgba(255, 255, 255, 0.18) : "transparent"
@@ -1098,7 +1180,7 @@ Item {
                             anchors.centerIn: parent
                             text: audioOutput.muted ? "" : ""
                             color: "#FFF"
-                            font.pixelSize: 18
+                            font.pixelSize: playerRoot.playerBarIconPx
                             font.family: Theme.iconFont
                         }
 
@@ -1115,22 +1197,41 @@ Item {
                     }
                     Slider {
                         id: volumeSlider
-                        width: 80; from: 0; to: 1.0
+                        width: playerRoot.playerVolSliderW
+                        height: volumeControlRow.height
+                        from: 0
+                        to: 1.0
                         focusPolicy: Qt.NoFocus
                         value: playerSettings.volume
                         onValueChanged: playerSettings.volume = value
 
-                        background: Rectangle {
-                            height: 4; radius: 2; color: Qt.rgba(1, 1, 1, 0.15)
+                        // Qt Slider는 background 높이만 쓰면 위쪽에 붙고, 핸들은 전체 높이 기준 중앙이라 어긋남 → 트랙을 Row 높이 안에서 수직 중앙에 둔다.
+                        background: Item {
+                            implicitWidth: playerRoot.playerVolSliderW
+                            implicitHeight: volumeControlRow.height
+
                             Rectangle {
-                                width: volumeSlider.visualPosition * parent.width
-                                height: parent.height; radius: 2; color: Theme.accentNeon
+                                id: volSliderTrack
+                                anchors.verticalCenter: parent.verticalCenter
+                                width: parent.width
+                                height: 5
+                                radius: 2
+                                color: Qt.rgba(1, 1, 1, 0.15)
+                                Rectangle {
+                                    anchors.left: parent.left
+                                    anchors.verticalCenter: parent.verticalCenter
+                                    height: parent.height
+                                    width: volumeSlider.visualPosition * parent.width
+                                    radius: volSliderTrack.radius
+                                    color: Theme.accentNeon
+                                }
                             }
                         }
                         handle: Rectangle {
                             x: volumeSlider.visualPosition * (volumeSlider.width - width)
                             y: (volumeSlider.height - height) / 2
-                            width: 12; height: 12; radius: 6; color: "#FFF"
+                            width: 15; height: 15; radius: 8
+                            color: "#FFF"
                             border.color: Theme.accentNeon; border.width: 1
                         }
                     }
@@ -1138,12 +1239,19 @@ Item {
 
                 // PIP 토글
                 Button {
-                    flat: true; font.pixelSize: 22; focusPolicy: Qt.NoFocus
+                    flat: true
+                    focusPolicy: Qt.NoFocus
+                    Layout.alignment: Qt.AlignVCenter
+                    font.pixelSize: playerRoot.playerBarIconPx
+                    topPadding: 4
+                    bottomPadding: 4
                     contentItem: Text {
                         text: ""
                         color: playerRoot.isPip ? Theme.accentNeon : Qt.rgba(1, 1, 1, 0.7)
-                        font.pixelSize: parent.font.pixelSize; font.family: Theme.iconFont
+                        font.pixelSize: parent.font.pixelSize
+                        font.family: Theme.iconFont
                         horizontalAlignment: Text.AlignHCenter
+                        verticalAlignment: Text.AlignVCenter
                     }
                     background: Rectangle { color: "transparent" }
                     onClicked: playerRoot.isPip = !playerRoot.isPip
@@ -1152,12 +1260,19 @@ Item {
 
                 // 전체화면 토글
                 Button {
-                    flat: true; font.pixelSize: 22; focusPolicy: Qt.NoFocus
+                    flat: true
+                    focusPolicy: Qt.NoFocus
+                    Layout.alignment: Qt.AlignVCenter
+                    font.pixelSize: playerRoot.playerBarIconPx
+                    topPadding: 4
+                    bottomPadding: 4
                     contentItem: Text {
                         text: playerRoot.isFullscreen ? "" : ""
                         color: Qt.rgba(1, 1, 1, 0.7)
-                        font.pixelSize: parent.font.pixelSize; font.family: Theme.iconFont
+                        font.pixelSize: parent.font.pixelSize
+                        font.family: Theme.iconFont
                         horizontalAlignment: Text.AlignHCenter
+                        verticalAlignment: Text.AlignVCenter
                     }
                     background: Rectangle { color: "transparent" }
                     onClicked: playerRoot._toggleFullscreen()
@@ -1166,11 +1281,19 @@ Item {
 
                 // 닫기
                 Button {
-                    flat: true; font.pixelSize: 22; focusPolicy: Qt.NoFocus
+                    flat: true
+                    focusPolicy: Qt.NoFocus
+                    Layout.alignment: Qt.AlignVCenter
+                    font.pixelSize: playerRoot.playerBarIconPx
+                    topPadding: 4
+                    bottomPadding: 4
                     contentItem: Text {
-                        text: ""; color: Qt.rgba(1, 1, 1, 0.7)
-                        font.pixelSize: parent.font.pixelSize; font.family: Theme.iconFont
+                        text: ""
+                        color: Qt.rgba(1, 1, 1, 0.7)
+                        font.pixelSize: parent.font.pixelSize
+                        font.family: Theme.iconFont
                         horizontalAlignment: Text.AlignHCenter
+                        verticalAlignment: Text.AlignVCenter
                     }
                     background: Rectangle {
                         color: parent.hovered ? Qt.rgba(1, 0, 0, 0.25) : "transparent"

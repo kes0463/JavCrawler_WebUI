@@ -105,6 +105,10 @@ Item {
     /// scrollIndexIntoView로 인한 contentY 변화는 휠 오인 방지용으로 무시
     property bool ignoreGridScrollDirty: false
 
+    /** Toolbar 의 ComboBox 팝업이 열린 동안에는 그리드를 비활성화해 카드 클릭 통과 방지(modal 과 병행) */
+    readonly property bool libraryToolbarComboPopupOpen:
+        sortCombo.popup.visible || favDeltaCombo.popup.visible
+
     function gridCols() {
         return Math.max(1, Math.floor(grid.width / grid.cellWidth))
     }
@@ -240,6 +244,14 @@ Item {
         target: LibraryModel
         function onToastMessage(msg, level) { window.showToast(msg, level); }
         function onDetailLoaded() { root.detailVisible = true; }
+        function onFavoriteDeltaDaysChanged() {
+            if (!root.detailVisible)
+                return
+            var pc = LibraryModel.detail.productCode || ""
+            if (pc === "")
+                return
+            LibraryModel.loadDetail(pc)
+        }
         function onRequestFolderSelection(pc) {
             root.bindingProductCode = pc;
             manualFolderPicker.open();
@@ -401,8 +413,8 @@ Item {
             var arrow = key === Qt.Key_Left || key === Qt.Key_Right || key === Qt.Key_Up || key === Qt.Key_Down
             if (!arrow || mods & Qt.ShiftModifier || mods & Qt.ControlModifier || mods & Qt.AltModifier)
                 return
-            if (libSearch.hasInputFocus || sortCombo.activeFocus || refreshBtn.activeFocus
-                    || libFilterBtn.activeFocus)
+            if (libSearch.hasInputFocus || sortCombo.activeFocus || favDeltaCombo.activeFocus
+                    || refreshBtn.activeFocus || libFilterBtn.activeFocus)
                 return
             if (gridNavActive)
                 return
@@ -490,13 +502,13 @@ Item {
 
                     background: Rectangle {
                         radius: Theme.radiusSm
-                        color: LibraryModel.filterMode !== 0 ? Theme.accentGlow : Theme.surfaceLight
-                        border.color: libFilterBtn.activeFocus || LibraryModel.filterMode !== 0 ? Theme.accentNeon : Theme.glassBorder
+                        color: (LibraryModel.filterMode !== 0 || LibraryModel.favoriteDeltaDays !== 0) ? Theme.accentGlow : Theme.surfaceLight
+                        border.color: libFilterBtn.activeFocus || LibraryModel.filterMode !== 0 || LibraryModel.favoriteDeltaDays !== 0 ? Theme.accentNeon : Theme.glassBorder
                         border.width: 1
                         
                         // 필터 활성화 점(인디케이터)
                         Rectangle {
-                            visible: LibraryModel.filterMode !== 0
+                            visible: LibraryModel.filterMode !== 0 || LibraryModel.favoriteDeltaDays !== 0
                             width: 6; height: 6; radius: 3
                             color: Theme.accentNeon
                             anchors.top: parent.top
@@ -509,7 +521,7 @@ Item {
                         font.pixelSize: Theme.fontBody
                         horizontalAlignment: Text.AlignHCenter
                         verticalAlignment: Text.AlignVCenter
-                        color: LibraryModel.filterMode !== 0 ? Theme.accentNeon : Theme.textPrimary
+                        color: LibraryModel.filterMode !== 0 || LibraryModel.favoriteDeltaDays !== 0 ? Theme.accentNeon : Theme.textPrimary
                     }
 
                     onClicked: filterMenu.open()
@@ -517,7 +529,7 @@ Item {
                     Menu {
                         id: filterMenu
                         y: parent.height + 4
-                        width: 160
+                        width: 186
                         padding: 6
 
                         background: Rectangle {
@@ -605,6 +617,34 @@ Item {
                                 text: mi4.text
                                 font: mi4.font
                                 color: mi4.highlighted ? Theme.accentNeon : Theme.textPrimary
+                                verticalAlignment: Text.AlignVCenter
+                                leftPadding: 4
+                            }
+                        }
+                        MenuItem {
+                            id: mi5
+                            text: "내가 평가한 작품"
+                            onTriggered: LibraryModel.filterMode = 5
+                            font.pixelSize: 13
+                            highlighted: LibraryModel.filterMode === 5
+                            contentItem: Text {
+                                text: mi5.text
+                                font: mi5.font
+                                color: mi5.highlighted ? Theme.accentNeon : Theme.textPrimary
+                                verticalAlignment: Text.AlignVCenter
+                                leftPadding: 4
+                            }
+                        }
+                        MenuItem {
+                            id: mi6
+                            text: "하트 작품만"
+                            onTriggered: LibraryModel.filterMode = 6
+                            font.pixelSize: 13
+                            highlighted: LibraryModel.filterMode === 6
+                            contentItem: Text {
+                                text: mi6.text
+                                font: mi6.font
+                                color: mi6.highlighted ? Theme.accentNeon : Theme.textPrimary
                                 verticalAlignment: Text.AlignVCenter
                                 leftPadding: 4
                             }
@@ -901,12 +941,141 @@ Item {
                     }
                 }
 
+                // ── 출시 연월 필터 (입력 + 월 선택 팝업) ─────────────────
+                Row {
+                    id: monthFilterRow
+                    spacing: 6
+                    height: root.libToolbarH
+
+                    Rectangle {
+                        id: monthInputBg
+                        height: parent.height
+                        width: 150
+                        radius: Theme.radiusSm
+                        color: Theme.surfaceLight
+                        border.width: 1
+                        border.color: (LibraryModel.monthFilterError && LibraryModel.monthFilterError.length > 0)
+                                      ? Theme.danger
+                                      : (monthInput.activeFocus ? Theme.accentNeon : Theme.glassBorder)
+
+                        TextField {
+                            id: monthInput
+                            anchors.fill: parent
+                            anchors.leftMargin: 10
+                            anchors.rightMargin: 10
+                            placeholderText: "YYYY-MM"
+                            text: LibraryModel.monthFilterInput
+                            color: Theme.textPrimary
+                            font.pixelSize: Theme.fontCaption
+                            background: Rectangle { color: "transparent" }
+                            onTextChanged: LibraryModel.monthFilterInput = text
+                            Keys.onPressed: function(event) {
+                                if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
+                                    LibraryModel.applyMonthFilterInput()
+                                    event.accepted = true
+                                }
+                            }
+                            onActiveFocusChanged: {
+                                if (monthInput.activeFocus)
+                                    resetGridNavigation()
+                            }
+                        }
+                    }
+
+                    Button {
+                        id: monthApplyBtn
+                        height: parent.height
+                        padding: 0
+                        text: "적용"
+                        background: Rectangle {
+                            radius: Theme.radiusSm
+                            color: Theme.surfaceLight
+                            border.color: monthApplyBtn.activeFocus ? Theme.accentNeon : Theme.glassBorder
+                            border.width: 1
+                        }
+                        contentItem: Text {
+                            text: monthApplyBtn.text
+                            color: Theme.textPrimary
+                            font.pixelSize: Theme.fontCaption
+                            horizontalAlignment: Text.AlignHCenter
+                            verticalAlignment: Text.AlignVCenter
+                            leftPadding: 12
+                            rightPadding: 12
+                        }
+                        onClicked: LibraryModel.applyMonthFilterInput()
+                    }
+
+                    Button {
+                        id: monthClearBtn
+                        height: parent.height
+                        width: parent.height
+                        padding: 0
+                        flat: true
+                        text: "\u00D7"
+                        background: Rectangle {
+                            radius: Theme.radiusSm
+                            color: Theme.surfaceLight
+                            border.color: monthClearBtn.activeFocus ? Theme.accentNeon : Theme.glassBorder
+                            border.width: 1
+                        }
+                        contentItem: Text {
+                            text: monthClearBtn.text
+                            color: Theme.textPrimary
+                            font.pixelSize: Theme.fontCaption
+                            horizontalAlignment: Text.AlignHCenter
+                            verticalAlignment: Text.AlignVCenter
+                        }
+                        onClicked: LibraryModel.clearMonthFilter()
+                    }
+
+                    Button {
+                        id: unknownOnlyBtn
+                        height: parent.height
+                        padding: 0
+                        text: "미상만"
+                        checkable: true
+                        checked: LibraryModel.unknownOnly
+                        onToggled: LibraryModel.unknownOnly = checked
+                        background: Rectangle {
+                            radius: Theme.radiusSm
+                            color: unknownOnlyBtn.checked ? Theme.accentGlow : Theme.surfaceLight
+                            border.color: unknownOnlyBtn.checked || unknownOnlyBtn.activeFocus ? Theme.accentNeon : Theme.glassBorder
+                            border.width: 1
+                        }
+                        contentItem: Text {
+                            text: unknownOnlyBtn.text
+                            color: unknownOnlyBtn.checked ? Theme.accentNeon : Theme.textPrimary
+                            font.pixelSize: Theme.fontCaption
+                            horizontalAlignment: Text.AlignHCenter
+                            verticalAlignment: Text.AlignVCenter
+                            leftPadding: 10
+                            rightPadding: 10
+                        }
+                    }
+
+                }
+
                 ComboBox {
                     id: sortCombo
                     height: root.libToolbarH
                     width: 190
                     focusPolicy: Qt.StrongFocus
-                    model: ["품번순", "날짜순 (최신)", "날짜순 (오래된)", "씬 수 (많은)", "최근 갱신순", "배우순 (ㄱ~ㅎ)", "배우순 (ㅎ~ㄱ)", "자막 있음 우선", "모파 우선", "좋아요 ↓", "좋아요 ↑"]
+                    model: [
+                        "품번순",
+                        "날짜순 (최신)",
+                        "날짜순 (오래된)",
+                        "씬 수 (많은)",
+                        "최근 갱신순",
+                        "배우순 (ㄱ~ㅎ)",
+                        "배우순 (ㅎ~ㄱ)",
+                        "자막 있음 우선",
+                        "모파 우선",
+                        "좋아요 ↓",
+                        "좋아요 ↑",
+                        "♥ 기간증가 순",
+                        "♥ 기간감소 순",
+                        "별점순"
+                    ]
                     currentIndex: LibraryModel.sortMode
                     onCurrentIndexChanged: LibraryModel.sortMode = currentIndex
 
@@ -923,6 +1092,8 @@ Item {
                         verticalAlignment: Text.AlignVCenter
                         leftPadding: Theme.spacingSm
                     }
+
+                    popup.modal: true
 
                     onFocusChanged: function() {
                         if (sortCombo.focus)
@@ -956,6 +1127,48 @@ Item {
                             focusGridFromToolbar(false)
                             event.accepted = true
                         }
+                    }
+                }
+
+                ComboBox {
+                    id: favDeltaCombo
+                    height: root.libToolbarH
+                    width: 138
+                    focusPolicy: Qt.StrongFocus
+                    model: ["♥변동 끔", "7일", "30일", "90일"]
+                    currentIndex: {
+                        var d = LibraryModel.favoriteDeltaDays
+                        if (d === 7) return 1
+                        if (d === 30) return 2
+                        if (d === 90) return 3
+                        return 0
+                    }
+                    onActivated: function(i) {
+                        var map = [0, 7, 30, 90]
+                        if (i >= 0 && i < map.length)
+                            LibraryModel.favoriteDeltaDays = map[i]
+                    }
+
+                    background: Rectangle {
+                        radius: Theme.radiusSm
+                        color: Theme.surfaceLight
+                        border.color: Theme.glassBorder
+                        border.width: 1
+                    }
+                    contentItem: Text {
+                        text: favDeltaCombo.displayText
+                        font.pixelSize: Theme.fontCaption - 1
+                        color: Theme.textPrimary
+                        verticalAlignment: Text.AlignVCenter
+                        leftPadding: Theme.spacingSm
+                    }
+
+                    popup.modal: true
+
+                    ToolTip {
+                        text: "좋아요만 재크롤로 쌓인 스냅샷 기준, 최근 며칠 동안 사이트 ♥ 합계 증가(Δ). 그리드·상세 반영 • 정렬 '♥ 기간…'에는 기본 7일 적용."
+                        visible: parent.hovered
+                        delay: 500
                     }
                 }
 
@@ -1099,6 +1312,7 @@ Item {
                     GridView {
                         id: grid
                         anchors.fill: parent
+                        enabled: !root.libraryToolbarComboPopupOpen
                         cellWidth: Math.floor(width / Math.max(1, Math.floor(width / 210)))
                         cellHeight: Math.floor(cellWidth * 1.48)
                         clip: true
@@ -1142,6 +1356,10 @@ Item {
                             lampHardcoded: model.lampHardcoded
                             lampMopa: model.lampMopa
                             favoriteScore: model.favoriteScore !== undefined ? model.favoriteScore : 0
+                            favoriteDelta: model.favoriteDelta !== undefined && model.favoriteDelta !== null ? model.favoriteDelta : null
+                            showFavoriteDelta: LibraryModel.favoriteDeltaDays !== 0
+                            userRating: model.userRating !== undefined ? model.userRating : 0
+                            userLiked: model.userLiked !== undefined ? model.userLiked : false
                             selectionMode: root.selectMode
                             selected: root._isSelected(model.productCode)
 

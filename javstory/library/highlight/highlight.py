@@ -11,6 +11,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Optional
 
+from javstory.utils.ffmpeg_path import get_ffmpeg
+
 try:
     import cv2  # type: ignore
 except Exception:  # pragma: no cover
@@ -154,7 +156,7 @@ def _extract_frames_ffmpeg(
 
     # CUDA 디코딩을 우선 시도하고, 실패하면 소프트웨어 경로로 폴백한다.
     cmd_cuda = [
-        "ffmpeg",
+        get_ffmpeg(),
         "-y",
         "-hwaccel",
         "cuda",
@@ -182,7 +184,7 @@ def _extract_frames_ffmpeg(
     files = sorted(list(temp_dir.glob("f_*.jpg")))
     if not files:
         cmd_sw = [
-            "ffmpeg",
+            get_ffmpeg(),
             "-y",
             "-ss",
             f"{start_time:.2f}",
@@ -391,7 +393,7 @@ def _encode_and_merge(
         for i, seg in enumerate(valid):
             seg_path = (temp_dir_abs / f"seg_{i}.mp4").as_posix()
             cmd = [
-                "ffmpeg",
+                get_ffmpeg(),
                 "-y",
                 "-ss",
                 str(seg["start"]),
@@ -423,7 +425,7 @@ def _encode_and_merge(
                 progress_cb(_clamp_percent(70.0 + ((i + 1) / float(total)) * 25.0))  # 70~95
 
     merge_cmd = [
-        "ffmpeg",
+        get_ffmpeg(),
         "-y",
         "-f",
         "concat",

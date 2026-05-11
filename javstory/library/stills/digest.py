@@ -9,6 +9,7 @@ import re
 from pathlib import Path
 from typing import Callable, Optional
 from javstory.library.stills.extract import probe_video_duration_seconds
+from javstory.utils.ffmpeg_path import get_ffmpeg
 
 logger = logging.getLogger(__name__)
 
@@ -47,7 +48,7 @@ def create_digest_video(
     
     # 1. RTX 3080Ti 타겟: 최강 속도의 CUDA 하드웨어 렌더링 세팅
     cmd_cuda = [
-        "ffmpeg", "-y",
+        get_ffmpeg(), "-y",
         "-hwaccel", "auto", # 디코딩 가속 활성화
         "-skip_frame", "nokey", # [초고속 핵심] 키프레임 외의 모든 불필요한 프레임 디코딩 완전 생략
         "-i", str(vp),
@@ -62,7 +63,7 @@ def create_digest_video(
     
     # 2. 예비용: CUDA 칩이 꽉 찼거나(NVENC Limit 초과) 에러 발생 시 원래 쓰던 CPU 렌더링으로 백업
     cmd_cpu = [
-        "ffmpeg", "-y",
+        get_ffmpeg(), "-y",
         "-skip_frame", "nokey", # [초고속 핵심] CPU 방식에서도 키프레임만 스킵하여 엄청난 속도 향상
         "-i", str(vp),
         "-vf", f"fps={extract_fps},setpts=N/30/TB,scale={width}:-2",

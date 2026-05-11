@@ -1,11 +1,16 @@
 from __future__ import annotations
 
+import logging
 import os
 import subprocess
 from pathlib import Path
 from typing import Callable, Optional
 
+from javstory.utils.ffmpeg_path import get_ffmpeg, get_ffprobe
+
 ProgressCb = Optional[Callable[[int], None]]
+
+logger = logging.getLogger(__name__)
 
 
 def _startupinfo_hidden() -> object | None:
@@ -27,7 +32,7 @@ def _ffprobe_duration_sec(path: Path) -> float:
     try:
         cp = subprocess.run(
             [
-                "ffprobe",
+                get_ffprobe(),
                 "-v",
                 "error",
                 "-show_entries",
@@ -118,7 +123,7 @@ def create_golden_preview(
 
     # WebP 생성
     cmd = [
-        "ffmpeg",
+        get_ffmpeg(),
         "-y",
         "-ss",
         f"{start:.2f}",
@@ -141,11 +146,63 @@ def create_golden_preview(
     ]
     if progress_callback:
         progress_callback(_clamp(40))
-    subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, startupinfo=_startupinfo_hidden(), check=False)
-    if not out.is_file() or out.stat().st_size <= 0:
-        return None
+
+    try:
+        cp = subprocess.run(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            startupinfo=_startupinfo_hidden(),
+            check=False,
+            timeout=180,
+        )
+        rc = cp.returncode
+        stderr_text = (cp.stderr or b"").decode("utf-8", errors="replace")
+    except subprocess.TimeoutExpired as e_to:
+        rc = -999
+        stderr_text = f"TimeoutExpired: {e_to}"
+    except Exception as e_run:
+        rc = -1
+        stderr_text = f"subprocess exception: {e_run!r}"
+
+    if rc != 0 or not out.is_file() or out.stat().st_size <= 0:
+        # ffmpeg 실패 시 stderr에서 의미 있는 진단 메시지를 추출해 호출자에게 전달.
+        # PreviewWorker 등이 이 RuntimeError 메시지를 그대로 사용자에게 노출한다.
+        reason = _extract_ffmpeg_failure_reason(stderr_text)
+        logger.warning(
+            "create_golden_preview failed: pc=%s rc=%s reason=%s src=%s",
+            pc, rc, reason, src,
+        )
+        raise RuntimeError(f"ffmpeg 실패(rc={rc}): {reason} | 입력: {src.name}")
 
     if progress_callback:
         progress_callback(_clamp(100))
     return out
+
+
+def _extract_ffmpeg_failure_reason(stderr_text: str) -> str:
+    """ffmpeg stderr에서 사용자에게 보여줄 핵심 한 줄을 추출한다."""
+    if not stderr_text:
+        return "출력 없음"
+    txt = stderr_text.strip()
+    # 잘 알려진 손상 시그니처를 우선 매칭
+    signatures = [
+        ("moov atom not found", "손상된 MP4(컨테이너 헤더 누락: moov atom not found)"),
+        ("Invalid data found when processing input", "손상되었거나 미완성 영상 파일(Invalid data)"),
+        ("No such file or directory", "원본 영상 파일을 열 수 없음"),
+        ("Permission denied", "원본 영상 파일 접근 권한 없음"),
+        ("Operation not permitted", "원본 영상 파일 접근 거부"),
+        ("Protocol not found", "지원하지 않는 입력 경로/프로토콜"),
+        ("Cannot allocate memory", "메모리 부족"),
+        ("low score", "컨테이너 형식 식별 실패(파일 손상 의심)"),
+    ]
+    for needle, label in signatures:
+        if needle.lower() in txt.lower():
+            return label
+    # 시그니처에 매칭되지 않으면 마지막으로 의미 있는 "Error" 라인을 찾는다
+    for line in reversed(txt.splitlines()):
+        s = line.strip()
+        if s.lower().startswith("error") and len(s) < 240:
+            return s
+    return txt.splitlines()[-1].strip()[:200] if txt.splitlines() else "원인 불명"
 
