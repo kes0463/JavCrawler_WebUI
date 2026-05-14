@@ -200,12 +200,27 @@ class TranslationQueueController(QAbstractListModel):
             self.endResetModel()
             self._emit_count_and_state()
             log_ts(f"[TranslationQueue] restored {len(norm)} item(s) from disk (이어서 하기로 진행)")
+            # 재시작 직후 사용자가 이어하기를 누르지 않아도 큐가 자동으로 진행되도록
+            QTimer.singleShot(500, self, self._process_next)
         except Exception as e:
             log_ts(f"[TranslationQueue] load persisted failed: {e}")
 
     @Slot()
     def resume(self) -> None:
         """앱 재시작 후 큐에 남은 항목을 이어서 처리."""
+        # 실제 QThread가 돌고 있는데 큐만 초기화하면 동일 SKU로 워커가 중복 실행될 수 있음(크롤+번역 이중 실행·멈춘 것처럼 보임).
+        if any(getattr(w, "isRunning", lambda: False)() for w in self._active_workers.values()):
+            try:
+                self.toastMessage.emit("번역이 진행 중입니다. 완료된 뒤 이어하기를 눌러주세요.", "warning")
+            except Exception:
+                pass
+            return
+        if self._is_running and self._active_workers:
+            try:
+                self.toastMessage.emit("번역 결과를 정리하는 중입니다. 잠시 후 다시 시도해주세요.", "info")
+            except Exception:
+                pass
+            return
         if self._is_running and not self._active_workers:
             self._is_running = False
         for i, it in enumerate(self._items):
@@ -286,8 +301,10 @@ class TranslationQueueController(QAbstractListModel):
 
     @Slot()
     def _process_next(self):
-        # 데드락 방지: 실행 중이라고 되어있으나 워커가 하나도 없으면 리셋
-        if self._is_running and not self._active_workers:
+        # 데드락 방지: 플래그만 켜져 있고 추적 중인 워커가 없을 때만 리셋.
+        # UI에 status=running 행이 남아 있으면 실제 스레드가 도는 중일 수 있어 여기서 리셋하면 중복 워커가 뜰 수 있음.
+        _has_running_row = any((it.get("status") == "running") for it in self._items)
+        if self._is_running and not self._active_workers and not _has_running_row:
             log_ts("[TranslationQueue] Deadlock detected. Resetting is_running flag.")
             self._is_running = False
 
@@ -319,12 +336,47 @@ class TranslationQueueController(QAbstractListModel):
         log_ts(f"[TranslationQueue] Starting translation for: {sku}")
         
         worker = TranslationWorker(sku, vp)
+        # 지연 cleanup으로 dict에만 남아 있는 종료된 워커 참조 제거
+        for _k, _w in list(self._active_workers.items()):
+            try:
+                if not getattr(_w, "isRunning", lambda: False)():
+                    del self._active_workers[_k]
+            except Exception:
+                pass
         self._active_workers[sku] = worker
         
         # 워커 종료 시 안전하게 정리
-        worker.finished.connect(lambda ok, msg: self._on_finished(sku, ok, msg, worker))
-        worker.finished.connect(worker.deleteLater) # Qt에게 삭제 위임
+        worker.translationFinished.connect(
+            lambda ok, msg, s=sku, w=worker: self._on_finished(s, ok, msg, w)
+        )
+        # 스레드가 완전히 끝난 뒤: dict 정리·좀비(running만 남은 경우) 재큐·다음 작업 예약
+        worker.finished.connect(lambda s=sku, w=worker: self._on_worker_thread_exited(s, w))
+        worker.finished.connect(worker.deleteLater)
         worker.start()
+
+    def _on_worker_thread_exited(self, sku: str, worker: TranslationWorker) -> None:
+        """QThread 종료 시점. dict 정리만 하고, 결과 시그널이 없을 때만 running 행을 재큐한다.
+        Qt 이벤트 순서상 finished 가 translationFinished 슬롯보다 먼저 올 수 있어 _translation_notified 로 구분한다."""
+        try:
+            if self._active_workers.get(sku) is worker:
+                del self._active_workers[sku]
+        except Exception:
+            pass
+        if getattr(worker, "_translation_notified", False):
+            # 정상 경로: _on_finished 가 진행·다음 작업 예약을 담당
+            return
+        for i, it in enumerate(self._items):
+            if it.get("sku") == sku and it.get("status") == "running":
+                log_ts(f"[TranslationQueue] 스레드 종료 후에도 '{sku}'가 running — 재시도 큐로 복구합니다.")
+                it["status"] = "queued"
+                it["progress"] = 0
+                self.dataChanged.emit(
+                    self.index(i), self.index(i), [self.StatusRole, self.ProgressRole]
+                )
+                break
+        self._is_running = False
+        self.stateChanged.emit()
+        QTimer.singleShot(0, self, lambda: QTimer.singleShot(500, self, self._process_next))
 
     def _on_finished(self, sku, success, msg, worker):
         self._is_running = False
@@ -342,13 +394,6 @@ class TranslationQueueController(QAbstractListModel):
                 except Exception:
                     pass
             QTimer.singleShot(0, _refresh_library)
-        
-        # 워커 참조 지연 제거 (worker 객체를 직접 캡처하여 2초간 생존 보장)
-        def _cleanup(w_ref=worker):
-            if sku in self._active_workers:
-                del self._active_workers[sku]
-        
-        QTimer.singleShot(2000, _cleanup)
 
         # 리스트에서 해당 SKU 제거 (완료 시)
         for i, item in enumerate(self._items):

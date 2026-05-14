@@ -5,12 +5,15 @@ from PySide6.QtCore import QThread, Signal
 from javstory.harvest.coordinator import run_crawler_for_video_path
 
 class TranslationWorker(QThread):
-    finished = Signal(bool, str) # success, message
+    """QThread.finished(무인자)와 이름이 겹치면 스레드 종료·deleteLater 연결이 꼬일 수 있어 별도 시그널 사용."""
+    translationFinished = Signal(bool, str)  # success, message
 
     def __init__(self, sku: str, video_path: str, parent=None):
         super().__init__(parent)
         self.sku = sku
         self.video_path = video_path
+        # QThread.finished 가 translationFinished 슬롯보다 먼저 오는 경우 좀비 복구 오동작 방지용
+        self._translation_notified: bool = False
 
     def run(self):
         loop = asyncio.new_event_loop()
@@ -47,6 +50,7 @@ class TranslationWorker(QThread):
             message = str(e)
         finally:
             loop.close()
-        
-        # 루프 종료 후 시그널 전송
-        self.finished.emit(success, message)
+
+        # emit 직전에 설정 → finished 슬롯이 먼저 실행돼도 메인 스레드에서 True로 관측됨
+        self._translation_notified = True
+        self.translationFinished.emit(success, message)

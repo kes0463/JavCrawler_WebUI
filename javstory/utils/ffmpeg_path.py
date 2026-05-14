@@ -14,12 +14,14 @@ from __future__ import annotations
 
 import os
 import shutil
+import sys
 import threading
 from pathlib import Path
 from typing import Optional
 
 _LOCK = threading.Lock()
 _CACHE: dict[str, str] = {}
+_PATH_BOOTSTRAPPED = False
 
 
 def _is_executable_file(p: Path) -> bool:
@@ -121,6 +123,43 @@ def reset_cache() -> None:
     """캐시를 초기화한다(환경변수 변경 등 런타임 변동 대응용)."""
     with _LOCK:
         _CACHE.clear()
+
+
+def bootstrap_path_env() -> None:
+    """PATH 의존 ffmpeg 호출을 위해 해석된 실행 파일 디렉터리를 PATH 앞쪽에 추가한다."""
+    global _PATH_BOOTSTRAPPED
+    with _LOCK:
+        if _PATH_BOOTSTRAPPED:
+            return
+
+    try:
+        dirs: list[str] = []
+        seen: set[str] = set()
+        for exe in (get_ffmpeg(), get_ffprobe()):
+            p = Path(exe)
+            if not p.is_absolute() or not _is_executable_file(p):
+                continue
+            parent = str(p.parent)
+            key = os.path.normcase(os.path.normpath(parent))
+            if key in seen:
+                continue
+            seen.add(key)
+            dirs.append(parent)
+
+        current_parts = [part for part in os.environ.get("PATH", "").split(os.pathsep) if part]
+        current_keys = {os.path.normcase(os.path.normpath(part)) for part in current_parts}
+        prepend = [
+            part
+            for part in dirs
+            if os.path.normcase(os.path.normpath(part)) not in current_keys
+        ]
+        if prepend:
+            os.environ["PATH"] = os.pathsep.join(prepend + current_parts)
+    except Exception as exc:
+        print(f"[ffmpeg_path] PATH bootstrap failed: {exc}", file=sys.stderr)
+    finally:
+        with _LOCK:
+            _PATH_BOOTSTRAPPED = True
 
 
 def describe() -> dict[str, str]:

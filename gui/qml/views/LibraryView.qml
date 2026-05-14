@@ -702,11 +702,36 @@ Item {
                     Accessible.role: Accessible.Button
                     Accessible.name: "장르 선택"
 
+                    function _tokenizeSearchExpr(q) {
+                        var out = []
+                        var buf = ""
+                        var inQuote = false
+                        var s = q || ""
+                        for (var i = 0; i < s.length; i++) {
+                            var ch = s.charAt(i)
+                            if (ch === '"') {
+                                inQuote = !inQuote
+                                continue
+                            }
+                            if (!inQuote && /\s/.test(ch)) {
+                                if (buf.length) {
+                                    out.push(buf)
+                                    buf = ""
+                                }
+                                continue
+                            }
+                            buf += ch
+                        }
+                        if (buf.length)
+                            out.push(buf)
+                        return out
+                    }
+
                     function _genreState(name) {
                         var q = (LibraryModel.searchQuery || "")
                         if (!q || !name)
                             return "none"
-                        var tokens = q.split(/\s+/)
+                        var tokens = _tokenizeSearchExpr(q)
                         var nl = name.toLowerCase()
                         for (var i = 0; i < tokens.length; i++) {
                             var t = tokens[i]

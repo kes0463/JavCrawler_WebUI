@@ -22,6 +22,8 @@ logging.getLogger("onnxruntime").setLevel(logging.ERROR)
 
 from javstory.utils.dll_patcher import apply_dll_patch
 apply_dll_patch()
+from javstory.utils.ffmpeg_path import bootstrap_path_env
+bootstrap_path_env()
 
 if __name__ == "__main__":
     os.environ["QT_AUTO_SCREEN_SCALE_FACTOR"] = "1"

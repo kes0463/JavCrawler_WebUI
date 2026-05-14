@@ -12,6 +12,7 @@ from typing import Callable, Optional
 import ffmpeg
 
 from javstory.transcription.stt_types import STTCancelled, STTProgressEvent
+from javstory.utils.ffmpeg_path import bootstrap_path_env, get_ffmpeg
 
 OptionalLogger = Optional[Callable[[str], None]]
 ProgressCallback = Optional[Callable[[STTProgressEvent], None]]
@@ -20,6 +21,7 @@ CancelCheck = Optional[Callable[[], bool]]
 from javstory.transcription.win_cuda_dlls import add_windows_cuda_dll_paths  # noqa: E402
 
 add_windows_cuda_dll_paths()
+bootstrap_path_env()
 
 import torch  # noqa: E402
 import stable_whisper  # noqa: E402
@@ -48,7 +50,7 @@ def extract_audio_16k_mono(
     (
         ffmpeg.input(video_path)
         .output(str(wav_path), ac=1, ar=16000, acodec="pcm_s16le")
-        .run(overwrite_output=True, quiet=True)
+        .run(cmd=get_ffmpeg(), overwrite_output=True, quiet=True)
     )
 
 
