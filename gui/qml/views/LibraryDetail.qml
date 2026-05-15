@@ -1649,7 +1649,7 @@ Item {
                 }
 
                 ActionButton {
-                    text: "스토리 컨텍스트(Grok4.1)"
+                    text: "스토리 컨텍스트(Grok)"
                     primary: false
                     neonGlow: true
                     visible: !LibraryModel.detailEditing
