@@ -7,11 +7,13 @@ import re
 from pathlib import Path
 
 from PySide6.QtCore import QObject, Property, Signal, Slot
+
 from gui.watch_resume import (
     last_position_ms_for_video,
     merge_last_positions_json,
     normalize_watch_video_key,
 )
+from javstory.harvest.database import get_db_session_ctx, UserPreference, WatchHistory
 
 class PlayerModel(QObject):
     """

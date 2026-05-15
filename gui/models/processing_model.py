@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+from javstory.utils.product_code import extract_product_code_from_path
 from PySide6.QtCore import (
     QObject, Property, Signal, Slot,
     QAbstractListModel, QModelIndex, Qt,
@@ -302,10 +303,7 @@ class ProcessingModel(QObject):
         if self._queue_type == "stt":
             self._run_stt(path)
         elif self._queue_type == "subtitle":
-            # 파일명에서 품번 추출 시도 (확장자 제거)
-            pc = os.path.splitext(os.path.basename(path))[0]
-            # 여기서는 파일명 베이스를 그대로 PC로 사용
-            self._run_subtitle(pc, path)
+            self._run_subtitle("", path)
         else:
             self.logMessage.emit(f"[오류] 알 수 없는 큐 타입: {self._queue_type}")
             self._finish_queue()
@@ -319,8 +317,18 @@ class ProcessingModel(QObject):
 
     def _run_subtitle(self, product_code: str, video_path: str):
         from gui.workers.subtitle_worker import SubtitleWorker
+
+        # Grok 캐시·DB 조회는 품번(예: ABW-358)이어야 함 — 전체 파일 stem을 쓰면
+        # `-__ACTRESS_____ABW-358__HD___grok.json` 같은 비정상 캐시 파일이 생김.
+        pc = extract_product_code_from_path(video_path)
+        if not pc:
+            pc = (product_code or "").strip()
+        if not pc:
+            pc = os.path.splitext(os.path.basename(video_path))[0]
+        pc = pc.strip().upper()
+
         self._subtitle_worker = SubtitleWorker(
-            product_code=product_code,
+            product_code=pc,
             video_path=video_path,
             parent=self,
         )
