@@ -1,12 +1,15 @@
 """
 플랜 정식: `Transcription/correction_chunk.py` — 일본어 자막 LLM 교정(청크·JSON 출력·CORRECTION_MODE).
 
-Pass1: Grok 계열 — 시놉시스·자막 샘플 → 보조 컨텍스트 JSON.
+Pass1: 기본은 라이브러리와 동일한 Grok 웹 스토리 캐시(`run_story_grok_after_harvest_async`)를 사용(모델·프롬프트 공유).
+  캐시 없을 때만 생성; 실패 시 레거시 시놉시스·자막 샘플 + `correction_llm_tier(1)` 폴백.
+  `JAVSTORY_CORRECTION_USE_STORY_CONTEXT_CACHE=0` 이면 항상 레거시 Pass1만 사용.
 Pass2(및 선택적 Pass3): 플랜 프롬프트(reference_strong | reference_weak | baseline_only), 출력은 JSON 배열만.
 `claude_polish=True`면 플랜 Pass2 기본 모델(GLM 5.1 등)을 건너뛰고 Claude(Pass3 티어)로 주교정만 수행한다.
 `Transcription/json_extract.py`로 펜스·괄호 균형 파싱. API는 지수 백오프 재시도.
 
 속도 조절(환경변수):
+- JAVSTORY_CORRECTION_USE_STORY_CONTEXT_CACHE: 1(기본)이면 Grok 웹 스토리 캐시 우선·라이브러리와 동일 티어; 0이면 시놉+자막 샘플 레거시 Pass1만.
 - JAVSTORY_CORRECTION_PASS2_CONCURRENCY: Pass2 동시 요청 (미설정 시 GLM=3, 그 외 OpenRouter=2, Ollama=1, 상한 8). 429 시 백오프.
 - JAVSTORY_CORRECTION_PASS3_CONCURRENCY: Pass3 동시 요청 (기본 1).
 - JAVSTORY_CORRECTION_CHUNK_TARGET_SEC / _OVERLAP_SEC: 청크 길이·겹침(초) 강제. 미설정 시 DeepSeek V3.2 18s/5s, DeepSeek 기타 16s/4s, GLM-5.1 14s/4s, Ollama는 `_ollama_chunk_params_by_model` (Qwen3.5:9B 16/4.5, Qwen3:8B 15/4, Qwen3:14B 18/5, Qwen2.5:14B 17/4.5, Gemma3:12B 16/4.5, Gemma4 16/4 등), 기타 Ollama ~300s/20s, MiniMax ~30s/6s, 그 외 ~50s/10s.
@@ -702,63 +705,110 @@ async def correct_ja_segments_async(
     except Exception:
         pass
 
-    log(f"[CORRECTION] [Pass 1] 컨텍스트 — {tier_p1.get('name')} / {tier_p1.get('model')}")
-
-    MAX_CHARS = 3000
-    sample_lines: List[str] = []
-    total_chars = 0
-    for s in segments:
-        line = f"[{s.start:.1f}s] {s.text}"
-        if total_chars + len(line) > MAX_CHARS:
-            break
-        sample_lines.append(line)
-        total_chars += len(line)
-    raw_subtitles = "\n".join(sample_lines)
-
-    sys_p1 = (
-        "あなたはアダルトビデオ専門の字幕校正アシスタントです。\n"
-        "与えられたシノプシスと字幕サンプルをもとに、登場人物の関係と口調を分析してください。\n"
-        "結果は必ずJSON形式のみで出力してください。"
-    )
-    user_p1 = (
-        f"## シノプシス\n{synopsis}\n\n"
-        f"## 字幕サンプル\n{raw_subtitles}\n\n"
-        "## 出力フォーマット\n"
-        '{"characters": [{"name": "名前", "kana": "よみがな", "role": "役割"}], '
-        '"proper_nouns": ["固有名詞"], '
-        '"story_summary": "概要200字以内"}'
-    )
-
     context_json: Dict[str, Any] = {}
-    try:
-        messages_p1 = [
-            {"role": "system", "content": sys_p1},
-            {"role": "user", "content": user_p1},
-        ]
-        raw_res = await route_with_backoff(
-            router, messages_p1, tier_p1, log=_correction_retry_log(log)
-        )
-        if raw_res:
-            processed = re.sub(
-                r"<redacted_thinking>.*?</redacted_thinking>",
-                "",
-                raw_res,
-                flags=re.DOTALL,
-            ).strip()
-            obj = parse_json_object(processed)
-            if obj:
-                context_json = obj
-            else:
-                m = re.search(r"(\{.*\})", processed, re.DOTALL)
-                if m:
-                    try:
-                        context_json = json.loads(m.group(1))
-                    except json.JSONDecodeError:
-                        pass
-            log("[CORRECTION] [Pass 1] 완료")
-    except Exception as e:
-        log(f"[CORRECTION] Pass 1 실패: {e}")
+    use_story_cache = os.environ.get("JAVSTORY_CORRECTION_USE_STORY_CONTEXT_CACHE", "1").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+    pc_eff = (product_code or "").strip().upper()
 
+    if use_story_cache and pc_eff and pc_eff != "UNKNOWN":
+        from javstory.config.app_config import library_story_context_batch_tier
+        from javstory.translation.story_grok_module import (
+            load_cached_grok_json_flexible,
+            run_story_grok_after_harvest_async,
+        )
+        from javstory.translation.story_context_prompts import format_story_context_for_translation
+
+        tier_sc = library_story_context_batch_tier()
+        log(
+            f"[CORRECTION] 스토리 컨텍스트(Grok 웹·라이브러리 동일 티어) — "
+            f"{tier_sc.get('model')} · {pc_eff}"
+        )
+        grok_data = load_cached_grok_json_flexible(pc_eff, tier_sc)
+        if grok_data:
+            log("[CORRECTION] 스토리 컨텍스트 디스크 캐시 사용")
+        else:
+            log("[CORRECTION] 스토리 컨텍스트 캐시 없음 — Grok 웹검색 생성 시도")
+            await run_story_grok_after_harvest_async(
+                product_code=pc_eff,
+                logger_func=log,
+                story_context_tier=tier_sc,
+                force_refresh=False,
+            )
+            grok_data = load_cached_grok_json_flexible(pc_eff, tier_sc)
+            if grok_data:
+                log("[CORRECTION] 스토리 컨텍스트 캐시 생성·로드 완료")
+            else:
+                log("[CORRECTION] 스토리 컨텍스트 확보 실패 — 레거시 Pass1 폴백")
+
+        if grok_data:
+            hints = format_story_context_for_translation(grok_data)
+            if not (hints or "").strip():
+                hints = json.dumps(grok_data, ensure_ascii=False)[:12000]
+            context_json = {
+                "source": "library_grok_story_cache",
+                "product_code": str(grok_data.get("product_code") or pc_eff),
+                "correction_hints": hints,
+            }
+
+    if not context_json:
+        log(f"[CORRECTION] [Pass 1] 레거시 컨텍스트 — {tier_p1.get('name')} / {tier_p1.get('model')}")
+        MAX_CHARS = 3000
+        sample_lines: List[str] = []
+        total_chars = 0
+        for s in segments:
+            line = f"[{s.start:.1f}s] {s.text}"
+            if total_chars + len(line) > MAX_CHARS:
+                break
+            sample_lines.append(line)
+            total_chars += len(line)
+        raw_subtitles = "\n".join(sample_lines)
+
+        sys_p1 = (
+            "あなたはアダルトビデオ専門の字幕校正アシスタントです。\n"
+            "与えられたシノプシスと字幕サンプルをもとに、登場人物の関係と口調を分析してください。\n"
+            "結果は必ずJSON形式のみで出力してください。"
+        )
+        user_p1 = (
+            f"## シノプシス\n{synopsis}\n\n"
+            f"## 字幕サンプル\n{raw_subtitles}\n\n"
+            "## 出力フォーマット\n"
+            '{"characters": [{"name": "名前", "kana": "よみがな", "role": "役割"}], '
+            '"proper_nouns": ["固有名詞"], '
+            '"story_summary": "概要200字以内"}'
+        )
+
+        try:
+            messages_p1 = [
+                {"role": "system", "content": sys_p1},
+                {"role": "user", "content": user_p1},
+            ]
+            raw_res = await route_with_backoff(
+                router, messages_p1, tier_p1, log=_correction_retry_log(log)
+            )
+            if raw_res:
+                processed = re.sub(
+                    r"<think>.*?</think>",
+                    "",
+                    raw_res,
+                    flags=re.DOTALL,
+                ).strip()
+                obj = parse_json_object(processed)
+                if obj:
+                    context_json = obj
+                else:
+                    m = re.search(r"(\{.*\})", processed, re.DOTALL)
+                    if m:
+                        try:
+                            context_json = json.loads(m.group(1))
+                        except json.JSONDecodeError:
+                            pass
+                log("[CORRECTION] [Pass 1] 레거시 완료")
+        except Exception as e:
+            log(f"[CORRECTION] Pass 1 레거시 실패: {e}")
     # MiniMax 전용 안정화(환경변수 JAVSTORY_MINIMAX_*): ref/ctx는 Pass1 이후에만 적용한다.
     ref_strong_p2 = ref_strong
     ref_weak_p2 = ref_weak

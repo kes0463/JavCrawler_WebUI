@@ -597,6 +597,11 @@ def story_context_llm_tier(**overrides: Any) -> dict:
     return base
 
 
+def library_story_context_batch_tier() -> dict[str, Any]:
+    """라이브러리 '스토리 컨텍스트' 배치·자막 교정 스토리 캐시 경로와 동일한 OpenRouter Grok 티어 (드리프트 방지)."""
+    return story_context_llm_tier(model="x-ai/grok-4.1-fast:online")
+
+
 def story_analysis_llm_tier(**overrides: Any) -> dict:
     """호환 별칭 — `story_context_llm_tier` 사용 권장."""
     return story_context_llm_tier(**overrides)

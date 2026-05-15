@@ -157,10 +157,67 @@ def load_cached_grok_json(
         return None
 
 
+def load_cached_grok_json_flexible(
+    product_code: str,
+    story_context_tier: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    """디스크 캐시 로드. 기본 경로 실패 시 라이브러리 그리드와 동일한 레거시 파일명·glob 폴백."""
+    tier = merge_story_context_tier(story_context_tier)
+    raw = (product_code or "").strip()
+    if not raw:
+        return None
+    pc_upper = raw.upper()
+
+    hit = load_cached_grok_json(raw, tier)
+    if hit:
+        return hit
+    hit = load_cached_grok_json(pc_upper, tier)
+    if hit:
+        return hit
+
+    model = str(tier.get("model") or "")
+
+    def _read(path: Path) -> dict[str, Any] | None:
+        if not path.is_file():
+            return None
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            return data if isinstance(data, dict) else None
+        except (OSError, json.JSONDecodeError):
+            return None
+
+    legacy_hints = [
+        "",
+        f"{model}:online" if model and ":online" not in model else "",
+        "x-ai/grok-4.1-fast:online",
+        "grok-4-fast:online",
+    ]
+    for hint in legacy_hints:
+        cand = story_context_cache_path(pc_upper, hint)
+        got = _read(cand)
+        if got:
+            return got
+
+    try:
+        pc_prefix = f"{pc_upper}__"
+        d = story_context_cache_dir()
+        matches = [p for p in d.glob(f"{pc_prefix}*.json") if p.is_file()]
+        if matches:
+            matches.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+            got = _read(matches[0])
+            if got:
+                return got
+    except Exception:
+        pass
+
+    return None
+
+
 __all__ = [
     "merge_story_context_tier",
     "run_story_grok_after_harvest_async",
     "load_cached_grok_json",
+    "load_cached_grok_json_flexible",
     "story_context_cache_dir",
     "story_context_cache_path",
 ]

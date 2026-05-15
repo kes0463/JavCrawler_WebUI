@@ -11,7 +11,8 @@
 `JAVSTORY_TRANSLATION_PROVIDER`, `JAVSTORY_TRANSLATION_OLLAMA_MODEL`,
 `JAVSTORY_TRANSLATION_CHUNK_TARGET_SEC` / `_OVERLAP_SEC` (미설정 시 `JAVSTORY_CORRECTION_CHUNK_*` → 티어 기본: DeepSeek V3.2 18s/5s, DeepSeek Chat 16s/4s, GLM-5.1 14s/4s, Ollama는 `correction_chunk._ollama_chunk_params_by_model` 과 동일 — Qwen3:14B 18/5, Qwen3.5:9B 16/4.5, Qwen3:8B 15/4, Qwen2.5:14B 17/4.5, Gemma3:12B 16/4.5, Gemma4 16/4, 기타 Ollama 300s/20s, 그 외 OpenRouter 50s/10s),
 `JAVSTORY_TRANSLATION_QWEN_MAX_TOKENS`(Qwen만, `JAVSTORY_TRANSLATION_OLLAMA_MAX_TOKENS` 미설정 시 기본 2048),
-`JAVSTORY_TRANSLATION_CONCURRENCY`, `JAVSTORY_LOG_FULL_TRANSLATION_PROMPT`(1/true 시 system+user 전체 로그),
+`JAVSTORY_TRANSLATION_CONCURRENCY`, `JAVSTORY_LOG_FULL_TRANSLATION_PROMPT`(1/true 시 청크마다 system+user 전체 로그),
+`JAVSTORY_LOG_TRANSLATION_START_DETAILS`(1/true 시 번역 시작 직후 시스템 프롬프트·번역 노트(전역/배우/작품/결합)·스토리 힌트 요약 로그),
 `JAVSTORY_SUBTITLE_COLLAPSE_VOCAL_REPEAT`(0/false 시 번역 직후 동일 한글 반복 압축 비활성; 기본 1),
 `JAVSTORY_TRANSLATION_QWEN_TEMPERATURE`(Ollama+Qwen 번역 시 온도, 기본 0.22 — 다국어 혼입 완화)
 `JAVSTORY_TRANSLATION_OLLAMA_NO_NEUTRAL_FALLBACK`(1/true 시 Ollama+Qwen도 기존 강한 system으로만 재시도; 기본은 JSON 실패 시 완화 system)
@@ -316,6 +317,71 @@ def _want_full_translation_prompt_log(explicit: Optional[bool]) -> bool:
     )
 
 
+def _want_translation_start_details_log(explicit: Optional[bool]) -> bool:
+    if explicit is True:
+        return True
+    if explicit is False:
+        return False
+    return os.environ.get("JAVSTORY_LOG_TRANSLATION_START_DETAILS", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+
+
+def _log_translation_start_details(
+    log: Callable[[str], None],
+    *,
+    tier: Dict[str, Any],
+    background_json_str: str,
+    extra_hints: str,
+    combined_user_note: str,
+    translation_note_global: str,
+    translation_note_actress: str,
+    translation_note_work: str,
+) -> None:
+    """번역 첫 청크 전에 시스템 프롬프트와 노트 구성을 한 번 출력."""
+    sep = "=" * 72
+    prov = str(tier.get("provider") or "").lower()
+
+    def _note_block(title: str, body: str) -> None:
+        b = (body or "").strip()
+        log(f"[KO-TRANSLATE] ─ {title} ({len(b)}자)" + ("" if b else " — 비어 있음"))
+        if b:
+            log(b)
+
+    log(sep)
+    log(
+        f"[KO-TRANSLATE] 번역 시작 상세 — provider={prov or '(기본)'} "
+        f"model={tier.get('model') or ''}"
+    )
+    _note_block("번역 노트 · 전역", translation_note_global)
+    _note_block("번역 노트 · 배우", translation_note_actress)
+    _note_block("번역 노트 · 작품", translation_note_work)
+    _note_block("번역 노트 · 결합(combine_translation_notes)", combined_user_note)
+    if (extra_hints or "").strip():
+        _note_block("스토리/참조 힌트 → Gemini merged_hints·JSON [TranslationHints]에 포함", extra_hints)
+    else:
+        log("[KO-TRANSLATE] ─ 스토리/참조 힌트 — 비어 있음")
+
+    if prov == "gemini":
+        from javstory.translation import gemini_prompts
+
+        merged_hints = "\n\n".join(
+            [s for s in (extra_hints, combined_user_note) if s and str(s).strip()]
+        )
+        note = gemini_prompts.build_translation_note(background_json_str, merged_hints)
+        sys_prompt = gemini_prompts.build_system_prompt_jav_subtitle(note)
+        log(f"[KO-TRANSLATE] ─ 시스템 프롬프트 (Gemini, {len(sys_prompt)}자)")
+        log(sys_prompt)
+    else:
+        sys_body = system_prompt_translation_chunk(tier)
+        log(f"[KO-TRANSLATE] ─ 시스템 프롬프트 (JSON 번역 경로, {len(sys_body)}자)")
+        log(sys_body)
+    log(sep)
+
+
 def _compact_translation_user_content_for_log(content: str, *, chunk_idx: int) -> str:
     """
     `JAVSTORY_LOG_FULL_TRANSLATION_PROMPT` 덤프 시 `[TranslationHints]`(Grok 스토리 힌트 전체)가
@@ -373,6 +439,7 @@ async def translate_ja_segments_to_ko_async(
     logger_func: OptionalLogger = None,
     should_cancel: CancelCheck = None,
     log_full_translation_prompt: Optional[bool] = None,
+    log_translation_start_details: Optional[bool] = None,
 ) -> List[SimpleSegment]:
     """
     일본어 세그먼트 리스트를 한국어로 번역한다. 세그먼트 객체가 제자리에서 갱신된다.
@@ -383,6 +450,7 @@ async def translate_ja_segments_to_ko_async(
 
     log = logger_func or print
     log_full_prompt = _want_full_translation_prompt_log(log_full_translation_prompt)
+    log_start_details = _want_translation_start_details_log(log_translation_start_details)
     if not segments:
         log("[KO-TRANSLATE] 세그먼트 없음 — 스킵")
         return segments
@@ -445,6 +513,17 @@ async def translate_ja_segments_to_ko_async(
         f"[KO-TRANSLATE] 시작 — {tier.get('name')} / {tier.get('model')} "
         f"(청크≈{target_dur:.0f}s, 겹침≈{overlap_dur:.0f}s, 동시≤{conc}, 총 청크 {total_chunks})"
     )
+    if log_start_details:
+        _log_translation_start_details(
+            log,
+            tier=tier,
+            background_json_str=background_json_str,
+            extra_hints=extra_hints,
+            combined_user_note=combined_user_note,
+            translation_note_global=translation_note_global or "",
+            translation_note_actress=translation_note_actress or "",
+            translation_note_work=translation_note_work or "",
+        )
     if tier.get("provider") == "ollama" and "qwen" in (tier.get("model") or "").lower():
         log(
             "[KO-TRANSLATE] 로컬 Qwen(Ollama)은 GPU·모델 크기에 따라 청크당 매우 느릴 수 있습니다. "

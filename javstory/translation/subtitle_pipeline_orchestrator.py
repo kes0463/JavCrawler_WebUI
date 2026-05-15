@@ -124,6 +124,7 @@ def _translation_forward_kwargs(kwargs: dict[str, Any]) -> dict[str, Any]:
         "should_cancel",
         "logger_func",
         "log_full_translation_prompt",
+        "log_translation_start_details",
         "story_context_grok_json",
         "translation_note_global",
         "translation_note_actress",

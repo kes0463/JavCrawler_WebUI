@@ -2879,10 +2879,10 @@ class LibraryModel(QObject):
             fail = 0
             try:
                 import asyncio
-                from javstory.config.app_config import story_context_llm_tier
+                from javstory.config.app_config import library_story_context_batch_tier
                 from javstory.translation.story_grok_module import run_story_grok_after_harvest_async
 
-                tier = story_context_llm_tier(model="x-ai/grok-4.1-fast:online")
+                tier = library_story_context_batch_tier()
 
                 for pc in pcs:
                     try:
