@@ -230,7 +230,7 @@ class SubtitlePipelineTestApp(tk.Tk):
             textvariable=self.var_story_context_model,
             values=[
                 "env",
-                "x-ai/grok-4.1-fast:online",
+                "x-ai/grok-4.3:online",
                 "x-ai/grok-4-fast:online",
                 "grok-4-fast:online",
             ],
@@ -374,7 +374,7 @@ class SubtitlePipelineTestApp(tk.Tk):
                 kwargs["translation_tier"] = tier
 
                 from javstory.config.app_config import story_context_llm_tier
-                from javstory.translation.story_grok_module import story_context_cache_path
+                from javstory.translation.story_grok_module import story_context_cache_path_grok
 
                 scm = (self.var_story_context_model.get() or "env").strip()
                 if scm and scm != "env":
@@ -389,15 +389,13 @@ class SubtitlePipelineTestApp(tk.Tk):
                     sc_tier = {**story_context_llm_tier(), **sc_raw}
                 else:
                     sc_tier = story_context_llm_tier()
-                cache_json = story_context_cache_path(pc, str(sc_tier.get("model") or ""))
+                cache_json = story_context_cache_path_grok(pc)
                 self._log_line(f"[GUI] 품번={pc!r} | 작업 폴더={work_path}")
                 self._log_line(
                     f"[GUI] KO 번역 티어: provider={tier.get('provider')} | model={tier.get('model')} | name={tier.get('name')}"
                 )
-                self._log_line(
-                    f"[GUI] Grok 스토리 모델: {sc_tier.get('model')}"
-                )
-                self._log_line(f"[GUI] 스토리 캐시(JSON) 기본 경로: {cache_json}")
+                self._log_line(f"[GUI] Grok 스토리 모델: {sc_tier.get('model')}")
+                self._log_line(f"[GUI] 스토리 캐시(JSON) 경로: {cache_json}")
                 if self.var_enable_story_context.get():
                     self._log_line(
                         f"[GUI] 작업 폴더 저장(스토리 사용 시): "
@@ -411,7 +409,10 @@ class SubtitlePipelineTestApp(tk.Tk):
                 orch = SubtitlePipelineOrchestrator(router)
 
                 async def _run() -> None:
-                    await orch.run_for_product(pc, **kwargs)
+                    try:
+                        await orch.run_for_product(pc, **kwargs)
+                    finally:
+                        await router.close()
 
                 asyncio.run(_run())
                 self._log_line("[GUI] 파이프라인 정상 종료.")

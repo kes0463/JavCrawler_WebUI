@@ -16,7 +16,7 @@ import pysrt
 
 from javstory.library.canonical.schema import LibraryCanonical, SceneEntry
 from javstory.library.paths import work_library_dir
-from javstory.translation.story_grok_module import load_cached_grok_json
+from javstory.translation.story_grok_module import load_cached_grok_json_flexible
 
 
 def _norm_ws(s: str) -> str:
@@ -188,7 +188,11 @@ def build_embedding_documents(
     # 2. Grok Story Context (if exists)
     if include_grok_story:
         try:
-            grok = load_cached_grok_json(state.product_code)
+            from javstory.config.app_config import library_story_context_batch_tier
+
+            grok = load_cached_grok_json_flexible(
+                state.product_code, library_story_context_batch_tier()
+            )
             if grok and not grok.get("code_mismatch"):
                 grok_lines = ["[grok_story_context]"]
                 grok_lines.append(f"Title: {grok.get('title_ko') or grok.get('title_ja')}")
@@ -205,7 +209,7 @@ def build_embedding_documents(
                     "doc_id": f"{state.product_code}::grok_story",
                     "kind": "grok_story",
                     "text": _safe_join(grok_lines),
-                    "meta": {**base_meta, "source": "grok-4.1-fast"},
+                    "meta": {**base_meta, "source": "grok-4.3-online"},
                 })
         except Exception:
             pass

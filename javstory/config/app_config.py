@@ -570,8 +570,8 @@ def harvest_translation_llm_tier() -> dict:
 # JAVSTORY_STORY_CONTEXT_USE_CACHE / JAVSTORY_STORY_CONTEXT_FORCE
 # ============================================================
 STORY_CONTEXT_MODEL = (
-    os.environ.get("JAVSTORY_STORY_CONTEXT_MODEL", "x-ai/grok-4.1-fast:online").strip()
-    or "x-ai/grok-4.1-fast:online"
+    os.environ.get("JAVSTORY_STORY_CONTEXT_MODEL", "x-ai/grok-4.3:online").strip()
+    or "x-ai/grok-4.3:online"
 )
 
 STORY_CONTEXT_TEMPERATURE = float(os.environ.get("JAVSTORY_STORY_CONTEXT_TEMPERATURE", "0.3") or 0.3)
@@ -599,7 +599,7 @@ def story_context_llm_tier(**overrides: Any) -> dict:
 
 def library_story_context_batch_tier() -> dict[str, Any]:
     """라이브러리 '스토리 컨텍스트' 배치·자막 교정 스토리 캐시 경로와 동일한 OpenRouter Grok 티어 (드리프트 방지)."""
-    return story_context_llm_tier(model="x-ai/grok-4.1-fast:online")
+    return story_context_llm_tier(model="x-ai/grok-4.3:online")
 
 
 def story_analysis_llm_tier(**overrides: Any) -> dict:

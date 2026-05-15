@@ -18,7 +18,7 @@ Base = declarative_base()
 # DB 스키마/마이그레이션 가드 버전.
 # - SQLite `PRAGMA user_version`에 저장한다.
 # - 테이블/컬럼 마이그레이션 로직을 변경하면 이 값을 올려서 1회 재실행되게 한다.
-_APP_DB_SCHEMA_VERSION = 7
+_APP_DB_SCHEMA_VERSION = 8
 
 class JAVMetadata(Base):
     """
@@ -144,7 +144,8 @@ class WatchHistory(Base):
     product_code = Column(String(50), index=True)
     watch_duration = Column(Integer, default=0)  # 누적 시청 시간(초) — 재생 중 업데이트
     total_duration = Column(Integer, default=0)  # 영상 전체 길이(초)
-    last_position = Column(Integer, default=0)   # 마지막 시청 위치(ms)
+    last_position = Column(Integer, default=0)   # 마지막 시청 위치(ms) — 레거시·최근 세션
+    last_positions_json = Column(Text, nullable=True)  # 파트별 위치 {"정규화경로": ms}
     repeat_segments = Column(Text, nullable=True) # 반복 시청 구간 (JSON)
     skip_count = Column(Integer, default=0)       # 스킵 횟수 (앞으로 5초 이상 점프)
     session_count = Column(Integer, default=0)    # 총 재생 세션 수
@@ -437,6 +438,7 @@ def init_db():
     _migrate_v5_favorite_crawl_failed_at()
     _migrate_v6_actress_translation_note()
     _migrate_v7_favorite_score_history()
+    _migrate_v8_watch_history_part_positions()
     _ensure_indexes_and_optimize()
     try:
         with sqlite3.connect(DB_PATH) as conn:
@@ -579,6 +581,24 @@ def _migrate_v7_favorite_score_history():
             print("[DB Migration v7] favorite_score_history 준비 완료")
     except Exception as e:
         print(f"[DB Migration v7] 실패: {e}")
+
+
+def _migrate_v8_watch_history_part_positions():
+    """v8: watch_history.last_positions_json — 파트(파일)별 이어보기 위치"""
+    import sqlite3
+
+    try:
+        with sqlite3.connect(DB_PATH) as conn:
+            cursor = conn.cursor()
+            cols = [row[1] for row in cursor.execute("PRAGMA table_info(watch_history)")]
+            if "last_positions_json" not in cols:
+                cursor.execute(
+                    "ALTER TABLE watch_history ADD COLUMN last_positions_json TEXT"
+                )
+                print("[DB Migration v8] watch_history.last_positions_json 컬럼 추가 완료")
+            conn.commit()
+    except Exception as e:
+        print(f"[DB Migration v8] 실패: {e}")
 
 
 def _migrate_v6_actress_translation_note():

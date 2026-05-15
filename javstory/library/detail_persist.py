@@ -51,17 +51,37 @@ from javstory.library.paths import library_state_path
 
 
 def resolve_story_json_paths(product_code: str) -> list[Path]:
-    """번역 파이프라인이 참조하는 story_context 캐시 경로(티어 유무)."""
-    from javstory.translation.story_grok_module import merge_story_context_tier, story_context_cache_path
+    """캐노니컬 동기화 대상 story JSON 경로. 현행 `{품번}_grok.json` 최우선, 레거시는 파일이 있을 때만."""
+    from javstory.translation.story_grok_module import (
+        merge_story_context_tier,
+        story_context_cache_path,
+        story_context_cache_path_grok,
+        story_context_cache_dir,
+    )
 
+    pc = (product_code or "").strip().upper()
     tier = merge_story_context_tier(None)
     model_hint = str(tier.get("model") or "").strip()
     paths: list[Path] = []
-    p1 = story_context_cache_path(product_code, model_hint)
-    p2 = story_context_cache_path(product_code, "")
+    primary = story_context_cache_path_grok(pc)
+    paths.append(primary)
+
+    p1 = story_context_cache_path(pc, model_hint)
+    p2 = story_context_cache_path(pc, "")
     for p in (p1, p2):
-        if p not in paths:
+        if p.is_file() and p not in paths:
             paths.append(p)
+
+    stem = primary.stem
+    pc_san = stem[:-5] if stem.endswith("_grok") else stem
+    try:
+        d = story_context_cache_dir()
+        for p in sorted(d.glob(f"{pc_san}__*.json")):
+            if p.is_file() and p not in paths:
+                paths.append(p)
+    except OSError:
+        pass
+
     return paths
 
 

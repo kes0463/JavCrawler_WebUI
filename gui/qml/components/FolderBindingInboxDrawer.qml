@@ -21,6 +21,8 @@ Drawer {
     }
     signal removeRequested(string productCode)
     signal clearRequested()
+    signal pauseAllListedMonitoringRequested()
+    signal monitoringToast(string message)
 
     edge: Qt.RightEdge
     width: Math.min(440, parent ? parent.width * 0.92 : 440)
@@ -51,6 +53,13 @@ Drawer {
 
             ActionButton {
                 visible: root.inboxModel && root.inboxModel.count > 0
+                text: "목록 감시 중지"
+                primary: false
+                onClicked: root.pauseAllListedMonitoringRequested()
+            }
+
+            ActionButton {
+                visible: root.inboxModel && root.inboxModel.count > 0
                 text: "모두 지우기"
                 primary: false
                 onClicked: root.clearRequested()
@@ -58,7 +67,8 @@ Drawer {
         }
 
         Text {
-            text: "저장된 폴더가 없어진 작품입니다. 목록에서 항목을 열어 후보 경로를 고르거나 폴더를 지정하세요."
+            text: "저장된 폴더가 없어진 작품입니다. 목록에서 항목을 열어 후보 경로를 고르거나 폴더를 지정하세요. "
+                + "「감시 중지」는 이 품번에 대한 자동 재검색·후보 탐색을 끕니다(DB 연결은 유지)."
             wrapMode: Text.WordWrap
             Layout.fillWidth: true
             color: Theme.textSecondary
@@ -96,6 +106,10 @@ Drawer {
                     readonly property string op: model.oldPath || ""
                     readonly property string candJson: model.candidatesJson !== undefined ? model.candidatesJson : "[]"
                     readonly property var cands: root.parseCandidatesJson(candJson)
+                    readonly property bool watchPaused: {
+                        var _rev = FolderWatchService.pausedRevision
+                        return FolderWatchService.isMonitoringPaused(pc)
+                    }
 
                     ColumnLayout {
                         id: delegateCol
@@ -140,6 +154,21 @@ Drawer {
                                 primary: false
                                 Layout.fillWidth: false
                                 onClicked: root.removeRequested(pc)
+                            }
+
+                            ActionButton {
+                                text: watchPaused ? "감시 재개" : "감시 중지"
+                                primary: false
+                                Layout.fillWidth: false
+                                onClicked: {
+                                    if (watchPaused) {
+                                        FolderWatchService.resumeMonitoringForProduct(pc)
+                                        root.monitoringToast(pc + " — 폴더 감시를 재개했습니다.")
+                                    } else {
+                                        FolderWatchService.pauseMonitoringForProduct(pc)
+                                        root.monitoringToast(pc + " — 폴더 감시를 중지했습니다. (연결 정보는 유지)")
+                                    }
+                                }
                             }
 
                             Text {

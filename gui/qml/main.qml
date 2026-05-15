@@ -159,6 +159,18 @@ ApplicationWindow {
             removeFolderBindingFromInbox(pc)
         }
         onClearRequested: clearFolderBindingInbox()
+        onPauseAllListedMonitoringRequested: function () {
+            for (var i = 0; i < folderBindingInboxModel.count; i++) {
+                var row = folderBindingInboxModel.get(i)
+                var pc = row.productCode || ""
+                if (pc)
+                    FolderWatchService.pauseMonitoringForProduct(pc)
+            }
+            showToast("목록에 있는 작품의 폴더 감시를 중지했습니다. (항목은 유지 · DB 연결 유지)", "info")
+        }
+        onMonitoringToast: function (msg) {
+            showToast(msg, "info")
+        }
     }
 
     // 전역 토스트 헬퍼 (Python 모델에서 호출)
@@ -183,21 +195,37 @@ ApplicationWindow {
     }
 
     // ── 전역 플레이어 제어 ───────────────────────────
-    function playVideo(sku, videoPath, title, startRect) {
+    function playVideo(sku, videoPath, title, startRect, videoPaths) {
         if (!videoPath) {
             showToast("재생 가능한 영상 파일을 찾을 수 없습니다.", "error")
             return
         }
-        var resumePos = PlayerModel.getLastPosition(sku)
+        var paths = []
+        if (videoPaths && videoPaths.length > 0)
+            paths = videoPaths
+        else
+            paths = [videoPath]
+        var startIdx = 0
+        for (var pi = 0; pi < paths.length; pi++) {
+            if (paths[pi] === videoPath) {
+                startIdx = pi
+                break
+            }
+        }
+        var resumePath = paths[startIdx] || videoPath
+        var resumePos = PlayerModel.getLastPosition(sku, resumePath)
         playerLoader.active = true
         // Loader가 로드되는 시간을 기다렸다가 속성 설정
         Qt.callLater(function() {
             if (playerLoader.item) {
                 playerLoader.item.productCode = sku
-                playerLoader.item.videoSource = Theme.pathToUrl(videoPath)
+                playerLoader.item.videoPlaylist = paths
+                playerLoader.item.playlistIndex = startIdx
+                playerLoader.item.currentVideoFilePath = resumePath
                 playerLoader.item.title = title
                 playerLoader.item.startRect = startRect
                 playerLoader.item.resumePosition = resumePos
+                playerLoader.item.videoSource = Theme.pathToUrl(resumePath)
                 // 속성 주입 후 포커스 재확보 (mediaPlayer 로드가 포커스를 빼앗을 수 있음)
                 playerLoader.item.forceActiveFocus()
             }

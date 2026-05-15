@@ -1400,7 +1400,7 @@ Item {
                                 LibraryModel.loadDetail(pc)
                                 Qt.callLater(function() {
                                     if (LibraryModel.detail.productCode === pc) {
-                                        window.playVideo(pc, LibraryModel.detail.videoPath, LibraryModel.detail.titleKo, rect)
+                                        window.playVideo(pc, LibraryModel.detail.videoPath, LibraryModel.detail.titleKo, rect, LibraryModel.detail.videoPaths)
                                     }
                                 })
                             }

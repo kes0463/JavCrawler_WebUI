@@ -96,7 +96,14 @@ class SubtitleWorker(QThread):
                 kwargs["work_dir"] = self.work_dir
 
             self.progress.emit("JA 교정 + KO 번역 진행 중...", 20)
-            asyncio.run(orch.run_for_product(self.product_code, **kwargs))
+
+            async def _run_subtitle() -> None:
+                try:
+                    await orch.run_for_product(self.product_code, **kwargs)
+                finally:
+                    await router.close()
+
+            asyncio.run(_run_subtitle())
 
             ko_srt = str(video.with_suffix("")).rsplit(".ja", 1)[0] + ".ko.srt"
             if not Path(ko_srt).exists():

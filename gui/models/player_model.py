@@ -7,7 +7,11 @@ import re
 from pathlib import Path
 
 from PySide6.QtCore import QObject, Property, Signal, Slot
-from javstory.harvest.database import get_db_session_ctx, WatchHistory, UserPreference
+from gui.watch_resume import (
+    last_position_ms_for_video,
+    merge_last_positions_json,
+    normalize_watch_video_key,
+)
 
 class PlayerModel(QObject):
     """
@@ -97,14 +101,17 @@ class PlayerModel(QObject):
 
     # ── 진척도 업데이트 ─────────────────────────────────────
 
-    @Slot(str, int, int)
-    def updateProgress(self, product_code: str, position_ms: int, duration_sec: int):
+    @Slot(str, int, int, str)
+    def updateProgress(self, product_code: str, position_ms: int, duration_sec: int, video_path: str):
         """
         재생 중 주기적으로 호출되어 현재 위치를 저장합니다.
+        video_path가 비어 있으면 JSON 파트 맵은 건너뜁니다(레거시).
         90% 이상 시청 시 완료 처리 + 취향 점수 1 증가.
         """
         if not product_code:
             return
+
+        vkey = normalize_watch_video_key(video_path or "")
 
         with get_db_session_ctx() as session:
             history = session.query(WatchHistory).filter_by(
@@ -112,6 +119,12 @@ class PlayerModel(QObject):
             ).first()
             if history:
                 history.last_position = position_ms
+                if vkey:
+                    history.last_positions_json = merge_last_positions_json(
+                        getattr(history, "last_positions_json", None),
+                        vkey,
+                        position_ms,
+                    )
                 if duration_sec > 0:
                     progress = position_ms / (duration_sec * 1000)
                     if progress > 0.9 and not history.is_completed:
@@ -350,9 +363,9 @@ class PlayerModel(QObject):
         except Exception:
             pass
 
-    @Slot(str, result=int)
-    def getLastPosition(self, product_code: str) -> int:
-        """마지막 시청 위치(ms)를 반환합니다. 없으면 0."""
+    @Slot(str, str, result=int)
+    def getLastPosition(self, product_code: str, video_path: str) -> int:
+        """마지막 시청 위치(ms). video_path가 비면 레거시 last_position만 사용."""
         if not product_code:
             return 0
         try:
@@ -360,7 +373,13 @@ class PlayerModel(QObject):
                 h = session.query(WatchHistory).filter_by(
                     product_code=product_code
                 ).first()
-                return int(h.last_position or 0) if h else 0
+                if not h:
+                    return 0
+                return last_position_ms_for_video(
+                    legacy_last_position=int(h.last_position or 0),
+                    last_positions_json=getattr(h, "last_positions_json", None),
+                    video_path=video_path or "",
+                )
         except Exception:
             return 0
 

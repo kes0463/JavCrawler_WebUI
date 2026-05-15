@@ -29,7 +29,7 @@ from javstory.llm.engine import MultiTierRouter
 from javstory.translation.correction_chunk import correct_ja_segments_async
 from javstory.translation.ko_translation_chunk import translate_ja_segments_to_ko_async
 from javstory.translation.story_grok_module import (
-    load_cached_grok_json,
+    load_cached_grok_json_flexible,
     merge_story_context_tier,
 )
 from javstory.translation.story_context_prompts import format_story_context_for_translation
@@ -214,7 +214,8 @@ def _load_grok_cache(product_code: str, tier_raw: Any = None) -> tuple[dict | No
     pc = (product_code or "").strip()
     if not pc:
         return None, ""
-    data = load_cached_grok_json(pc, tier_raw if isinstance(tier_raw, dict) else None)
+    tier = merge_story_context_tier(tier_raw if isinstance(tier_raw, dict) else None)
+    data = load_cached_grok_json_flexible(pc, tier)
     if not isinstance(data, dict):
         return None, ""
     hints = format_story_context_for_translation(data)

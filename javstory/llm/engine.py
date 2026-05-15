@@ -229,14 +229,21 @@ class MultiTierRouter:
         )
 
     async def close(self) -> None:
-        """비동기 클라이언트 리소스를 명시적으로 해제합니다."""
-        try:
-            await self.or_client.close()
-            await self.ol_client.close()
-            if self.gemini_client:
-                await self.gemini_client.close()
-        except Exception as e:
-            self.logger(f"  [Router] 리소스 해제 중 오류 (무시 가능): {e}")
+        """비동기 클라이언트 리소스를 명시적으로 해제합니다.
+        asyncio.run() 종료 직후 백그라운드 aclose가 루프 종료와 맞물리면
+        Event loop is closed 가 날 수 있어 무시합니다.
+        """
+        for cl in (self.or_client, self.ol_client, self.gemini_client):
+            if cl is None:
+                continue
+            try:
+                await cl.close()
+            except RuntimeError as e:
+                if "Event loop is closed" in str(e):
+                    continue
+                self.logger(f"  [Router] 리소스 해제 RuntimeError: {e}")
+            except Exception as e:
+                self.logger(f"  [Router] 리소스 해제 중 오류 (무시 가능): {e}")
 
     async def is_refusal(self, response_text: str) -> bool:
         """검열 감지 로직 (None 방어 포함)"""

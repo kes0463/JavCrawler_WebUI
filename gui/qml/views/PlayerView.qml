@@ -15,6 +15,12 @@ Item {
     property string title: ""
     property int resumePosition: 0        // ms 단위, 0 = 처음부터
 
+    /** 멀티 파트 연속 재생: 로컬 파일 경로 문자열 목록 (QML 배열) */
+    property var videoPlaylist: []
+    property int playlistIndex: 0
+    /** DB·자막용 현재 파일 로컬 경로 */
+    property string currentVideoFilePath: ""
+
     property bool showControls: true
     property bool isPip: false
     property rect startRect: Qt.rect(0, 0, 0, 0)
@@ -266,8 +272,23 @@ Item {
                 PlayerModel.updateProgress(
                     playerRoot.productCode,
                     mediaPlayer.duration,
-                    Math.floor(mediaPlayer.duration / 1000)
+                    Math.floor(mediaPlayer.duration / 1000),
+                    playerRoot.currentVideoFilePath
                 )
+                if (playerRoot.videoPlaylist
+                        && playerRoot.videoPlaylist.length > playerRoot.playlistIndex + 1) {
+                    playerRoot.playlistIndex = playerRoot.playlistIndex + 1
+                    var nextPath = playerRoot.videoPlaylist[playerRoot.playlistIndex]
+                    playerRoot.currentVideoFilePath = nextPath
+                    playerRoot.resumePosition = PlayerModel.getLastPosition(
+                        playerRoot.productCode, nextPath)
+                    playerRoot._seekDone = false
+                    playerRoot._prevPosition = 0
+                    playerRoot._autoPlayPending = true
+                    playerRoot.videoSource = Theme.pathToUrl(nextPath)
+                    showOsd("▶ 다음 파트 (" + (playerRoot.playlistIndex + 1) + "/"
+                        + playerRoot.videoPlaylist.length + ")")
+                }
             }
         }
 
@@ -323,7 +344,8 @@ Item {
                 PlayerModel.updateProgress(
                     playerRoot.productCode,
                     mediaPlayer.position,
-                    Math.floor(mediaPlayer.duration / 1000)
+                    Math.floor(mediaPlayer.duration / 1000),
+                    playerRoot.currentVideoFilePath
                 )
         }
     }
@@ -836,7 +858,17 @@ Item {
             color: Qt.rgba(1, 1, 1, 0.85)
             font.pixelSize: 15; font.family: Theme.fontFamily
             elide: Text.ElideRight
-            width: parent.width - 100
+            width: parent.width - (playerRoot.videoPlaylist.length > 1 ? 120 : 100)
+        }
+        Text {
+            anchors.verticalCenter: parent.verticalCenter
+            anchors.right: parent.right
+            anchors.rightMargin: 24
+            visible: playerRoot.videoPlaylist.length > 1
+            text: (playerRoot.playlistIndex + 1) + " / " + playerRoot.videoPlaylist.length
+            color: Qt.rgba(1, 1, 1, 0.58)
+            font.pixelSize: 13
+            font.family: Theme.fontFamily
         }
     }
 

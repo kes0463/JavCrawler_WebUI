@@ -381,9 +381,10 @@ def create_engine(app) -> QQmlApplicationEngine:
 
     from gui.folder_watch_service import FolderMoveWatchService
 
-    _folder_watch = FolderMoveWatchService(library, parent=app)
-    library.summariesReloaded.connect(_folder_watch.refresh_paths_from_db)
-    QTimer.singleShot(2500, _folder_watch.refresh_paths_from_db)
+    folder_watch = FolderMoveWatchService(library, parent=app)
+    library.summariesReloaded.connect(folder_watch.refresh_paths_from_db)
+    QTimer.singleShot(2500, folder_watch.refresh_paths_from_db)
+    ctx.setContextProperty("FolderWatchService", folder_watch)
 
     # Harvest 수집/크롤링 로그를 실행 CMD(터미널)에도 출력 (QML 로그와 동일 내용)
     try:

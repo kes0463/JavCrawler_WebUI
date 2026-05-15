@@ -1,10 +1,10 @@
 """
 Grok 웹검색 스토리 맥락(JSON 캐시) — **공통 SoT**.
 
-- **생성**: Harvest 단계에서 Grok API로 캐시 생성
-- **소비**: `load_cached_grok_json` (API 없음, tone 주입용)
-- 중간 LLM 분석(story_context_report)은 제거됨.
-  Harvest에서 이미 캐시된 JSON을 직접 사용.
+- **저장 파일명**: `{기준품번}_grok.json` (`__HD__A` 등 폴더·화질 꼬리는 제외 후 `strip_split_suffixes`)
+- **레거시 읽기**: `{품번}__{모델슬러그}.json` 등 기존 규칙은 로드 폴백으로 계속 지원
+- **생성**: Harvest / 라이브러리 스토리 컨텍스트 / 자막 교정 등에서 Grok API 후 위 경로에 저장
+- **소비**: `load_cached_grok_json_flexible` 등(API 없음, tone 주입용)
 """
 from __future__ import annotations
 
@@ -26,6 +26,51 @@ from .story_context_prompts import (
 OptionalLogger = Optional[Callable[[str], None]]
 
 _ROOT = Path(__file__).resolve().parent.parent.parent
+
+# 폴더/파일명에 붙는 `품번__HD__A` 꼬리 — 기준 품번만으로 `*_grok.json` 을 맞추기 위함
+_STORY_CACHE_TAG_TOKENS = frozenset(
+    {
+        "HD", "FHD", "SD", "4K", "UHD", "HR", "LR", "HQ", "RAW",
+        "DVD", "BR", "BLURAY", "WEB", "SUB", "ENG", "JPN", "RIP",
+        "MOSAIC", "NOMOSAIC", "UNCENSORED", "CENSORED",
+    }
+)
+
+
+def _is_story_cache_tag_token(tok: str) -> bool:
+    t = (tok or "").strip()
+    if not t:
+        return False
+    u = t.upper()
+    if u in _STORY_CACHE_TAG_TOKENS:
+        return True
+    if len(t) == 1 and t.isalpha():
+        return True
+    if "모자이크" in t:
+        return True
+    return False
+
+
+def _normalize_story_cache_product_upper(product_code: str) -> str:
+    """`FC2-PPV-xxx__HD__A` 처럼 품번 뒤에 붙은 화질/분할 태그만 제거한 뒤 strip_split_suffixes."""
+    from javstory.utils.product_code import strip_split_suffixes
+
+    raw = (product_code or "").strip().upper()
+    if "__" in raw:
+        head, tail = raw.split("__", 1)
+        head = head.strip()
+        tail = tail.strip()
+        parts = [p for p in tail.split("__") if p.strip()]
+        if head and parts and all(_is_story_cache_tag_token(p) for p in parts):
+            raw = head
+    raw = (strip_split_suffixes(raw) or raw).strip()
+    return raw
+
+
+def _story_cache_base_id(product_code: str) -> str:
+    """스토리 캐시 파일명용: 정규화 품번 + 경로 안전 sanitize (레거시 `__모델` 접두와 glob 용)."""
+    norm = _normalize_story_cache_product_upper(product_code)
+    return re.sub(r"[^\w\-.]", "_", norm, flags=re.ASCII) or "unknown"
 
 
 def _resolve_openrouter_api_key() -> str:
@@ -57,11 +102,39 @@ def story_context_cache_dir() -> Path:
     return d
 
 
+def _sanitized_product_code(product_code: str) -> str:
+    """원본 문자열 기준 sanitize (레거시 `품번__모델` 경로 호환, 꼬리 태그 제거 없음)."""
+    raw_pc = (product_code or "").strip().upper()
+    return re.sub(r"[^\w\-.]", "_", raw_pc, flags=re.ASCII) or "unknown"
+
+
+def story_context_cache_path_grok(product_code: str) -> Path:
+    """현행 SoT: `{기준품번}_grok.json` (`__HD__A` 등 폴더 꼬리는 제외)."""
+    bid = _story_cache_base_id(product_code)
+    return story_context_cache_dir() / f"{bid}_grok.json"
+
+
 def story_context_cache_path(product_code: str, model_hint: str = "") -> Path:
-    pc = re.sub(r"[^\w\-.]", "_", product_code.strip(), flags=re.ASCII) or "unknown"
+    """레거시·폴백: `{품번}__{모델}.json` 또는 힌트 없으면 `{품번}.json`."""
+    pc = _sanitized_product_code(product_code)
     suffix = re.sub(r"[^\w\-.]", "_", model_hint.strip(), flags=re.ASCII) if model_hint else ""
     name = f"{pc}__{suffix}.json" if suffix else f"{pc}.json"
     return story_context_cache_dir() / name
+
+
+def _legacy_model_suffix_cache_exists(product_code: str) -> bool:
+    """`품번__*.json` 레거시 캐시 (기준 품번 접두 또는 원본 접두)."""
+    d = story_context_cache_dir()
+    base = _story_cache_base_id(product_code)
+    raw_san = _sanitized_product_code(product_code)
+    try:
+        if any(d.glob(f"{base}__*.json")):
+            return True
+        if raw_san != base and any(d.glob(f"{raw_san}__*.json")):
+            return True
+        return False
+    except OSError:
+        return False
 
 
 def merge_story_context_tier(raw: dict[str, Any] | None) -> dict[str, Any]:
@@ -89,12 +162,15 @@ async def run_story_grok_after_harvest_async(
 
     tier = merge_story_context_tier(story_context_tier)
     model_name = tier.get("model", "")
-    provider = str(tier.get("provider") or "openrouter").strip().lower()
-    path = story_context_cache_path(pc, str(model_name))
+    path_primary = story_context_cache_path_grok(pc)
 
-    if path.is_file() and not force_refresh:
-        log(f"✅ Grok 스토리 캐시 이미 존재: {path.name}")
-        return
+    if not force_refresh:
+        if path_primary.is_file():
+            log(f"✅ Grok 스토리 캐시 이미 존재: {path_primary.name}")
+            return
+        if _legacy_model_suffix_cache_exists(pc):
+            log(f"✅ Grok 스토리 캐시 이미 존재(레거시 __모델 파일): {pc} — 스킵")
+            return
 
     api_key = _resolve_openrouter_api_key()
     if not api_key:
@@ -115,17 +191,17 @@ async def run_story_grok_after_harvest_async(
         # 프롬프트에서 이미 JSON만 요청하므로 route() 호출.
         # :online 모델의 경우 가끔 JSON 모드가 안 될 수 있으므로 일반 호출 후 파싱.
         res_raw = await router.route(messages, tier_override=tier, json_mode=False)
-        log(f"✅ [Grok4.1 실제 응답 ({pc})]:\n{res_raw}\n")
+        log(f"✅ [Grok 스토리 응답 ({pc})]:\n{res_raw}\n")
 
         data = parse_grok_story_json(res_raw)
         if not data:
             log(f"❌ Grok 응답 파싱 실패 (JSON 형식 아님).")
             return
 
-        # 캐시 저장
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(story_context_json_dumps(data), encoding="utf-8")
-        log(f"✅ Grok 스토리 캐시 생성 완료: {path.name}")
+        # 캐시 저장 (현행 파일명만 사용)
+        path_primary.parent.mkdir(parents=True, exist_ok=True)
+        path_primary.write_text(story_context_json_dumps(data), encoding="utf-8")
+        log(f"✅ Grok 스토리 캐시 생성 완료: {path_primary.name}")
 
     except Exception as e:
         log(f"❌ Grok 스토리 분석 중 오류 발생: {e}")
@@ -142,19 +218,25 @@ def load_cached_grok_json(
     product_code: str,
     story_context_tier: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
-    """디스크 캐시 JSON만 로드(API 없음). KO 번역 청크의 scene tone 등에 사용."""
+    """디스크 캐시 JSON만 로드(API 없음). `{품번}_grok.json` 우선, 이어 티어별 레거시 경로."""
     pc = (product_code or "").strip()
     if not pc:
         return None
     tier = merge_story_context_tier(story_context_tier)
-    path = story_context_cache_path(pc, str(tier.get("model") or ""))
-    if not path.is_file():
-        return None
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-        return data if isinstance(data, dict) else None
-    except (OSError, json.JSONDecodeError):
-        return None
+    paths_try = (
+        story_context_cache_path_grok(pc),
+        story_context_cache_path(pc, str(tier.get("model") or "")),
+    )
+    for path in paths_try:
+        if not path.is_file():
+            continue
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                return data
+        except (OSError, json.JSONDecodeError):
+            continue
+    return None
 
 
 def load_cached_grok_json_flexible(
@@ -168,15 +250,6 @@ def load_cached_grok_json_flexible(
         return None
     pc_upper = raw.upper()
 
-    hit = load_cached_grok_json(raw, tier)
-    if hit:
-        return hit
-    hit = load_cached_grok_json(pc_upper, tier)
-    if hit:
-        return hit
-
-    model = str(tier.get("model") or "")
-
     def _read(path: Path) -> dict[str, Any] | None:
         if not path.is_file():
             return None
@@ -186,12 +259,40 @@ def load_cached_grok_json_flexible(
         except (OSError, json.JSONDecodeError):
             return None
 
-    legacy_hints = [
+    got = _read(story_context_cache_path_grok(pc_upper))
+    if got:
+        return got
+
+    hit = load_cached_grok_json(raw, tier)
+    if hit:
+        return hit
+    hit = load_cached_grok_json(pc_upper, tier)
+    if hit:
+        return hit
+
+    model = str(tier.get("model") or "")
+    env_model = str(story_context_llm_tier().get("model") or "")
+
+    legacy_seed: list[str | None] = [
+        env_model if env_model != model else None,
         "",
-        f"{model}:online" if model and ":online" not in model else "",
+        f"{model}:online" if model and ":online" not in model else None,
+        f"{env_model}:online" if env_model and ":online" not in env_model else None,
+        "x-ai/grok-4.3:online",
+        "x-ai/grok-4.3",
         "x-ai/grok-4.1-fast:online",
         "grok-4-fast:online",
     ]
+    legacy_hints: list[str] = []
+    seen_h: set[str] = set()
+    for h in legacy_seed:
+        if h is None:
+            continue
+        if h in seen_h:
+            continue
+        seen_h.add(h)
+        legacy_hints.append(h)
+
     for hint in legacy_hints:
         cand = story_context_cache_path(pc_upper, hint)
         got = _read(cand)
@@ -199,9 +300,18 @@ def load_cached_grok_json_flexible(
             return got
 
     try:
-        pc_prefix = f"{pc_upper}__"
         d = story_context_cache_dir()
-        matches = [p for p in d.glob(f"{pc_prefix}*.json") if p.is_file()]
+        base_id = _story_cache_base_id(pc_upper)
+        raw_id = _sanitized_product_code(pc_upper)
+        matches: list[Path] = []
+        seen: set[Path] = set()
+        for prefix in (base_id, raw_id):
+            if not prefix:
+                continue
+            for p in d.glob(f"{prefix}__*.json"):
+                if p.is_file() and p not in seen:
+                    seen.add(p)
+                    matches.append(p)
         if matches:
             matches.sort(key=lambda p: p.stat().st_mtime, reverse=True)
             got = _read(matches[0])
@@ -220,4 +330,5 @@ __all__ = [
     "load_cached_grok_json_flexible",
     "story_context_cache_dir",
     "story_context_cache_path",
+    "story_context_cache_path_grok",
 ]

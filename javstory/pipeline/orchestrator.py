@@ -268,6 +268,7 @@ async def run_product_pipeline_async(
                 )
 
             r = router or build_default_router(logger_func=log)
+            router_owned = router is None
             orch = SubtitlePipelineOrchestrator(r)
 
             sk.pop("product_code", None)
@@ -277,7 +278,11 @@ async def run_product_pipeline_async(
                 "work_dir": str(work_dir) if work_dir else str(vp.parent),
                 "logger_func": log,
             }
-            await orch.run_for_product(status.product_code, **merged)
+            try:
+                await orch.run_for_product(status.product_code, **merged)
+            finally:
+                if router_owned:
+                    await r.close()
             out["subtitle"] = "ok"
 
     return out

@@ -439,6 +439,8 @@ class LibraryDetailObject(QObject):
     def stillPaths(self): return self._get("still_paths", [])
     @Property(str, notify=changed)
     def videoPath(self): return self._get("video_path", "")
+    @Property(list, notify=changed)
+    def videoPaths(self): return self._get("video_paths", [])
     @Property(str, notify=changed)
     def grokScenesJson(self): return self._get("grok_scenes_json", "[]")
     @Property(bool, notify=changed)
@@ -1199,6 +1201,7 @@ class LibraryModel(QObject):
             "overall_summary": s.overall_summary_preview,
             "still_paths": [],
             "video_path": "",
+            "video_paths": [],
             "is_hardcoded": s.is_hardcoded,
             "is_mopa": getattr(s, "is_mopa", False),
             "has_ja_srt": s.has_ja_srt,
@@ -1225,49 +1228,11 @@ class LibraryModel(QObject):
         except Exception: pass
 
         try:
-            from javstory.translation.story_grok_module import (
-                story_context_cache_path,
-                story_context_cache_dir,
-                merge_story_context_tier,
-            )
-            tier = merge_story_context_tier(None)
-            model = str(tier.get("model") or "")
-            cp = story_context_cache_path(s.product_code, model)
-            if not cp.is_file():
-                # 모델 슬러그 변경(:online 제거 등)로 캐시 파일명이 달라질 수 있어,
-                # 레거시 후보를 순차적으로 탐색한다.
-                legacy_hints = [
-                    "",
-                    f"{model}:online" if model and ":online" not in model else "",
-                    "x-ai/grok-4.1-fast:online",
-                    "grok-4-fast:online",
-                ]
-                cp2 = None
-                for hint in legacy_hints:
-                    if not hint:
-                        cand = story_context_cache_path(s.product_code, "")
-                    else:
-                        cand = story_context_cache_path(s.product_code, hint)
-                    if cand.is_file():
-                        cp2 = cand
-                        break
+            from javstory.config.app_config import library_story_context_batch_tier
+            from javstory.translation.story_grok_module import load_cached_grok_json_flexible
 
-                # 마지막 fallback: 동일 품번의 가장 최신 캐시(PC__*.json)를 사용
-                if cp2 is None:
-                    try:
-                        pc_prefix = f"{(s.product_code or '').strip().upper()}__"
-                        d = story_context_cache_dir()
-                        matches = [p for p in d.glob(f"{pc_prefix}*.json") if p.is_file()]
-                        if matches:
-                            matches.sort(key=lambda p: p.stat().st_mtime, reverse=True)
-                            cp2 = matches[0]
-                    except Exception:
-                        cp2 = None
-
-                if cp2 is not None:
-                    cp = cp2
-            if cp.is_file():
-                gj = json.loads(cp.read_text(encoding="utf-8"))
+            gj = load_cached_grok_json_flexible(s.product_code, library_story_context_batch_tier())
+            if isinstance(gj, dict) and gj:
                 data["grok_verified"] = bool(gj.get("verification_ok") is True and gj.get("code_mismatch") is not True)
                 data["grok_mismatch_reason"] = str(gj.get("mismatch_reason") or "")
 
@@ -1365,12 +1330,20 @@ class LibraryModel(QObject):
 
         try:
             from gui.library_data import guess_video_path_for_product
+            from javstory.library.multipart.detect import sort_video_parts
+
             vp = guess_video_path_for_product(s.product_code, fp_bind or None)
             if vp:
-                data["video_path"] = str(vp)
-        except Exception: pass
+                data["video_path"] = str(Path(vp).resolve())
+            raw_paths = find_all_video_paths_for_product(s.product_code, fp_bind or None)
+            data["video_paths"] = [str(p.resolve()) for p in sort_video_parts(raw_paths)]
+            if not data.get("video_path") and data["video_paths"]:
+                data["video_path"] = data["video_paths"][0]
+        except Exception:
+            data["video_paths"] = data.get("video_paths") or []
 
         try:
+            from gui.watch_resume import last_position_ms_for_video
             from javstory.harvest.database import (
                 get_db_session_ctx,
                 WatchHistory,
@@ -1384,7 +1357,11 @@ class LibraryModel(QObject):
                 if wh:
                     data["watch_count"] = int(wh.session_count or 0)
                     data["watch_duration"] = int(wh.watch_duration or 0)
-                    data["last_position"] = int(wh.last_position or 0)
+                    data["last_position"] = last_position_ms_for_video(
+                        legacy_last_position=int(wh.last_position or 0),
+                        last_positions_json=getattr(wh, "last_positions_json", None),
+                        video_path=data.get("video_path") or "",
+                    )
                     data["user_rating"] = int(wh.rating or 0)
                     data["user_liked"] = bool(wh.liked)
                 else:
@@ -2113,8 +2090,10 @@ class LibraryModel(QObject):
                 # [추가] Grok 스토리 컨텍스트 로드 (문맥 분석용)
                 query_grok_text = ""
                 try:
-                    from javstory.translation.story_grok_module import load_cached_grok_json
-                    grok = load_cached_grok_json(pc)
+                    from javstory.config.app_config import library_story_context_batch_tier
+                    from javstory.translation.story_grok_module import load_cached_grok_json_flexible
+
+                    grok = load_cached_grok_json_flexible(pc, library_story_context_batch_tier())
                     if grok:
                         query_grok_text = " ".join([
                             str(grok.get("overall_summary") or ""),
@@ -2856,8 +2835,8 @@ class LibraryModel(QObject):
     def createStoryContextCacheForProducts(self, product_codes, force: bool = False) -> None:
         """
         라이브러리(다중 선택)에서 선택한 작품들의 Grok 스토리 컨텍스트 캐시를 생성한다.
-        - 모델: x-ai/grok-4.1-fast:online (OpenRouter)
-        - force=False면 기존 캐시가 있으면 스킵
+        - 모델: x-ai/grok-4.3:online (OpenRouter)
+        - 저장 파일: `{품번}_grok.json` (레거시 캐시만 있으면 스킵)
         """
         pcs: list[str] = []
         try:
@@ -2871,7 +2850,7 @@ class LibraryModel(QObject):
             self.toastMessage.emit("선택된 작품이 없습니다.", "warning")
             return
 
-        self.toastMessage.emit(f"[스토리 컨텍스트] {len(pcs)}개 캐시 생성 시작 (Grok 4.1 Fast)", "info")
+        self.toastMessage.emit(f"[스토리 컨텍스트] {len(pcs)}개 캐시 생성 시작 (Grok 4.3 :online)", "info")
 
         def _job():
             ok = 0
@@ -2898,9 +2877,13 @@ class LibraryModel(QObject):
                         # run_story_grok_after_harvest_async 자체가 "이미 존재"면 스킵 로그를 남기고 return하는데,
                         # 여기서는 간단히 파일 존재 여부로 결과를 추정한다.
                         try:
-                            from javstory.translation.story_grok_module import story_context_cache_path
-                            p = story_context_cache_path(pc, str(tier.get("model") or ""))
-                            if p.is_file():
+                            from javstory.translation.story_grok_module import (
+                                load_cached_grok_json_flexible,
+                                story_context_cache_path_grok,
+                            )
+
+                            p = story_context_cache_path_grok(pc)
+                            if p.is_file() or load_cached_grok_json_flexible(pc, tier):
                                 ok += 1
                             else:
                                 skipped += 1

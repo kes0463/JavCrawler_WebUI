@@ -90,7 +90,10 @@ async def _run(args: argparse.Namespace) -> None:
         kwargs["force_rebuild_story_context"] = True
 
     print("[test] run_for_product kwargs:", {k: kwargs[k] for k in sorted(kwargs)})
-    await orch.run_for_product(args.product_code, **kwargs)
+    try:
+        await orch.run_for_product(args.product_code, **kwargs)
+    finally:
+        await router.close()
     print("[test] 완료. work_dir에서 .ko.srt 확인.")
 
 

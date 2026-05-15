@@ -39,6 +39,16 @@ Item {
         root.back()
     }
 
+    function fileNameOnly(path) {
+        if (!path)
+            return ""
+        var s = String(path)
+        var a = s.lastIndexOf("/")
+        var b = s.lastIndexOf("\\")
+        var i = Math.max(a, b)
+        return i >= 0 ? s.substring(i + 1) : s
+    }
+
 
     /// 부모(LibraryView)에서 Shortcut 활성 조건용
     readonly property bool lightboxVisible: lightboxOverlay.visible
@@ -1973,8 +1983,72 @@ Item {
                                                 LibraryModel.detail.productCode,
                                                 LibraryModel.detail.videoPath,
                                                 LibraryModel.detail.titleKo,
-                                                Qt.rect(0, 0, 0, 0) // Detail view에서는 특정 시작 좌표 없이 전체 화면으로 실행
+                                                Qt.rect(0, 0, 0, 0),
+                                                LibraryModel.detail.videoPaths
                                             )
+                                        }
+                                    }
+                                }
+                            }
+
+                            Column {
+                                id: videoPartListCol
+                                width: parent.width
+                                spacing: 6
+                                visible: LibraryModel.detail.videoPaths.length > 1
+
+                                Text {
+                                    text: "영상 파트"
+                                    font.pixelSize: 11
+                                    color: Theme.textSecondary
+                                }
+
+                                Repeater {
+                                    model: LibraryModel.detail.videoPaths
+                                    delegate: Rectangle {
+                                        width: videoPartListCol.width
+                                        height: 34
+                                        radius: 6
+                                        color: pathPartMa.containsMouse ? Theme.navHover : Theme.surfaceLight
+                                        border.width: 1
+                                        border.color: Theme.glassBorder
+
+                                        property string partPath: (modelData !== undefined && modelData !== null)
+                                            ? String(modelData)
+                                            : ""
+
+                                        Text {
+                                            anchors.left: parent.left
+                                            anchors.leftMargin: 10
+                                            anchors.verticalCenter: parent.verticalCenter
+                                            text: (index + 1) + " — " + root.fileNameOnly(parent.partPath)
+                                            font.pixelSize: 12
+                                            color: Theme.textPrimary
+                                            elide: Text.ElideRight
+                                            width: parent.width - 52
+                                        }
+                                        Text {
+                                            anchors.right: parent.right
+                                            anchors.rightMargin: 10
+                                            anchors.verticalCenter: parent.verticalCenter
+                                            text: "▶"
+                                            font.pixelSize: 12
+                                            color: Theme.accentNeon
+                                        }
+                                        MouseArea {
+                                            id: pathPartMa
+                                            anchors.fill: parent
+                                            hoverEnabled: true
+                                            cursorShape: Qt.PointingHandCursor
+                                            onClicked: {
+                                                window.playVideo(
+                                                    LibraryModel.detail.productCode,
+                                                    parent.partPath,
+                                                    LibraryModel.detail.titleKo,
+                                                    Qt.rect(0, 0, 0, 0),
+                                                    LibraryModel.detail.videoPaths
+                                                )
+                                            }
                                         }
                                     }
                                 }
