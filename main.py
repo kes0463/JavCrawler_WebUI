@@ -65,10 +65,8 @@ if __name__ == "__main__":
         print("=" * 50)
         traceback.print_exc()
 
-        log_dir = _ROOT_GUI / "logs"
-        log_dir.mkdir(exist_ok=True)
-        with open(log_dir / "crash_report.txt", "w", encoding="utf-8") as f:
-            f.write(traceback.format_exc())
+        from javstory.utils.structured_log import write_boot_crash
 
-        print("\n상세 오류 내용이 'logs/crash_report.txt'에 저장되었습니다.")
+        txt_path = write_boot_crash()
+        print(f"\n상세 오류: '{txt_path}' 및 구조화 로그 'logs/javstory.jsonl'")
         input("종료하시려면 엔터키를 누르세요...")

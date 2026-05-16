@@ -172,6 +172,21 @@ class ErrorRecoveryService:
         stage_dir = self._get_stage_dir(stage)
         filename = f"{product_code}__{error_type.value}__{failed_at.strftime('%Y%m%d_%H%M%S')}.json"
         filepath = stage_dir / filename
+
+        try:
+            from javstory.utils.structured_log import log_event
+
+            log_event(
+                "ERROR",
+                "pipeline_error",
+                str(error),
+                product_code=product_code,
+                stage=stage.value,
+                error_type=error_type.value,
+                error_file=str(filepath),
+            )
+        except Exception:
+            pass
         
         async with aiofiles.open(filepath, 'w', encoding='utf-8') as f:
             await f.write(json.dumps(task.to_dict(), ensure_ascii=False, indent=2))

@@ -17,7 +17,8 @@
 | 화면 | [`gui/qml/main.qml`](../../gui/qml/main.qml), [`gui/qml/views/`](../../gui/qml/views/) |
 | 런처 (Windows) | [`start.bat`](../../start.bat) → `python main.py` |
 | 설치 | [`INSTALL.md`](../../INSTALL.md), [`setup.bat`](../../setup.bat) |
-| 부트 크래시 로그 | `logs/crash_report.txt` |
+| 부트 크래시 로그 | `logs/crash_report.txt`, `logs/javstory.jsonl` (`boot_crash`) |
+| 파이프라인 실패 | `data/error/04_ERROR/` + jsonl `pipeline_error` |
 | 파이프라인 실패 큐 | `data/error/04_ERROR/` ([`javstory/utils/error_recovery.py`](../../javstory/utils/error_recovery.py)) |
 
 ### 부트 시퀀스

@@ -4,13 +4,12 @@ from PySide6.QtCore import (
     Slot,
     QTimer,
     QAbstractListModel,
-    QCoreApplication,
-    QThread,
     Qt,
     QModelIndex,
 )
 from gui.workers.translation_worker import TranslationWorker
 from gui.utils.queue_persistence import clear_queue_state, load_queue_state, save_queue_state
+from gui.utils.qt_thread_util import is_on_app_main_thread
 from javstory.utils.common import log_ts
 
 PERSIST_NAME = "translation"
@@ -133,8 +132,7 @@ class TranslationQueueController(QAbstractListModel):
         self._schedule_persist()
 
     def _schedule_persist(self) -> None:
-        app = QCoreApplication.instance()
-        if app and QThread.currentThread() is not app.thread():
+        if not is_on_app_main_thread():
             QTimer.singleShot(0, self, self._schedule_persist)
             return
         self._persist_timer.start()
@@ -271,8 +269,7 @@ class TranslationQueueController(QAbstractListModel):
         """UI 스레드(컨트롤러의 스레드)가 아닌 곳(예: 수집 워커)에서 호출되면 메인에 위임한다."""
         s = (sku or "").strip().upper()
         vp = str(video_path or "")
-        app = QCoreApplication.instance()
-        if app is not None and QThread.currentThread() is not app.thread():
+        if not is_on_app_main_thread():
             QTimer.singleShot(0, self, lambda s2=s, v2=vp: self._enqueue_on_main(s2, v2))
             return
         self._enqueue_on_main(s, vp)

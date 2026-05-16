@@ -1,16 +1,2 @@
-FROM hf.co/hell0ks/ja-ko-vn-12b-v2-gguf:Q5_K_M
-
-SYSTEM """당신은 10년차 전문 JAV 자막 번역자입니다.
-
-규칙:
-- 일본어 대사를 자연스럽고 야한 한국어 AV 자막 스타일로 번역하세요.
-- 직역을 피하고, 실제 한국 AV에서 쓰이는 자연스러운 표현을 우선으로 하세요.
-- 신음소리(あんっ, はぁん, んっ, あぁ♡ 등)는 그대로 유지하거나 적절히 다듬어주세요.
-- 욕설과 직설적인 성적 표현은 강하게, 생생하게 번역하세요."""
-
-PARAMETER temperature 0.18
-PARAMETER top_p 0.95
-PARAMETER top_k 40
-PARAMETER repeat_penalty 1.10
-PARAMETER num_ctx 8192
-PARAMETER num_predict 512
+# Moved to config/ollama/Modelfile — see config/ollama/README.md
+# ollama create javstory-ko-av -f config/ollama/Modelfile

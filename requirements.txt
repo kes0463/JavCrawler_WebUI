@@ -1,11 +1,15 @@
+# --- Desktop (production: main.py + QML) ---
 PySide6>=6.7.2,<6.9
 psutil
-win32mica
+win32mica; sys_platform == "win32"
 darkdetect
+
+# --- STT (stable-ts only; do NOT add openai-whisper — transitive via stable-ts) ---
 scenedetect[opencv]
-faster-whisper
-stable-ts
-# whisper: stable-ts transitive 의존 — openai-whisper 직접 핀 제거(레거시)
+faster-whisper>=1.0.0,<2.0.0
+stable-ts>=2.17.0,<3.0.0
+
+# --- Harvest / LLM / IO ---
 tenacity
 openai
 requests
@@ -26,5 +30,8 @@ pysrt
 ffmpeg-python
 httpx
 ollama
-numpy>=1.24,<2.0
-# PyTorch / CUDA: requirements-torch.txt (선택·GPU) — INSTALL.md 참고
+# NumPy 2.x: 미검증 — torch/faster-whisper 스택과 1.26.x 대역 고정
+numpy>=1.26.0,<2.0
+
+# PyTorch + CUDA 12: requirements-torch.txt (GPU, requirements.txt 이후) — INSTALL.md
+# CUDA 11 (nvidia-*-cu11) 패키지는 requirements-torch.txt에 넣지 말 것

@@ -8,7 +8,7 @@
 
 | 항목 | 권장 |
 |------|------|
-| OS | Windows 10/11 (64-bit) |
+| OS | Windows 10/11 (64-bit) — [docs/PLATFORM.md](docs/PLATFORM.md) (Linux/macOS 실험) |
 | Python | **3.10 ~ 3.12** (`python --version`) |
 | GPU (선택) | NVIDIA + CUDA 12 드라이버 (STT GPU 가속) |
 | FFmpeg | PATH에 `ffmpeg` / `ffprobe` (또는 앱이 찾는 경로에 배치) |
@@ -59,6 +59,10 @@ python main.py
 | [`requirements.txt`](requirements.txt) | 앱 본체 (PySide6, Whisper/stable-ts, LLM, DB, …) |
 | [`requirements-torch.txt`](requirements-torch.txt) | **PyTorch + CUDA 12** (GPU STT) |
 | [`requirements-ci.txt`](requirements-ci.txt) | GitHub Actions — unit 테스트·import smoke (GPU·Qt 없음) |
+
+- CUDA **12만** (`requirements-torch.txt`). cu11 패키지는 추가하지 않습니다.
+- `openai-whisper`는 requirements에 없음 — `stable-ts` transitive.
+- 이슈 대조표: [`docs/ISSUES_STATUS.md`](docs/ISSUES_STATUS.md)
 
 ---
 
@@ -171,7 +175,8 @@ GPU·Whisper·PySide6 없이 핵심 로직·import만 검증합니다.
 |------|------|
 | CUDA unavailable / CPU만 사용 | `venv` 활성화 여부, `pip show torch` 버전, CPU wheel vs CUDA wheel |
 | `setup.bat` 실패 | Python PATH, `pip install` 로그, 방화벽/프록시 |
-| 앱 즉시 종료 | `logs/crash_report.txt` |
+| 앱 즉시 종료 | `logs/crash_report.txt`, `logs/javstory.jsonl` |
+| Ollama 로컬 번역 모델 | `config/ollama/README.md`, `scripts/ollama_create_model.bat` |
 | 부트 시 Alembic 후 오래 멈춤 | P2 hydrate 진행 중 — 로그 `P2 hydrate progress` 확인; 급하면 `JAVSTORY_SKIP_BOOT_HYDRATE=1` + `tools/hydrate_products_v2.py` |
 | LLM 전 구간 실패 | `docs/llm_troubleshooting.md`, OpenRouter 키·티어 |
 

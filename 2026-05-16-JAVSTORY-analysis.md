@@ -4,6 +4,9 @@
 > **분석 대상**: https://github.com/kes0463/JAVSTORY  
 > **목적**: 커서(Cursor)를 활용한 추가 분석 및 수정을 위한 사전 이슈 정리  
 
+> **⚠️ 일부 항목은 이후 구현으로 해결·변경됨** — 최신 대조표: [`docs/ISSUES_STATUS.md`](docs/ISSUES_STATUS.md)  
+> (예: CUDA cu11 제거, openai-whisper 제거, DB P1–P3, `av123`는 `javstory/harvest/scrapers/`)
+
 ---
 
 ## 📌 프로젝트 개요
