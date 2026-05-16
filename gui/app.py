@@ -1,4 +1,7 @@
-"""QML 엔진 초기화 및 Python 모델 등록."""
+"""운영 GUI — QML 엔진 초기화 및 PySide6 모델 등록 (`main.py` → `create_engine`).
+
+PyQt6 Fluent (`gui/main_window.py`) 는 사용하지 않음. → `docs/architecture/ENTRYPOINTS.md`
+"""
 
 from __future__ import annotations
 
@@ -283,8 +286,8 @@ def _maybe_start_ollama_serve(app) -> None:
 
 def create_engine(app) -> QQmlApplicationEngine:
     """QQmlApplicationEngine을 생성하고 Python 모델을 context에 등록한다."""
-    from javstory.harvest.database import init_db
-    init_db()
+    from javstory.harvest.database import init_and_upgrade_db
+    init_and_upgrade_db()
     try:
         from javstory.translation.story_grok_module import migrate_story_context_cache_files
         migrate_story_context_cache_files()

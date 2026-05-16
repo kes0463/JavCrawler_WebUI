@@ -21,14 +21,10 @@ cloudscraper
 curl-cffi
 beautifulsoup4
 SQLAlchemy
+alembic>=1.13,<2
 pysrt
 ffmpeg-python
 httpx
 ollama
-nvidia-cublas-cu12
-nvidia-cudnn-cu12
 numpy>=1.24,<2.0
-# CUDA 12 wheel — 환경에 맞게 조정 시 requirements-torch.txt 분리 가능
-torch>=2.4.0,<2.6
-torchaudio>=2.4.0,<2.6
-torchvision>=0.19.0,<0.21
+# PyTorch / CUDA: requirements-torch.txt (선택·GPU) — INSTALL.md 참고

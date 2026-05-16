@@ -1,6 +1,18 @@
-from sqlalchemy import Column, Integer, String, Text, DateTime, Boolean, create_engine, event
+from sqlalchemy import (
+    Column,
+    DateTime,
+    Boolean,
+    Float,
+    ForeignKey,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+    create_engine,
+    event,
+)
 from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import sessionmaker
+from sqlalchemy.orm import sessionmaker, relationship
 from sqlalchemy.pool import NullPool
 from contextlib import contextmanager
 import datetime
@@ -18,7 +30,10 @@ Base = declarative_base()
 # DB 스키마/마이그레이션 가드 버전.
 # - SQLite `PRAGMA user_version`에 저장한다.
 # - 테이블/컬럼 마이그레이션 로직을 변경하면 이 값을 올려서 1회 재실행되게 한다.
+# - v9+ 스키마는 Alembic only — `upgrade_alembic_head()` (init_db 이후 호출)
 _APP_DB_SCHEMA_VERSION = 8
+_ALEMBIC_HEAD_REVISION = "0001_stamp_v8"
+_SCHEMA_USER_VERSION_ALEMBIC = 9
 
 class JAVMetadata(Base):
     """
@@ -177,6 +192,44 @@ class UserPreference(Base):
     recent_score = Column(Integer, default=0)       # 최근 7일 가중 점수
     time_slot = Column(String(20), default='all')   # 'morning','afternoon','night','all'
     last_watched_at = Column(DateTime, default=datetime.datetime.now)
+
+
+class Product(Base):
+    """품번 단위 식별·폴더 바인딩 (jav_metadata 1:1, DB v2 P2)."""
+
+    __tablename__ = "products"
+
+    id = Column(Integer, primary_key=True)
+    sku = Column(String(50), unique=True, nullable=False, index=True)
+    jav_metadata_id = Column(Integer, ForeignKey("jav_metadata.id"), unique=True, nullable=True)
+    folder_path = Column(String(1000), nullable=True)
+    created_at = Column(DateTime, default=datetime.datetime.now)
+    updated_at = Column(DateTime, default=datetime.datetime.now, onupdate=datetime.datetime.now)
+
+    jav_metadata = relationship("JAVMetadata", backref="product", uselist=False)
+    video_files = relationship("VideoFile", back_populates="product", cascade="all, delete-orphan")
+
+
+class VideoFile(Base):
+    """품번당 로컬 영상 파트 (folder_path 기준 상대 경로)."""
+
+    __tablename__ = "video_files"
+    __table_args__ = (
+        UniqueConstraint("product_id", "part_order", name="uq_video_files_product_order"),
+        UniqueConstraint("product_id", "video_relpath", name="uq_video_files_product_relpath"),
+    )
+
+    id = Column(Integer, primary_key=True)
+    product_id = Column(Integer, ForeignKey("products.id", ondelete="CASCADE"), nullable=False, index=True)
+    part_order = Column(Integer, nullable=False, default=0)
+    video_relpath = Column(Text, nullable=False)
+    duration_sec = Column(Float, nullable=True)
+    file_size = Column(Integer, nullable=True)
+    fingerprint = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=datetime.datetime.now)
+    updated_at = Column(DateTime, default=datetime.datetime.now, onupdate=datetime.datetime.now)
+
+    product = relationship("Product", back_populates="video_files")
 
 
 # DB 연결 및 세션 관리 — `data/db/jav_database.db`
@@ -430,7 +483,18 @@ def init_db():
         pass
 
     print("[DB] Initializing tables (create_all)...")
-    Base.metadata.create_all(bind=engine)
+    # v9+ (`products`, `video_files`)는 Alembic만 생성 — P2 중복 CREATE 방지
+    _v8_tables = [
+        JAVMetadata.__table__,
+        Actress.__table__,
+        Genre.__table__,
+        Maker.__table__,
+        BackgroundCache.__table__,
+        WatchHistory.__table__,
+        FavoriteScoreHistory.__table__,
+        UserPreference.__table__,
+    ]
+    Base.metadata.create_all(bind=engine, tables=_v8_tables)
     print("[DB] Running migration checks...")
     _migrate_add_needs_review_columns()
     _migrate_v3_analytics_columns()
@@ -447,6 +511,55 @@ def init_db():
     except Exception:
         pass
     print("[DB] Database initialization complete.")
+
+
+def get_schema_user_version() -> int:
+    """SQLite PRAGMA user_version (0 if DB missing)."""
+    import sqlite3
+
+    p = Path(DB_PATH)
+    if not p.is_file() or p.stat().st_size == 0:
+        return 0
+    try:
+        with sqlite3.connect(DB_PATH) as conn:
+            row = conn.execute("PRAGMA user_version").fetchone()
+            return int(row[0] if row and row[0] is not None else 0)
+    except Exception:
+        return 0
+
+
+def upgrade_alembic_head() -> None:
+    """
+    init_db() 이후 호출 — v9+ Alembic revision 적용.
+    P1: `0001_stamp_v8` — DDL 없음, user_version 8→9 + alembic_version 테이블.
+    """
+    ini_path = _ROOT / "alembic.ini"
+    if not ini_path.is_file():
+        print("[DB] alembic.ini not found — skipping Alembic upgrade")
+        return
+    try:
+        from alembic import command
+        from alembic.config import Config
+
+        cfg = Config(str(ini_path))
+        command.upgrade(cfg, "head")
+        print(f"[DB] Alembic upgrade head ({_ALEMBIC_HEAD_REVISION}) complete.")
+    except Exception as e:
+        print(f"[DB] Alembic upgrade failed: {e}")
+        raise
+
+
+def init_and_upgrade_db() -> None:
+    """레거시 v0–v8 초기화 후 Alembic head, P2 hydrate(최초 1회)."""
+    init_db()
+    upgrade_alembic_head()
+    try:
+        from javstory.harvest.product_repository import maybe_hydrate_products_v2
+
+        maybe_hydrate_products_v2()
+    except Exception as e:
+        print(f"[DB] P2 hydrate skipped: {e}")
+
 
 def _migrate_add_needs_review_columns():
     """기존 DB에 needs_review 컬럼이 없으면 자동으로 추가 (ALTER TABLE)"""

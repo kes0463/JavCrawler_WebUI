@@ -141,11 +141,11 @@ numpy>=1.24,<2.0
 **수정 방향**:
 ```
 루트/
-├── config/          ← config.json, javstory_player.ini
+├── javstory/config/ ← app_config.py, secrets_manager (.env / keyring)
 ├── scripts/         ← setup.bat, start.bat (이미 scripts/ 폴더 있으나 bat 파일은 루트에)
 ├── docs/            ← 모든 .md 파일 (이미 docs/ 폴더 있으나 md 파일들은 루트에)
 ├── data/samples/    ← DAZD-264.txt 등 샘플 품번 파일
-└── _deprecated/     ← 폐기된 파일들
+└── docs/deprecated/   ← 레거시 config.json.example 등
 ```
 
 ---
@@ -162,9 +162,9 @@ numpy>=1.24,<2.0
 
 ### ISSUE-003: `gui_main_v2.py` — 루트 레벨 진입점과 `gui/` 패키지 분리
 
-**파일**: `gui_main_v2.py` (루트), `gui/app.py`
+**상태 (2026-05):** **해결** — 운영 진입점은 `main.py` → `gui/app.py`(QML) 단일. `gui_main_v2.py` 삭제됨. PyQt6 `gui/main_window.py`·`gui/views/*` 는 deprecated — `docs/architecture/ENTRYPOINTS.md`.
 
-**문제**: 크래시 리포트에서 보듯 진입점이 루트의 `gui_main_v2.py`이고, 내부 로직은 `gui/app.py`에 있음. `v2`라는 버전 접미사는 이전 버전(`gui_main.py` 또는 `gui_main_v1.py`)의 잔재를 암시하며, 관리 부담 증가.
+**이전 문제**: 진입점이 `gui_main_v2.py`이고 PyQt6 Fluent와 QML이 병존.
 
 **수정 방향**: 진입점을 `main.py` 또는 `__main__.py`로 통일하고, 버전 정보는 코드 내 상수로 관리.
 
@@ -172,14 +172,9 @@ numpy>=1.24,<2.0
 
 ### ISSUE-004: `config.json` — 민감 정보 노출 위험
 
-**파일**: `config.json`
+**상태 (2026-05):** **해결** — 루트 `config.json`·`javstory_player.ini` 는 코드 미참조 확인 후 제거. 샘플만 `docs/deprecated/*.example` 보관. 운영 설정은 `.env` + `javstory/config/app_config.py` + keyring.
 
-**문제**: 루트에 `config.json`이 존재하고 `.gitignore`가 있음에도, API 키나 경로 정보가 포함될 수 있는 설정 파일이 저장소에 커밋될 위험이 있음. `python-dotenv`, `keyring` 패키지가 이미 의존성에 있으므로 실제로 활용되는지 확인 필요.
-
-**수정 방향**:
-- `config.json`을 `.gitignore`에 명시적으로 추가 확인
-- `config.example.json` (또는 `.env.example`) 방식으로 템플릿만 커밋
-- API 키는 `keyring` 또는 환경변수로만 관리
+**이전 문제**: 루트 JSON/INI가 SoT와 혼동될 수 있었음. API 키는 `keyring` / `OPENROUTER_API_KEY` 만 사용.
 
 ---
 
@@ -271,7 +266,7 @@ PySide6==6.7.x  # 또는 검증된 최신 버전
 | 🟡 중간 | BUG-004 | numpy 버전 범위 보강 | 소 |
 | 🟡 중간 | BUG-006 | 폐기 파일 정리 | 소 |
 | 🟡 중간 | ISSUE-001 | 루트 디렉터리 정리 | 중 |
-| 🟡 중간 | ISSUE-004 | config.json 보안 처리 | 소 |
+| ~~🟡 중간~~ | ISSUE-004 | config.json 보안 처리 | ✅ deprecated 이전 |
 | 🟢 낮음 | ISSUE-002 | 루트 스크래퍼 파일 통합 | 중 |
 | 🟢 낮음 | ISSUE-003 | 진입점 파일명 통일 | 소 |
 | 🟢 낮음 | ISSUE-005 | 플랫폼 조건부 의존성 | 소 |

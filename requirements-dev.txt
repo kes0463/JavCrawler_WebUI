@@ -1,3 +1,4 @@
-# 개발·CI용 — 프로젝트 루트에서: pip install -r requirements-dev.txt
+# 로컬 개발(전체 스택) — INSTALL.md 참고; CI만: requirements-ci.txt
 -r requirements.txt
+-r requirements-torch.txt
 pytest>=8.0

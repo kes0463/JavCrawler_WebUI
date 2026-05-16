@@ -1,5 +1,23 @@
-"""메인 윈도우 클래스 정의: UI 위젯을 포함하므로 QApplication 생성 후 로드되어야 함."""
+"""
+Deprecated — PyQt6 Fluent 메인 윈도우.
+
+운영 진입점: main.py → gui.app.create_engine() (PySide6 + QML).
+이 모듈은 main.py에서 호출되지 않습니다. 신규 기능은 gui/qml/ 에만 추가하세요.
+
+→ docs/architecture/ENTRYPOINTS.md
+→ gui/views/README.md
+"""
+from __future__ import annotations
+
 import sys
+import warnings
+
+warnings.warn(
+    "gui.main_window (PyQt6 Fluent) is deprecated; use main.py + PySide6 QML.",
+    DeprecationWarning,
+    stacklevel=2,
+)
+
 from PyQt6.QtCore import Qt
 from qfluentwidgets import (
     NavigationItemPosition, FluentWindow,

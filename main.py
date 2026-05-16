@@ -1,3 +1,8 @@
+"""
+JAVSTORY 데스크톱 운영 진입점 — PySide6 + QML.
+
+UI 스택·레거시(PyQt6 Fluent) 정리: docs/architecture/ENTRYPOINTS.md
+"""
 import sys
 import os
 import traceback

@@ -46,6 +46,13 @@ WESERV_IMAGE_PROXY = "https://images.weserv.nl/"
 
 VIDEO_EXTENSIONS = (".mp4", ".mkv", ".avi", ".webm", ".mov", ".wmv", ".ts")
 
+# DB v2 P3: 1/true/on 이면 재생·목록 영상 경로에 L2 video_files 사용 (L4 parts 우선)
+ENV_DB_V2_READ = "JAVSTORY_DB_V2_READ"
+# DB v2 P2: 1/true/on 이면 앱 부트 시 products backfill 생략 (tools/hydrate_products_v2.py 로 실행)
+ENV_SKIP_BOOT_HYDRATE = "JAVSTORY_SKIP_BOOT_HYDRATE"
+PRODUCTS_V2_HYDRATE_MARKER = DATA_ROOT / "db" / ".products_v2_hydrate_done"
+HYDRATE_PROGRESS_EVERY = int(os.environ.get("JAVSTORY_HYDRATE_PROGRESS_EVERY", "100") or 100)
+
 # [Phase 4] 장면 분석 및 썸네일 추출 설정
 SCENE_THRESHOLD = 27.0      # PySceneDetect ContentDetector 임계값 (지나치게 높지 않게 설정)
 SCENE_IMG_WIDTH = 640       # 추출 썸네일 가로 해상도

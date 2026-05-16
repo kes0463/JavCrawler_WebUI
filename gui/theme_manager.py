@@ -1,4 +1,9 @@
-"""테마 매니저: JAVSTORY의 3가지 테마(Win11 Native, White, Dark)를 관리."""
+"""
+Deprecated — PyQt6 Fluent 전용 테마.
+
+운영 UI: gui/qml/Theme.qml
+→ gui/DEPRECATED_PYQT6.md
+"""
 from enum import Enum
 from pathlib import Path
 import darkdetect

@@ -1,4 +1,9 @@
-"""라이브러리 뷰 — Harvest 메타 카드 + canonical 연동 상세."""
+"""
+Deprecated — PyQt6 Fluent 라이브러리 뷰.
+
+운영 UI: gui/qml/views/LibraryView.qml, LibraryDetail.qml
+→ gui/views/README.md
+"""
 
 from __future__ import annotations
 

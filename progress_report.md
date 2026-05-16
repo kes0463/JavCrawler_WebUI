@@ -29,6 +29,8 @@ SoT(참고): `.cursor/plans/transcription_stable-ts_이식_d9a90db7.plan.md` —
 
 ## 🎨 GUI (V2) 구현 현황 — PySide6 + QML (Glassmorphism)
 
+**운영 UI = QML만.** PyQt6 `gui/main_window.py` · `gui/views/*` 는 deprecated ([`docs/architecture/ENTRYPOINTS.md`](docs/architecture/ENTRYPOINTS.md)).
+
 - [x] **대시보드 (Dashboard)**: `DashboardView.qml` — GPU/CPU 모니터 + 파이프라인 현황 + 큐.
 - [x] **하베스트 (Harvest)**: `HarvestView.qml` — 검색 + 폴더/INBOX 스캔 + 카드 그리드.
 - [x] **프로세싱 (Processing)**: `ProcessingView.qml` — STT 큐 + 자막 워커 + 진행률.

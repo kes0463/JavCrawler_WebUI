@@ -237,12 +237,15 @@ async def run_crawler_for_video_path(
                                 continue
 
                 with get_db_session_ctx() as session:
-                    upsert_jav_metadata(session, code, 
+                    row_fail = upsert_jav_metadata(session, code, 
                         title_ko=f"[{code}] (수집 실패/정보 없음)", 
                         folder_path=(stored_folder_path or db_folder_path),
                         cover_image_local_path=local_cover, # 로컬 이미지 경로 등록
                         analysis_status="FAILED_CRAWL"
                     )
+                    from javstory.harvest.product_repository import sync_product_from_metadata_row
+
+                    sync_product_from_metadata_row(session, row_fail)
                     session.commit()
                 
                 return {"error": "crawling_failed", "product_code": code, "skeleton_saved": True}
@@ -388,7 +391,10 @@ async def run_crawler_for_video_path(
 
                 # 폴더/영상 경로가 확정되는 시점에 1회 마커 감지 후 DB 저장
                 try:
-                    from gui.library_data import path_contains_self_subtitle_marker, path_contains_mopa_marker
+                    from javstory.library.path_markers import (
+                        path_contains_mopa_marker,
+                        path_contains_self_subtitle_marker,
+                    )
 
                     vp = path_obj if path_obj.is_file() else None
                     row.is_hardcoded = bool(path_contains_self_subtitle_marker(vp, stored_folder_path, code))
@@ -402,6 +408,9 @@ async def run_crawler_for_video_path(
                 if local_cover_path:
                     row.cover_image_local_path = local_cover_path
 
+                from javstory.harvest.product_repository import sync_product_from_metadata_row
+
+                sync_product_from_metadata_row(session, row)
                 session.commit()
                 log_ts(f"✅ {code} 수집 및 DB 저장 완료 (한국어 번역 + EN/ZH 제목·시놉은 일본어 원문, 배우·장르·제작사는 DB 매핑)")
                 # 주의: SQLAlchemy는 commit 후 객체 속성을 expire할 수 있어,

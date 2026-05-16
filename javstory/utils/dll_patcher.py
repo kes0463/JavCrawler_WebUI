@@ -1,6 +1,6 @@
 """
 Windows: PyTorch/CUDA 휠 DLL을 로드하기 전에 `os.add_dll_directory` + PATH 선행 주입.
-GUI(`gui_main_v2.py`) 및 CUDA 의존 모듈이 Qt 등보다 먼저 로드되기 전에 호출한다.
+GUI(`main.py`) 및 CUDA 의존 모듈이 Qt 등보다 먼저 로드되기 전에 호출한다.
 """
 from __future__ import annotations
 

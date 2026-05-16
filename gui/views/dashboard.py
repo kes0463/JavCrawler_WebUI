@@ -1,4 +1,9 @@
-"""대시보드 뷰: JAVSTORY 시스템 리소스 모니터링 및 작업 큐 현황."""
+"""
+Deprecated — PyQt6 Fluent 대시보드.
+
+운영 UI: gui/qml/views/DashboardView.qml
+→ gui/views/README.md
+"""
 import os
 from pathlib import Path
 from PyQt6.QtWidgets import (

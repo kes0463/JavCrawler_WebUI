@@ -1,4 +1,9 @@
-"""설정 뷰: API 키, 경로, 테마, 모델, 옵션을 관리."""
+"""
+Deprecated — PyQt6 Fluent 설정 뷰.
+
+운영 UI: gui/qml/views/SettingsView.qml (+ gui/models/settings_model.py)
+→ gui/views/README.md
+"""
 import os
 import sys
 from pathlib import Path

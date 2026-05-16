@@ -1,4 +1,7 @@
-"""JAVSTORY FastAPI 서버 — Library + Harvest API."""
+"""JAVSTORY FastAPI — Library + Harvest (non-production, frozen).
+
+운영 UI는 main.py + QML. See docs/adr/0001-ui-stack-qml-only.md.
+"""
 import sys
 from pathlib import Path
 

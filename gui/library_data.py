@@ -11,6 +11,30 @@ from typing import Any, Literal
 
 from javstory.library.cover_cache import cover_needs_download, resolve_cover_path
 from javstory.library.paths import library_state_path, work_library_dir
+from javstory.library.video_discovery import (
+    first_video_in_dir as _first_video_in_dir,
+    guess_video_path_for_product_debug,
+    guess_video_path_for_product_fast,
+    scan_videos_in_dir,
+)
+
+
+def find_all_video_paths_for_product(
+    product_code: str,
+    folder_path: str | None = None,
+) -> list[Path]:
+    """P3: L4 parts > video_files (flag) > 디스크 탐색."""
+    from javstory.harvest.product_repository import resolve_video_paths_for_playback
+
+    return resolve_video_paths_for_playback(product_code, folder_path)
+
+
+def guess_video_path_for_product(
+    product_code: str,
+    folder_path: str | None = None,
+) -> Path | None:
+    paths = find_all_video_paths_for_product(product_code, folder_path)
+    return paths[0] if paths else None
 
 
 @dataclass
@@ -107,88 +131,11 @@ def canonical_quick_stats(product_code: str, *, fast: bool = False) -> tuple[boo
     return res
 
 
-def scan_videos_in_dir(d: Path, depth=0) -> list[Path]:
-    """디렉토리 내 모든 동영상 파일 리스트 반환."""
-    if not d.is_dir():
-        return []
-    from javstory.library.video_ext import is_video_file
-
-    found = []
-    # 1단계: 직하위 파일 탐색
-    try:
-        files = sorted(list(d.iterdir()))
-        for p in files:
-            if p.is_file() and is_video_file(p):
-                found.append(p)
-        
-        # 2단계: 하위 폴더 재귀 탐색 (최대 깊이 2단계)
-        if depth < 2:
-            for p in files:
-                if p.is_dir():
-                    found.extend(scan_videos_in_dir(p, depth + 1))
-    except OSError:
-        pass
-    return found
-
-
-def _first_video_in_dir(d: Path, depth=0) -> Path | None:
-    res = scan_videos_in_dir(d, depth)
-    return res[0] if res else None
-
-
-SELF_SUBTITLE_MARKER = "자체자막"
-
-
-# 파일·폴더명에 이 문자열만 있을 때 자체자막 램프 (일반 `[자막]` 태그는 제외)
-_SELF_SUBTITLE_NAME_RE = re.compile(r"자체\s*자막")
-
-# 모자이크 파괴(모파) 키워드: 폴더/파일명에 포함되면 True
-_MOPA_NAME_RE = re.compile(r"(모자이크\s*(삭제|제거|파괴)|uncen|uncensored|reducing\s*mosaic)", re.IGNORECASE)
-
-
-def path_contains_self_subtitle_marker(video_path: Path | None, folder_path: str | None, product_code: str = "") -> bool:
-    """폴더·파일 이름에「자체자막」「자체 자막」연속 문자열만 허용. `[자막]` 단독 등은 제외."""
-
-    target_texts = []
-    if video_path:
-        target_texts.append(video_path.name)
-        target_texts.extend(video_path.parts)
-
-    fp = (folder_path or "").strip()
-    if fp:
-        try:
-            p_fp = Path(fp)
-            target_texts.append(p_fp.name)
-            target_texts.extend(p_fp.parts)
-        except Exception:
-            pass
-
-    for text in target_texts:
-        if _SELF_SUBTITLE_NAME_RE.search(text):
-            return True
-    return False
-
-
-def path_contains_mopa_marker(video_path: Path | None, folder_path: str | None) -> bool:
-    """폴더·파일 이름에 모자이크 파괴(모파) 키워드가 있으면 True."""
-    target_texts = []
-    if video_path:
-        target_texts.append(video_path.name)
-        target_texts.extend(video_path.parts)
-
-    fp = (folder_path or "").strip()
-    if fp:
-        try:
-            p_fp = Path(fp)
-            target_texts.append(p_fp.name)
-            target_texts.extend(p_fp.parts)
-        except Exception:
-            pass
-
-    for text in target_texts:
-        if _MOPA_NAME_RE.search(text):
-            return True
-    return False
+from javstory.library.path_markers import (  # noqa: F401 — 하위 호환 re-export
+    SELF_SUBTITLE_MARKER,
+    path_contains_mopa_marker,
+    path_contains_self_subtitle_marker,
+)
 
 
 def _sidecar_srt_flags(video_path: Path) -> tuple[bool, bool, bool]:
@@ -357,91 +304,6 @@ def compute_library_lamp_flags(
     # 4. 별도 자막 파일 시스템 규칙 적용
     fstt, fsub = file_rule_lamp_stt_sub(ja, ko, pl)
     return _merge_lamp_with_media_artifacts(fstt, fsub, effective_hardcoded, pc)
-
-
-def guess_video_path_for_product(product_code: str, folder_path: str | None = None) -> Path | None:
-    """작품 폴더(DB 저장 경로, 라이브러리, MEDIA_ROOT) 직하위에서 첫 동영상 탐색."""
-    res = find_all_video_paths_for_product(product_code, folder_path)
-    return res[0] if res else None
-
-
-def guess_video_path_for_product_fast(product_code: str, folder_path: str | None = None) -> Path | None:
-    """[최적화] 연결된 폴더 내부만 체크 (라이브러리/전역 폴더 탐색 생략)."""
-    if not folder_path:
-        return None
-    pc = (product_code or "").strip().upper()
-    base = Path(folder_path)
-    if not base.is_dir():
-        return None
-    
-    # scan_videos_in_dir는 depth=0이 기본이므로 해당 폴더 직하위만 확인 (빠름)
-    videos = scan_videos_in_dir(base)
-    for v in videos:
-        if pc in v.name.upper():
-            return v
-    return None
-
-
-def guess_video_path_for_product_debug(
-    product_code: str, folder_path: str | None = None
-) -> tuple[Path | None, list[str], list[str]]:
-    """
-    `guess_video_path_for_product`의 디버그 버전.
-    반환: (first_video_or_none, searched_base_dirs, matched_videos)
-    - searched_base_dirs: 실제로 검사 대상이 된 base 디렉터리(존재/디렉터리 여부와 무관하게 후보 포함)
-    - matched_videos: 품번 포함 규칙(pc in filename)을 통과한 영상 후보들
-    """
-    pc = (product_code or "").strip().upper()
-    if not pc:
-        return None, [], []
-    bases = _video_search_dirs(pc, folder_path)
-    matches = find_all_video_paths_for_product(pc, folder_path)
-    first = matches[0] if matches else None
-    return first, [str(p) for p in bases], [str(p) for p in matches]
-
-
-def _video_search_dirs(product_code: str, folder_path: str | None = None) -> list[Path]:
-    pc = (product_code or "").strip().upper()
-    if not pc:
-        return []
-    from javstory.config.app_config import E_MEDIA_ROOT, E_DATA_ROOT, MEDIA_ROOT
-
-    search_dirs: list[Path] = []
-    if folder_path and Path(folder_path).is_dir():
-        search_dirs.append(Path(folder_path))
-    search_dirs.extend(
-        [
-            work_library_dir(pc),
-            Path(E_MEDIA_ROOT) / pc,
-            Path(E_DATA_ROOT) / pc,
-            Path(E_DATA_ROOT) / "media" / pc,
-            Path(MEDIA_ROOT) / pc,
-        ]
-    )
-    return search_dirs
-
-
-def find_all_video_paths_for_product(product_code: str, folder_path: str | None = None) -> list[Path]:
-    """작품 폴더들에서 해당 품번과 관련된 모든 동영상 탐색 (멀티파트 대응)."""
-    pc = (product_code or "").strip().upper()
-    if not pc:
-        return []
-    search_dirs = _video_search_dirs(pc, folder_path)
-
-    all_found = []
-    seen = set()
-    
-    for base in search_dirs:
-        videos = scan_videos_in_dir(base)
-        for v in videos:
-            if v.absolute() in seen:
-                continue
-            # 품번이 포함되어 있는지 (대소문자 무시) 확인하여 관련성 체크
-            if pc in v.name.upper():
-                all_found.append(v)
-                seen.add(v.absolute())
-    
-    return all_found
 
 
 def _pipeline_stage(

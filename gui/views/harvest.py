@@ -1,4 +1,9 @@
-"""하베스트 뷰: 수집 및 로컬라이징 제어 화면 (Stage 1, 2, 3)."""
+"""
+Deprecated — PyQt6 Fluent Harvest 뷰.
+
+운영 UI: gui/qml/views/HarvestView.qml
+→ gui/views/README.md
+"""
 import os
 import time
 from pathlib import Path

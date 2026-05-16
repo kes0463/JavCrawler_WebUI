@@ -1,5 +1,8 @@
 # Proposal: Singularity DB Schema v2.0 (Relational Overhaul)
 
+> **참고용 초안** — 구현·이행 SoT는 [`docs/DB_V2_DESIGN.md`](docs/DB_V2_DESIGN.md)입니다.  
+> 본 문서의 `scenes` 테이블·전면 정규화는 **단계 이행하지 않으며**, 2차는 `products`/`video_files` 하이브리드·씬 SoT는 L4 `library_state.json`입니다.
+
 현재의 단일 `jav_metadata` 테이블 방식은 초기 개발 속도는 빠르지만, 데이터가 쌓일수록 배우별 검색, 다중 파일 관리, 씬 기반 분석 등 고도화된 기능을 구현하는 데 한계가 있습니다. 이를 해결하기 위한 정규화된 2.0 스키마를 제안합니다.
 
 ## 핵심 개선 방향

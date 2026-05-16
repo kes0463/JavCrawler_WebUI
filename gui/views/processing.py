@@ -1,8 +1,10 @@
 """
-전사(Transcription) 위젯 뷰 — **deprecated**.
+Deprecated — PyQt6 Fluent 전사(Processing) 뷰.
 
-주 UI는 `gui/qml/views/ProcessingView.qml`(QML 메인 `main.qml` 처리 탭).
-`gui/main_window.py`(PyQt6 Fluent)에서만 참조되며, 신규 기능은 QML 경로에만 추가한다.
+운영 UI: gui/qml/views/ProcessingView.qml
+main.py 에서는 gui/main_window.py 를 호출하지 않음.
+
+→ gui/views/README.md · docs/architecture/ENTRYPOINTS.md
 """
 import os
 import sys

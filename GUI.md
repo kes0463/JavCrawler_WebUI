@@ -199,9 +199,15 @@ JAVSTORY/
 │       ├── PosterCard.qml
 │       ├── PipelineStage.qml
 │       └── MasonryGallery.qml
-├── main.py                         # QQmlApplicationEngine 로드
-└── gui/                            # 현행 PyQt6 로직
+├── main.py                         # 운영 진입점 (PySide6 + QML)
+└── gui/
+    ├── app.py                      # create_engine()
+    ├── qml/                        # 운영 UI
+    ├── models/                     # PySide6 QObject
+    └── views/                      # [deprecated] PyQt6 Fluent
 ```
+
+운영·레거시 구분: [`docs/architecture/ENTRYPOINTS.md`](docs/architecture/ENTRYPOINTS.md), [`gui/DEPRECATED_PYQT6.md`](gui/DEPRECATED_PYQT6.md)
 
 ---
 

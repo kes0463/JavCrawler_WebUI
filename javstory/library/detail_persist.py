@@ -146,14 +146,17 @@ def persist_metadata_row_and_sync_files(
     folder_fp = (getattr(row, "folder_path", None) or "").strip()
     if folder_fp:
         try:
-            from gui.library_data import find_all_video_paths_for_product
             from javstory.library.media_parts import sync_canonical_media_parts
+            from javstory.library.video_discovery import find_all_video_paths_for_product
 
             vps = find_all_video_paths_for_product(pc, folder_fp)
             if vps:
                 state = sync_canonical_media_parts(
                     state, folder_path=folder_fp, video_paths=vps
                 )
+                from javstory.harvest.product_repository import sync_video_files_standalone
+
+                sync_video_files_standalone(pc, folder_fp, vps)
         except Exception:
             pass
     save_library_state(ls_path, state)

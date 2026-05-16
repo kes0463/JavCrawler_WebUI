@@ -61,8 +61,9 @@ def sync_canonical_media_parts(
     refs, primary = build_video_part_refs(root, paths)
     if not refs:
         return state
+    media = state.media if state.media is not None else MediaBinding()
     media = replace(
-        state.media,
+        media,
         parts=refs,
         primary_video_relpath=primary,
     )

@@ -1,7 +1,15 @@
 # JAVSTORY 워크플로우 & 파이프라인 문서
 
 이 문서는 레포지토리 `JAVSTORY`의 **실행 흐름(워크플로우)** 과 **주요 파이프라인 구성**을 코드 기준으로 정리한 운영 문서입니다.
-(기준: 2026-04, Windows 환경, 구조 정리 후)
+(기준: 2026-05, Windows 환경)
+
+**데스크톱 UI:** 운영 = **PySide6 + QML** (`main.py`). PyQt6 Fluent (`gui/main_window.py`, `gui/views/`)는 deprecated — [`docs/architecture/ENTRYPOINTS.md`](docs/architecture/ENTRYPOINTS.md).
+
+| 실행 방법 | 명령 |
+|-----------|------|
+| Windows (권장) | `start.bat` → `python main.py` |
+| 직접 실행 | `python main.py` (프로젝트 루트, venv 활성화 후) |
+| CLI만 | `python scripts/run_product_pipeline.py …` |
 
 ---
 
@@ -23,21 +31,23 @@ JAVSTORY/
 │   │   ├── stills/              #     스틸 추출
 │   │   └── grok_merge/          #     Grok 초안 병합
 │   └── pipeline/                #   전체 오케스트레이션
-├── gui/                         # PyQt6 Fluent 데스크톱 GUI
-│   ├── main_window.py
-│   ├── theme_manager.py
+├── gui/                         # 데스크톱 GUI (운영: QML + PySide6 모델)
+│   ├── app.py                   #   QQmlApplicationEngine, create_engine()
+│   ├── qml/                     #   운영 UI (views/, components/)
+│   ├── models/                  #   LibraryModel, ProcessingModel, …
+│   ├── workers/                 #   백그라운드 QThread 워커
 │   ├── library_data.py
-│   ├── components/              #   재사용 위젯
-│   ├── views/                   #   5대 뷰 (Dashboard/Harvest/Processing/Library/Settings)
-│   └── workers/                 #   백그라운드 QThread 워커
+│   ├── main_window.py           #   [deprecated] PyQt6 Fluent
+│   ├── views/                   #   [deprecated] 위젯 뷰 5종
+│   └── components/              #   [deprecated] PyQt6 전용 위젯 일부
 ├── tests/                       # pytest 테스트
 │   ├── unit/
 │   ├── manual/
 │   └── cli/
 ├── scripts/                     # CLI 도구
 │   └── run_product_pipeline.py
-├── gui_main_v2.py               # GUI 진입점
-├── start.bat                    # venv 활성화 + GUI 실행
+├── main.py                      # GUI 진입점 (PySide6 + QML)
+├── start.bat                    # venv 활성화 + python main.py
 └── setup.bat                    # 최초 환경 설정
 ```
 
@@ -75,23 +85,28 @@ JAVSTORY/
 
 | 파일 | 역할 | 비고 |
 |------|------|------|
-| `gui_main_v2.py` | GUI 실행 | venv 부트스트랩 → CUDA DLL 패치 → PyQt6 앱 |
-| `start.bat` | GUI 래퍼 | venv 활성화 후 `gui_main_v2.py` 실행 |
+| `main.py` | **GUI 실행 (운영)** | venv 부트스트랩 → DLL/ffmpeg → PySide6 QML |
+| `start.bat` | GUI 래퍼 | venv 활성화 후 `python main.py` |
 | `scripts/run_product_pipeline.py` | CLI 품번 파이프라인 | `--stages harvest,stt,subtitle` |
 
-### GUI 부트 시퀀스
+상세: [`docs/architecture/ENTRYPOINTS.md`](docs/architecture/ENTRYPOINTS.md)
+
+### GUI 부트 시퀀스 (운영)
 
 ```
-gui_main_v2.py
-  ├─ javstory.transcription.venv_bootstrap → venv 재실행 (필요시)
-  ├─ javstory.utils.dll_patcher            → CUDA DLL 경로 패치
-  └─ gui.main_window.JAVStoryMainWindow    → PyQt6 Fluent 메인 윈도우
-       ├─ gui.views.dashboard     (대시보드)
-       ├─ gui.views.harvest       (수집)
-       ├─ gui.views.processing    (전사/분석)
-       ├─ gui.views.library       (라이브러리)
-       └─ gui.views.settings      (설정)
+main.py
+  ├─ javstory.transcription.venv_bootstrap
+  ├─ javstory.utils.dll_patcher / ffmpeg_path
+  ├─ PySide6.QtWidgets.QApplication
+  └─ gui.app.create_engine(app)
+       ├─ init_db, story 캐시 이관 등
+       ├─ QQmlApplicationEngine → gui/qml/main.qml
+       └─ gui/models/* → QML context (Library, Processing, Settings, …)
 ```
+
+### 레거시 GUI (deprecated, main에서 미사용)
+
+`gui/main_window.py` + `gui/views/*` (PyQt6 Fluent) — [`gui/DEPRECATED_PYQT6.md`](gui/DEPRECATED_PYQT6.md)
 
 ---
 
@@ -250,23 +265,27 @@ javstory.library.service.run_export()
 
 ---
 
-## 9) GUI 워커 연결
+## 9) GUI 워커 연결 (PySide6 QML)
 
-GUI의 백그라운드 작업은 `gui/workers/` 아래의 QThread 워커로 처리됩니다.
+운영 UI는 `main.py` → `gui/app.py` → QML이며, 백그라운드 작업은 `gui/workers/` QThread + `gui/models/` 에서 큐를 관리합니다.
 
-| 워커 | 대상 | 호출 모듈 |
-|------|------|-----------|
-| `harvest_worker.py` | Harvest 크롤링 | `javstory.harvest.coordinator` |
-| `stt_worker.py` | STT 전사 | `javstory.transcription.engine` |
-| `subtitle_worker.py` | 자막 교정/번역 | `javstory.translation.subtitle_pipeline_orchestrator` |
-| `pipeline_worker.py` | 원스톱 파이프라인 | `javstory.pipeline.orchestrator` |
+| QML 화면 | Python 모델 | 워커 | 호출 모듈 |
+|----------|-------------|------|-----------|
+| `HarvestView.qml` | (Harvest 큐·워커) | `harvest_worker.py` | `javstory.harvest.coordinator` |
+| `ProcessingView.qml` | `ProcessingModel` | `stt_worker.py` | `javstory.transcription.engine` |
+| | | `subtitle_worker.py` | `javstory.translation.subtitle_pipeline_orchestrator` |
+| `LibraryView.qml` | `LibraryModel` | (스냅샷·하이라이트 등 별도 큐) | `javstory.library.*` |
+| — | — | `pipeline_worker.py` | `javstory.pipeline.orchestrator` |
 
 ```
-gui.views.harvest     → HarvestWorker     → javstory.harvest.coordinator
-gui.views.processing  → STTWorker         → javstory.transcription.engine
-                      → SubtitleWorker    → javstory.translation.*
-gui.components.*      → PipelineWorker    → javstory.pipeline.orchestrator
+main.py
+  └─ gui.app.create_engine()
+       ├─ gui/qml/views/HarvestView.qml      → HarvestWorker
+       ├─ gui/qml/views/ProcessingView.qml  → ProcessingModel → STTWorker / SubtitleWorker
+       └─ gui/qml/views/LibraryView.qml      → LibraryModel
 ```
+
+> **Deprecated:** `gui/views/*.py`(PyQt6)는 `main.py`에서 로드하지 않음 — [`gui/DEPRECATED_PYQT6.md`](gui/DEPRECATED_PYQT6.md)
 
 ---
 
@@ -280,7 +299,7 @@ data/
 │   └── jav_database.db          # SQLAlchemy + SQLite (JAVMetadata 등)
 ├── media/                       # 커버 이미지, 자산 파일
 └── cache/
-    ├── story_context/           # Grok 스토리 JSON 캐시 ({품번}.json)
+    ├── story_context/           # Grok 스토리 JSON ({품번}_grok.json)
     └── reference/               # 레퍼런스 캐시
 ```
 
@@ -290,9 +309,10 @@ data/
 
 ### "품번 1개" 원스톱 (GUI)
 
-1. **하베스트 뷰**에서 품번 검색/수집
-2. **프로세싱 뷰**에서 영상 선택 → STT + 자막 실행
-3. **라이브러리 뷰**에서 결과 확인
+1. `start.bat` 또는 `python main.py` 로 앱 실행
+2. **수집** 탭 (`HarvestView.qml`) — 품번 검색/크롤
+3. **처리** 탭 (`ProcessingView.qml`) — STT + 자막 파이프라인
+4. **라이브러리** 탭 (`LibraryView.qml`) — 메타·재생·상세 편집
 
 ### "품번 1개" 원스톱 (CLI)
 
@@ -323,6 +343,9 @@ python scripts/run_product_pipeline.py ABC-123 \
 | LLM 라우터 | `javstory/llm/engine.py` |
 | 앱 설정 | `javstory/config/app_config.py` |
 | 라이브러리 서비스 | `javstory/library/service.py` |
-| GUI 런처 | `gui_main_v2.py` |
+| GUI 런처 | `main.py` (`start.bat`) |
+| GUI 엔진 | `gui/app.py` → `create_engine()` |
+| QML 메인 | `gui/qml/main.qml` |
 | CLI 파이프라인 | `scripts/run_product_pipeline.py` |
-| 웹 빌더 | `build_master_db.py` |
+| 진입점 문서 | `docs/architecture/ENTRYPOINTS.md` |
+| Export / master_db | `javstory/library/export/` (루트 `build_master_db.py` 제거됨) |

@@ -17,6 +17,16 @@ from PySide6.QtCore import (
 
 from gui.models.detail_edit_draft import DetailEditDraft
 from gui.models.scene_edit_model import SceneEditModel
+from gui.models.library import (
+    FolderBindHooks,
+    LibraryDetailService,
+    LibraryFolderBind,
+    LibrarySortFilter,
+    ListRebuildOptions,
+    match_summary,
+    parse_search_expr,
+    release_month_key,
+)
 from gui.library_data import find_all_video_paths_for_product
 from PySide6.QtCore import QThread
 from dataclasses import asdict
@@ -84,197 +94,6 @@ class _NoteGenWorker(QThread):
             except Exception:
                 pass
         self.finished.emit(self.kind, ok, payload)
-
-
-def _preview_path_for(pc: str, e_root: Path | None, legacy_root: Path | None) -> str:
-    code = (pc or "").strip().upper()
-    if not code:
-        return ""
-    cand: list[Path] = []
-    if e_root:
-        cand.append(Path(e_root) / code / "Preview" / "preview.webp")
-    if legacy_root:
-        cand.append(Path(legacy_root) / code / "Preview" / "preview.webp")
-    for p in cand:
-        try:
-            if p.is_file() and p.stat().st_size > 0:
-                return str(p.resolve())
-        except Exception:
-            continue
-    return ""
-
-
-# ---------------------------------------------------------------------------
-# 검색 토큰 문법 (#장르 AND, |로 OR 그룹, -#장르 NOT, "#"붙지 않은 토큰은 substring)
-# ---------------------------------------------------------------------------
-
-def _norm_token(s: str) -> str:
-    return (s or "").strip().lower()
-
-
-def _tokenize_search_expr(q: str) -> list[str]:
-    """공백 구분 토큰화. 큰따옴표로 공백 포함 인용 허용."""
-    out: list[str] = []
-    buf: list[str] = []
-    in_quote = False
-    for ch in q or "":
-        if ch == '"':
-            in_quote = not in_quote
-            continue
-        if ch.isspace() and not in_quote:
-            if buf:
-                out.append("".join(buf))
-                buf = []
-            continue
-        buf.append(ch)
-    if buf:
-        out.append("".join(buf))
-    return [t for t in out if t]
-
-
-def parse_search_expr(q: str) -> tuple[list[list[str]], set[str], list[str]]:
-    """검색 문자열을 (genre_and_groups, genre_excludes, text_terms)로 분해.
-
-    - `#xxx` → 장르 AND 토큰. `#a|#b`처럼 `|` 결합 시 OR 그룹 1개.
-    - `-#xxx` 또는 `-xxx` (장르만, '#' 권장) → 제외 집합.
-    - 그 외 토큰 → 자유 substring(소문자).
-    """
-    and_groups: list[list[str]] = []
-    excludes: set[str] = set()
-    text_terms: list[str] = []
-    for tok in _tokenize_search_expr(q):
-        t = tok.strip()
-        if not t:
-            continue
-        if t.startswith("-"):
-            rest = t[1:]
-            if rest.startswith("#"):
-                rest = rest[1:]
-            if rest:
-                excludes.add(_norm_token(rest))
-            continue
-        if t.startswith("#"):
-            parts = [p for p in t.split("|") if p.strip()]
-            group: list[str] = []
-            for p in parts:
-                p = p.strip()
-                if p.startswith("#"):
-                    p = p[1:]
-                if p:
-                    group.append(_norm_token(p))
-            if group:
-                and_groups.append(group)
-            continue
-        text_terms.append(_norm_token(t))
-    return and_groups, excludes, text_terms
-
-
-def _summary_genre_set(s: Any) -> set[str]:
-    raw = getattr(s, "genres_ko", None) or ""
-    return {_norm_token(g) for g in str(raw).split(",") if g and g.strip()}
-
-
-def _summary_text_blob(s: Any) -> str:
-    pc = getattr(s, "product_code", "") or ""
-    tk = getattr(s, "title_ko", "") or ""
-    tj = getattr(s, "title_ja", "") or ""
-    ak = getattr(s, "actors_ko", "") or ""
-    gk = getattr(s, "genres_ko", None) or ""
-    mk = getattr(s, "maker_ko", None) or ""
-    return f"{pc} {tk} {tj} {ak} {gk} {mk}".lower()
-
-
-def match_summary(
-    s: Any,
-    genre_groups: list[list[str]],
-    excludes: set[str],
-    text_terms: list[str],
-) -> bool:
-    if genre_groups or excludes:
-        gset = _summary_genre_set(s)
-        for group in genre_groups:
-            if not any(g in gset for g in group):
-                return False
-        if excludes and (excludes & gset):
-            return False
-    if text_terms:
-        blob = _summary_text_blob(s)
-        for term in text_terms:
-            if term and term not in blob:
-                return False
-    return True
-
-
-_RE_MONTH = re.compile(r"^\s*(\d{4})[-/.](\d{2})")
-
-
-def release_month_key(release_date: Any) -> str:
-    """
-    release_date(문자열)에서 YYYY-MM 월 키를 추출한다.
-    - "2026-05-07", "2026/05/07", "2026.05.07" → "2026-05"
-    - 실패/빈 값 → "unknown"
-    """
-    s = str(release_date or "").strip()
-    if not s:
-        return "unknown"
-    m = _RE_MONTH.match(s)
-    if not m:
-        return "unknown"
-    y = m.group(1)
-    mm = m.group(2)
-    try:
-        mi = int(mm)
-        if mi < 1 or mi > 12:
-            return "unknown"
-    except Exception:
-        return "unknown"
-    return f"{y}-{mm}"
-
-
-def _build_watch_feedback_by_base() -> dict[str, dict]:
-    """base 품번 → 사용자 평가(별점·하트)·최근 평가 시각."""
-    out: dict[str, dict] = {}
-    try:
-        from javstory.harvest.database import get_db_session_ctx, WatchHistory
-        from javstory.utils.product_code import strip_split_suffixes
-
-        with get_db_session_ctx() as session:
-            rows = session.query(WatchHistory).all()
-
-        mn = datetime.datetime.min.replace(tzinfo=None)
-        for wh in rows:
-            raw = (wh.product_code or "").strip().upper()
-            if not raw:
-                continue
-            try:
-                base = strip_split_suffixes(raw) or raw
-            except Exception:
-                base = raw
-            rating = int(wh.rating or 0)
-            liked = bool(wh.liked)
-            ua = getattr(wh, "updated_at", None) or mn
-
-            rec = out.get(base)
-            if not rec:
-                out[base] = {"rating": rating, "liked": liked, "updated_at": ua}
-            else:
-                rec["rating"] = max(int(rec.get("rating") or 0), rating)
-                rec["liked"] = bool(rec.get("liked")) or liked
-                if ua > (rec.get("updated_at") or mn):
-                    rec["updated_at"] = ua
-
-        for _, rec in out.items():
-            ua = rec.get("updated_at") or mn
-            if ua and ua != mn:
-                try:
-                    rec["feedback_iso"] = ua.replace(microsecond=0).isoformat(sep=" ")
-                except Exception:
-                    rec["feedback_iso"] = ""
-            else:
-                rec["feedback_iso"] = ""
-    except Exception:
-        return {}
-    return out
 
 
 class WorkListModel(QAbstractListModel):
@@ -1174,246 +993,13 @@ class LibraryModel(QObject):
         self._loadDetailCore(product_code)
 
     def _loadDetailCore(self, product_code: str):
-        s = next((x for x in self._all_summaries if x.product_code == product_code), None)
+        s = LibraryDetailService.find_summary(self._all_summaries, product_code)
         if not s:
-            try:
-                from javstory.utils.product_code import strip_split_suffixes
-                base = strip_split_suffixes((product_code or "").strip().upper()) or (product_code or "").strip().upper()
-                s = next((x for x in self._all_summaries if strip_split_suffixes((x.product_code or "").strip().upper()) == base), None)
-            except Exception: pass
-        if not s: return
-
-
-        fp_bind = getattr(s, "folder_path", None) or ""
-        data = {
-            "product_code": s.product_code,
-            "title_ko": s.title_ko,
-            "title_ja": s.title_ja,
-            "actors_ko": s.actors_ko,
-            "maker_ko": s.maker_ko,
-            "release_date": s.release_date,
-            "synopsis_ko": s.synopsis_ko,
-            "genres_ko": s.genres_ko,
-            "cover_path": s.cover_effective_path or s.cover_local_path or "",
-            "scene_count": s.scene_count,
-            "pipeline_stage": s.pipeline_stage,
-            "has_canonical": s.has_canonical,
-            "overall_summary": s.overall_summary_preview,
-            "still_paths": [],
-            "video_path": "",
-            "video_paths": [],
-            "is_hardcoded": s.is_hardcoded,
-            "is_mopa": getattr(s, "is_mopa", False),
-            "has_ja_srt": s.has_ja_srt,
-            "has_ko_srt": s.has_ko_srt,
-            "lamp_hardcoded": s.lamp_hardcoded,
-            "lamp_mopa": getattr(s, "lamp_mopa", False),
-            "folder_path": fp_bind,
-            "digest_path": "",
-            "highlight_path": "",
-        }
-
-        try:
-            from javstory.library.paths import library_state_path
-            p = library_state_path(s.product_code)
-            if p.is_file():
-                d = json.loads(p.read_text(encoding="utf-8"))
-                data["grok_json"] = json.dumps(d.get("story_context", {}), ensure_ascii=False, indent=2)
-                stills = []
-                for sc in (d.get("scenes") or []):
-                    if isinstance(sc, dict):
-                        for sp in (sc.get("still_paths") or []):
-                            stills.append(str(sp))
-                data["still_paths"] = stills
-        except Exception: pass
-
-        try:
-            from javstory.config.app_config import library_story_context_batch_tier
-            from javstory.translation.story_grok_module import load_cached_grok_json_flexible
-
-            gj = load_cached_grok_json_flexible(s.product_code, library_story_context_batch_tier())
-            if isinstance(gj, dict) and gj:
-                data["grok_verified"] = bool(gj.get("verification_ok") is True and gj.get("code_mismatch") is not True)
-                data["grok_mismatch_reason"] = str(gj.get("mismatch_reason") or "")
-
-                # 씬 데이터는 참고용으로라도 보이게 유지하되, UI에서 "미검증" 표시로 구분한다.
-                scenes_raw = gj.get("scenes") or []
-                grok_scenes = []
-                for sc in scenes_raw:
-                    if isinstance(sc, dict):
-                        grok_scenes.append({
-                            "time_range": sc.get("time_range", ""),
-                            "scene_label": sc.get("scene_label", ""),
-                            "scene_summary": sc.get("scene_summary", ""),
-                        })
-                data["grok_scenes_json"] = json.dumps(grok_scenes, ensure_ascii=False)
-        except Exception: pass
-
-        stills_set = set()
-        if data.get("still_paths"):
-            for p in data["still_paths"]: stills_set.add(str(Path(p).resolve()))
-
-        try:
-            from javstory.config.app_config import DATA_ROOT, E_MEDIA_ROOT, E_DATA_ROOT
-
-            # 신규 HDD 루트: E:\App\JAVSTORY\data\works\{product_code}\...
-            # 레거시 fallback:
-            # - E:\App\JAVSTORY\data\{product_code}\... (초기 이행 버전)
-            # - E:\App\JAVSTORY\data\media\{product_code}\... (이전 highlight 구현 시점)
-            # - D:\App\JAVSTORY\data\media\{product_code}\... (프로젝트 내부 레거시)
-            media_dir = Path(E_MEDIA_ROOT) / s.product_code
-            legacy_e_flat_dir = Path(E_DATA_ROOT) / s.product_code
-            legacy_e_media_dir = Path(E_DATA_ROOT) / "media" / s.product_code
-            legacy_media_dir = Path(DATA_ROOT) / "media" / s.product_code
-
-            bases = [media_dir, legacy_e_flat_dir, legacy_e_media_dir, legacy_media_dir]
-            base = next((b for b in bases if b.is_dir()), None)
-
-            if base is not None:
-                snap_dir = base / "Snapshots"
-                exts = ["*.jpg", "*.jpeg", "*.png", "*.webp"]
-                found = []
-                if snap_dir.is_dir():
-                    for ext in exts: found.extend(snap_dir.glob(ext))
-                else:
-                    for ext in exts: found.extend(base.glob(ext))
-                exclude_names = {"cover.jpg", "poster.jpg", "thumb.jpg", "cover.png", "poster.png", "cover.webp", "poster.webp"}
-                for f in found:
-                    if f.name.lower() not in exclude_names: stills_set.add(str(f.resolve()))
-                
-                # mp4 다이제스트 파일 점검 (새로운 digest 전용 폴더 우선 탐색)
-                digest_file = base / "Digest" / "digest.mp4"
-                if not digest_file.exists():
-                    digest_file = snap_dir / "digest.mp4"
-                if not digest_file.exists():
-                    digest_file = base / "digest.mp4"
-                if digest_file.is_file():
-                    data["digest_path"] = str(digest_file.resolve())
-
-            data["still_paths"] = sorted(list(stills_set))
-        except Exception: pass
-
-        # 하이라이트 영상 (HDD 저장소: E:\App\JAVSTORY\data\{product_code}\Highlight\)
-        try:
-            pc = (s.product_code or "").strip().upper()
-            if pc:
-                from javstory.config.app_config import E_MEDIA_ROOT, E_DATA_ROOT, DATA_ROOT
-                highlight_dir = Path(E_MEDIA_ROOT) / pc / "Highlight"
-                legacy_e_flat_highlight_dir = Path(E_DATA_ROOT) / pc / "Highlight"
-                legacy_e_media_highlight_dir = Path(E_DATA_ROOT) / "media" / pc / "Highlight"
-                legacy_highlight_dir = Path(DATA_ROOT) / "media" / pc / "Highlight"
-                if not highlight_dir.is_dir():
-                    if legacy_e_flat_highlight_dir.is_dir():
-                        highlight_dir = legacy_e_flat_highlight_dir
-                    elif legacy_e_media_highlight_dir.is_dir():
-                        highlight_dir = legacy_e_media_highlight_dir
-                    elif legacy_highlight_dir.is_dir():
-                        highlight_dir = legacy_highlight_dir
-                # 우선순위: highlight.mp4 → FINAL_HIGHLIGHT_840x640.mp4 (레거시) → 첫 mp4
-                cand = [
-                    highlight_dir / "highlight.mp4",
-                    highlight_dir / "FINAL_HIGHLIGHT_840x640.mp4",
-                ]
-                hp = None
-                for p in cand:
-                    if p.is_file():
-                        hp = p
-                        break
-                if hp is None and highlight_dir.is_dir():
-                    mp4s = sorted(list(highlight_dir.glob("*.mp4")))
-                    if mp4s:
-                        hp = mp4s[0]
-                if hp is not None and hp.is_file():
-                    data["highlight_path"] = str(hp.resolve())
-        except Exception:
-            pass
-
-        try:
-            from gui.library_data import guess_video_path_for_product
-            from javstory.library.multipart.detect import sort_video_parts
-
-            vp = guess_video_path_for_product(s.product_code, fp_bind or None)
-            if vp:
-                data["video_path"] = str(Path(vp).resolve())
-            raw_paths = find_all_video_paths_for_product(s.product_code, fp_bind or None)
-            sorted_paths = sort_video_parts(raw_paths)
-            if fp_bind and sorted_paths:
-                try:
-                    from javstory.library.detail_persist import load_canonical_for_product
-                    from javstory.library.media_parts import part_refs_to_absolute_paths
-
-                    canon = load_canonical_for_product(s.product_code)
-                    if canon.media.parts:
-                        from_paths = part_refs_to_absolute_paths(
-                            canon.media.parts, Path(fp_bind)
-                        )
-                        if from_paths:
-                            sorted_paths = from_paths
-                except Exception:
-                    pass
-            data["video_paths"] = [str(p.resolve()) for p in sorted_paths]
-            if not data.get("video_path") and data["video_paths"]:
-                data["video_path"] = data["video_paths"][0]
-        except Exception:
-            data["video_paths"] = data.get("video_paths") or []
-
-        try:
-            from gui.watch_resume import last_position_ms_for_video
-            from javstory.harvest.database import (
-                get_db_session_ctx,
-                WatchHistory,
-                favorite_score_delta_one,
-            )
-
-            with get_db_session_ctx() as sess:
-                wh = sess.query(WatchHistory).filter_by(
-                    product_code=s.product_code
-                ).first()
-                if wh:
-                    data["watch_count"] = int(wh.session_count or 0)
-                    data["watch_duration"] = int(wh.watch_duration or 0)
-                    data["last_position"] = last_position_ms_for_video(
-                        legacy_last_position=int(wh.last_position or 0),
-                        last_positions_json=getattr(wh, "last_positions_json", None),
-                        video_path=data.get("video_path") or "",
-                    )
-                    data["user_rating"] = int(wh.rating or 0)
-                    data["user_liked"] = bool(wh.liked)
-                else:
-                    data["user_rating"] = 0
-                    data["user_liked"] = False
-        except Exception:
-            data["user_rating"] = 0
-            data["user_liked"] = False
-
-        fav_row = int(getattr(s, "favorite_score", 0) or 0)
-        data["favorite_score"] = fav_row
-
-        try:
-            fd_days = int(getattr(self, "_favorite_delta_days", 0) or 0)
-            if fd_days > 0:
-                delta = favorite_score_delta_one(
-                    str(s.product_code or ""),
-                    fd_days,
-                    fallback_score=fav_row,
-                )
-                if delta is not None:
-                    data["favorite_site_delta"] = int(delta)
-                    data["favorite_site_delta_days"] = fd_days
-                    data["has_favorite_site_delta"] = True
-                else:
-                    data["favorite_site_delta"] = 0
-                    data["favorite_site_delta_days"] = fd_days
-                    data["has_favorite_site_delta"] = False
-            else:
-                data["favorite_site_delta"] = 0
-                data["favorite_site_delta_days"] = 0
-                data["has_favorite_site_delta"] = False
-        except Exception:
-            data["favorite_site_delta"] = 0
-            data["favorite_site_delta_days"] = 0
-            data["has_favorite_site_delta"] = False
-
+            return
+        data = LibraryDetailService.build_detail_data(
+            s,
+            favorite_delta_days=int(self._favorite_delta_days or 0),
+        )
         self._detail.load(data)
         self.detailLoaded.emit()
 
@@ -1592,73 +1178,24 @@ class LibraryModel(QObject):
                 self.requestFolderSelection.emit(product_code)
         except Exception as e: self.toastMessage.emit(f"폴더 열기 실패: {e}", "error")
 
+    def _folder_bind_hooks(self) -> FolderBindHooks:
+        return FolderBindHooks(
+            toast=self.toastMessage.emit,
+            refresh_product=self.refreshProduct,
+            summaries_reloaded=self.summariesReloaded.emit,
+            schedule_auto_snapshots=lambda p, fd: QTimer.singleShot(
+                0,
+                lambda p=p, fd=fd: self._maybe_auto_snapshots_after_folder_bind(p, fd),
+            ),
+        )
+
     def _bind_folder_impl(self, product_code: str, folder_path: str, force: bool) -> bool:
-        try:
-            from javstory.utils.product_code import extract_product_code_from_path
-            from javstory.harvest.database import get_db_session, JAVMetadata
-            from gui.library_data import _first_video_in_dir, path_contains_self_subtitle_marker, path_contains_mopa_marker
-
-            pc = (product_code or "").strip().upper()
-            target_path = Path(folder_path)
-            if not target_path.is_dir():
-                self.toastMessage.emit(f"폴더가 없거나 디렉터리가 아닙니다: {folder_path}", "error")
-                return False
-
-            detected_pc = extract_product_code_from_path(target_path)
-            if not detected_pc:
-                v = _first_video_in_dir(target_path)
-                if v:
-                    detected_pc = extract_product_code_from_path(v)
-
-            mismatch = not detected_pc or detected_pc.upper() != pc
-            if mismatch and not force:
-                self.toastMessage.emit(
-                    f"선택한 폴더({target_path.name})가 품번 {pc}와 일치하지 않습니다. 강제 연결을 사용하세요.",
-                    "error",
-                )
-                return False
-
-            session = get_db_session()
-            try:
-                row = session.query(JAVMetadata).filter_by(product_code=pc).first()
-                if row:
-                    abs_path = str(target_path.resolve())
-                    row.folder_path = abs_path
-                    # 폴더 연결(영상 경로 확정) 시점에 1회 자체자막 마커 감지 후 DB 저장
-                    try:
-                        v = _first_video_in_dir(target_path)
-                        row.is_hardcoded = bool(path_contains_self_subtitle_marker(v, abs_path, pc))
-                        row.is_mopa = bool(path_contains_mopa_marker(v, abs_path))
-                    except Exception:
-                        pass
-                    session.commit()
-                    try:
-                        from gui.library_data import find_all_video_paths_for_product
-                        from javstory.library.media_parts import persist_media_parts_for_product
-
-                        vps = find_all_video_paths_for_product(pc, abs_path)
-                        if vps:
-                            persist_media_parts_for_product(pc, abs_path, vps)
-                    except Exception:
-                        pass
-                    if mismatch and force:
-                        self.toastMessage.emit(f"강제 연결 저장: {abs_path}", "warning")
-                    else:
-                        self.toastMessage.emit(f"폴더 경로가 저장되었습니다: {abs_path}", "success")
-                    self.refreshProduct(pc)
-                    self.summariesReloaded.emit()
-                    QTimer.singleShot(
-                        0,
-                        lambda p=pc, fd=abs_path: self._maybe_auto_snapshots_after_folder_bind(p, fd),
-                    )
-                    return True
-                self.toastMessage.emit(f"DB에 품번 {pc} 메타데이터가 없습니다.", "error")
-                return False
-            finally:
-                session.close()
-        except Exception as e:
-            self.toastMessage.emit(f"폴더 연결 실패: {e}", "error")
-            return False
+        return LibraryFolderBind.bind_folder(
+            product_code,
+            folder_path,
+            force=force,
+            hooks=self._folder_bind_hooks(),
+        )
 
     @Slot(str, str)
     def bindFolder(self, product_code: str, folder_path: str):
@@ -1680,27 +1217,7 @@ class LibraryModel(QObject):
 
     @Slot(str)
     def clearFolderBinding(self, product_code: str):
-        try:
-            from javstory.harvest.database import get_db_session, JAVMetadata
-
-            pc = (product_code or "").strip().upper()
-            if not pc:
-                return
-            session = get_db_session()
-            try:
-                row = session.query(JAVMetadata).filter_by(product_code=pc).first()
-                if row:
-                    row.folder_path = None
-                    session.commit()
-                    self.toastMessage.emit("폴더 연결이 해제되었습니다.", "success")
-                    self.refreshProduct(pc)
-                    self.summariesReloaded.emit()
-                else:
-                    self.toastMessage.emit(f"DB에 품번 {pc}가 없습니다.", "warning")
-            finally:
-                session.close()
-        except Exception as e:
-            self.toastMessage.emit(f"연결 해제 실패: {e}", "error")
+        LibraryFolderBind.clear_folder(product_code, self._folder_bind_hooks())
 
     @Slot(str, bool)
     def deleteFromLibrary(self, product_code: str, delete_files: bool = False):
@@ -3006,185 +2523,17 @@ class LibraryModel(QObject):
         return out
 
     def _rebuild(self):
-        def _base_code(pc: str) -> str:
-            try:
-                from javstory.utils.product_code import strip_split_suffixes
-                u = (pc or "").strip().upper()
-                return strip_split_suffixes(u) or u
-            except Exception: return (pc or "").strip().upper()
-
-        genre_groups, genre_excludes, text_terms = parse_search_expr(self._search_query or "")
-        has_query = bool(genre_groups or genre_excludes or text_terms)
-        fm = self._filter_mode
-        mf = (self._month_filter or "").strip()
-        if self._unknown_only:
-            mf = "unknown"
-        filtered = []
-        for s in self._all_summaries:
-            # 필터 적용
-            if fm == 1 and not getattr(s, "has_canonical", False): continue
-            if fm == 2 and getattr(s, "has_canonical", False): continue
-            if fm == 3 and not getattr(s, "folder_path", None): continue
-            if fm == 4 and not (getattr(s, "has_ko_srt", False) or getattr(s, "has_ja_srt", False)): continue
-            if mf:
-                rk = release_month_key(getattr(s, "release_date", "") or "")
-                if rk != mf:
-                    continue
-
-            if has_query and not match_summary(s, genre_groups, genre_excludes, text_terms):
-                continue
-            filtered.append(s)
-
-        groups = {}
-        for s in filtered:
-            k = _base_code(getattr(s, "product_code", "") or "")
-            groups.setdefault(k, []).append(s)
-
-        stage_rank = {"none": 0, "harvest": 1, "transcription": 2, "translation": 3, "canonical": 4}
-
-        def pick_rep(lst):
-            def score(x):
-                has_cover = 1 if (getattr(x, "cover_effective_path", None) or getattr(x, "cover_local_path", None)) else 0
-                upd = getattr(x, "updated_at_iso", "") or ""
-                return (has_cover, upd)
-            return max(lst, key=score)
-
-        merged_items = []
-        try:
-            from javstory.config.app_config import E_MEDIA_ROOT, DATA_ROOT
-            e_root = Path(E_MEDIA_ROOT)
-            legacy_root = Path(DATA_ROOT) / "media"
-        except Exception:
-            e_root = None
-            legacy_root = None
-
-        def preview_path_cached(base_pc: str) -> str:
-            key = (base_pc or "").strip().upper()
-            if not key:
-                return ""
-            hit = self._preview_path_cache.get(key)
-            if hit is not None:
-                return hit
-            v = _preview_path_for(key, e_root, legacy_root)
-            self._preview_path_cache[key] = v
-            return v
-
-        watch_map = _build_watch_feedback_by_base()
-
-        mode = self._sort_mode
-        eff_delta_days = int(self._favorite_delta_days or 0)
-        if eff_delta_days <= 0 and mode in (11, 12):
-            eff_delta_days = 7
-        deltas_map: dict[str, int | None] = {}
-        if eff_delta_days > 0:
-            try:
-                from javstory.harvest.database import favorite_score_deltas_for_period
-
-                meta_by_code: dict[str, int] = {}
-                for s2 in filtered:
-                    pc2 = (getattr(s2, "product_code", "") or "").strip().upper()
-                    if pc2:
-                        meta_by_code[pc2] = int(getattr(s2, "favorite_score", 0) or 0)
-                deltas_map = favorite_score_deltas_for_period(
-                    meta_scores_by_code=meta_by_code,
-                    period_days=eff_delta_days,
-                )
-            except Exception:
-                deltas_map = {}
-
-        for base_pc, lst in groups.items():
-            rep = pick_rep(lst)
-            max_scene = max((getattr(x, "scene_count", 0) or 0) for x in lst) if lst else 0
-            max_stage = "none"
-            for x in lst:
-                st = getattr(x, "pipeline_stage", "none") or "none"
-                if stage_rank.get(st, 0) > stage_rank.get(max_stage, 0): max_stage = st
-
-            part_pcs: list[str] = []
-            for x in lst:
-                pcp = (getattr(x, "product_code", "") or "").strip().upper()
-                if pcp and pcp not in part_pcs:
-                    part_pcs.append(pcp)
-
-            fd_acc: list[int] = []
-            if eff_delta_days > 0 and deltas_map:
-                for pcp in part_pcs:
-                    dv = deltas_map.get(pcp)
-                    if dv is not None:
-                        fd_acc.append(int(dv))
-            favorite_delta = sum(fd_acc) if fd_acc else None
-
-            wm = watch_map.get(base_pc) or {}
-            merged_items.append({
-                "product_code": base_pc,
-                "title_ko": getattr(rep, "title_ko", "") or "",
-                "title_ja": getattr(rep, "title_ja", "") or "",
-                "actors_ko": getattr(rep, "actors_ko", "") or "",
-                "cover_path": getattr(rep, "cover_effective_path", None) or getattr(rep, "cover_local_path", None) or "",
-                "preview_path": preview_path_cached(base_pc),
-                "scene_count": max_scene,
-                "pipeline_stage": max_stage,
-                "release_date": getattr(rep, "release_date", "") or "",
-                "has_canonical": any(bool(getattr(x, "has_canonical", False)) for x in lst),
-                "part_count": len(lst),
-                "is_hardcoded": any(bool(getattr(x, "is_hardcoded", False)) for x in lst),
-                "has_ja_srt": any(bool(getattr(x, "has_ja_srt", False)) for x in lst),
-                "has_ko_srt": any(bool(getattr(x, "has_ko_srt", False)) for x in lst),
-                "lamp_hardcoded": any(bool(getattr(x, "lamp_hardcoded", False)) for x in lst),
-                "lamp_mopa": any(bool(getattr(x, "lamp_mopa", False)) for x in lst),
-                "updated_at_iso": max((getattr(x, "updated_at_iso", "") or "" for x in lst), default=""),
-                "favorite_score": sum(int(getattr(x, "favorite_score", 0) or 0) for x in lst),
-                "favorite_delta": favorite_delta,
-                "user_rating": int(wm.get("rating") or 0),
-                "user_liked": bool(wm.get("liked")),
-                "user_feedback_iso": str(wm.get("feedback_iso") or ""),
-                "has_story_context": any(bool(getattr(x, "has_story_context", False)) for x in lst),
-            })
-
-        if fm == 5:
-            merged_items = [
-                it
-                for it in merged_items
-                if int(it.get("user_rating") or 0) > 0 or bool(it.get("user_liked"))
-            ]
-        if fm == 6:
-            merged_items = [it for it in merged_items if bool(it.get("user_liked"))]
-        if fm == 7:
-            merged_items = [it for it in merged_items if bool(it.get("has_story_context"))]
-
-        if mode == 0: merged_items.sort(key=lambda it: it.get("product_code", ""))
-        elif mode == 1: merged_items.sort(key=lambda it: it.get("release_date", ""), reverse=True)
-        elif mode == 2: merged_items.sort(key=lambda it: it.get("release_date", ""))
-        elif mode == 3: merged_items.sort(key=lambda it: int(it.get("scene_count") or 0), reverse=True)
-        elif mode == 4: merged_items.sort(key=lambda it: it.get("updated_at_iso", ""), reverse=True)
-        elif mode == 5: merged_items.sort(key=lambda it: it.get("actors_ko", "") or "\uffff")
-        elif mode == 6: merged_items.sort(key=lambda it: it.get("actors_ko", "") or "\uffff", reverse=True)
-        elif mode == 7: merged_items.sort(key=lambda it: (0 if (it.get("has_ko_srt") or it.get("has_ja_srt") or it.get("lamp_hardcoded")) else 1, it.get("product_code", "")))
-        elif mode == 8: merged_items.sort(key=lambda it: (0 if it.get("lamp_mopa") else 1, it.get("product_code", "")))
-        elif mode == 9: merged_items.sort(key=lambda it: int(it.get("favorite_score") or 0), reverse=True)
-        elif mode == 10: merged_items.sort(key=lambda it: int(it.get("favorite_score") or 0))
-        elif mode == 11:
-            merged_items.sort(
-                key=lambda it: (0, int(it.get("favorite_delta") or 0))
-                if it.get("favorite_delta") is not None
-                else (-1, 0),
-                reverse=True,
+        merged_items = LibrarySortFilter.rebuild(
+            ListRebuildOptions(
+                all_summaries=self._all_summaries,
+                search_query=self._search_query,
+                filter_mode=self._filter_mode,
+                month_filter=self._month_filter,
+                unknown_only=self._unknown_only,
+                sort_mode=self._sort_mode,
+                favorite_delta_days=self._favorite_delta_days,
+                preview_path_cache=self._preview_path_cache,
             )
-        elif mode == 12:
-            merged_items.sort(
-                key=lambda it: (0, int(it.get("favorite_delta") or 0))
-                if it.get("favorite_delta") is not None
-                else (1, 0),
-            )
-        elif mode == 13:
-            # 별점 높은 순, 미평가(0점)는 뒤로
-            merged_items.sort(
-                key=lambda it: (
-                    0 if int(it.get("user_rating") or 0) > 0 else 1,
-                    -int(it.get("user_rating") or 0),
-                    it.get("product_code", ""),
-                ),
-            )
-
+        )
         self._works.refresh(merged_items)
         self.workCountChanged.emit()
