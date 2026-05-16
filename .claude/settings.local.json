@@ -14,7 +14,12 @@
       "Bash(Select-Object Name, PSIsContainer)",
       "Bash(curl *)",
       "Bash(nvidia-smi *)",
-      "Bash(ollama *)"
+      "Bash(ollama *)",
+      "PowerShell(Get-ChildItem -Path \"D:\\\\App\\\\JAVSTORY\" -Force | Select-Object Name, @{Name=\"Type\"; Expression={if\\($_.PSIsContainer\\){\"DIR\"}else{\"FILE\"}}} | Format-Table -AutoSize)",
+      "Bash(dir /b /ad)",
+      "Bash(git add *)",
+      "Bash(git commit -m ' *)",
+      "Bash(git push *)"
     ]
   }
 }
