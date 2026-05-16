@@ -1,7 +1,11 @@
 from __future__ import annotations
-from pydantic import BaseModel
+import re
+from pydantic import BaseModel, field_validator
 from typing import Optional
 from datetime import datetime
+
+# 품번 형식: 영대문자+숫자로 시작, 이후 영대문자·숫자·하이픈 허용 (예: STARS-001, FC2-PPV-123)
+_CODE_RE = re.compile(r'^[A-Z0-9][A-Z0-9\-]*$')
 
 
 class LibraryItem(BaseModel):
@@ -73,6 +77,29 @@ class HarvestItem(BaseModel):
 
 class AddHarvestRequest(BaseModel):
     codes: list[str]  # ["STARS-001", "IPX-002", ...]
+
+    @field_validator("codes", mode="before")
+    @classmethod
+    def validate_codes(cls, v: object) -> list[str]:
+        if not isinstance(v, list):
+            raise ValueError("codes must be a list")
+        if len(v) > 100:
+            raise ValueError("too many codes (max 100 per request)")
+
+        normalized: list[str] = []
+        for raw in v:
+            code = str(raw).strip().upper()
+            if not code:
+                continue
+            if len(code) > 50:
+                raise ValueError(f"code too long (max 50 chars): {code!r}")
+            if not _CODE_RE.match(code):
+                raise ValueError(f"invalid code format: {code!r}")
+            normalized.append(code)
+
+        if not normalized:
+            raise ValueError("no valid codes provided")
+        return normalized
 
 
 class HarvestQueueResponse(BaseModel):

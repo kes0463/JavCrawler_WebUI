@@ -8,10 +8,23 @@ from fastapi.responses import FileResponse
 from sqlalchemy import or_, func
 
 from javstory.harvest.database import get_db_session_ctx, JAVMetadata
+from javstory.config.app_config import DATA_ROOT, E_DATA_ROOT
 from api.schemas import (
     LibraryItem, LibraryItemDetail,
     LibraryListResponse, LibraryStats,
 )
+
+_SAFE_IMAGE_ROOTS = tuple(
+    p.resolve() for p in (DATA_ROOT, E_DATA_ROOT) if p
+)
+
+
+def _is_safe_image_path(p: Path) -> bool:
+    try:
+        resolved = p.resolve()
+        return any(resolved.is_relative_to(root) for root in _SAFE_IMAGE_ROOTS)
+    except (OSError, ValueError):
+        return False
 
 router = APIRouter()
 
@@ -112,6 +125,8 @@ def get_cover(code: str):
         for path_field in (row.cover_image_local_path, row.thumb_image_local_path):
             if path_field:
                 p = Path(path_field)
+                if not _is_safe_image_path(p):
+                    continue
                 if p.is_file():
                     return FileResponse(str(p), media_type="image/jpeg")
 

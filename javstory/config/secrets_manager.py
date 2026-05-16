@@ -44,10 +44,28 @@ def set_openrouter_api_key(value: str, *, write_env_file: bool = True) -> None:
         set_env_runtime_value(ENV_OPENROUTER_API_KEY, v)
 
 
+def _escape_env_value(value: str) -> str:
+    """double-quoted .env 값에 쓸 수 있도록 특수문자를 이스케이프한다.
+
+    처리 순서: 백슬래시 → 큰따옴표 → 개행 → 캐리지리턴
+    순서를 바꾸면 이중 이스케이프가 발생하므로 변경하지 말 것.
+    """
+    return (
+        value
+        .replace("\\", "\\\\")
+        .replace('"', '\\"')
+        .replace("\r", "\\r")
+        .replace("\n", "\\n")
+    )
+
+
 def set_env_runtime_value(key: str, value: str) -> None:
     """임의의 환경변수 키-값을 .env 파일에 안전하게 반영하고 os.environ에도 즉시 적용."""
     os.environ[key] = str(value)
-    
+
+    escaped = _escape_env_value(str(value))
+    entry = f'{key}="{escaped}"'
+
     lines: list[str] = []
     if ENV_FILE_PATH.is_file():
         raw = ENV_FILE_PATH.read_text(encoding="utf-8")
@@ -60,10 +78,10 @@ def set_env_runtime_value(key: str, value: str) -> None:
         if not stripped or stripped.startswith("#") or "=" not in line:
             out.append(line)
             continue
-        
+
         name = line.split("=", 1)[0].strip()
         if name == key:
-            out.append(f'{key}="{value}"')
+            out.append(entry)
             replaced = True
         else:
             out.append(line)
@@ -71,7 +89,7 @@ def set_env_runtime_value(key: str, value: str) -> None:
     if not replaced:
         if out and out[-1].strip():
             out.append("")
-        out.append(f'{key}="{value}"')
+        out.append(entry)
 
     ENV_FILE_PATH.parent.mkdir(parents=True, exist_ok=True)
     ENV_FILE_PATH.write_text("\n".join(out).rstrip() + "\n", encoding="utf-8")

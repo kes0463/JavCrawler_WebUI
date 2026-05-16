@@ -26,8 +26,8 @@ ENV_FILE_PATH = PROJECT_ROOT / ".env"
 DATA_ROOT = PROJECT_ROOT / "data"
 DB_PATH = DATA_ROOT / "db" / "jav_database.db"
 
-# 대용량 데이터(E:) 루트
-E_DATA_ROOT = Path("E:/App/JAVSTORY/data")
+# 대용량 데이터 루트 — 환경변수 JAVSTORY_E_DATA_ROOT로 재지정 가능
+E_DATA_ROOT = Path(os.environ.get("JAVSTORY_E_DATA_ROOT", "E:/App/JAVSTORY/data"))
 
 # 작품별 산출물 루트
 # 요구사항: E:\App\JAVSTORY\data\<작품폴더명>\{product_id}\...
