@@ -529,7 +529,7 @@ Item {
                     Menu {
                         id: filterMenu
                         y: parent.height + 4
-                        width: 186
+                        width: 210
                         padding: 6
 
                         background: Rectangle {
@@ -645,6 +645,20 @@ Item {
                                 text: mi6.text
                                 font: mi6.font
                                 color: mi6.highlighted ? Theme.accentNeon : Theme.textPrimary
+                                verticalAlignment: Text.AlignVCenter
+                                leftPadding: 4
+                            }
+                        }
+                        MenuItem {
+                            id: mi7
+                            text: "스토리 컨텍스트 있음"
+                            onTriggered: LibraryModel.filterMode = 7
+                            font.pixelSize: 13
+                            highlighted: LibraryModel.filterMode === 7
+                            contentItem: Text {
+                                text: mi7.text
+                                font: mi7.font
+                                color: mi7.highlighted ? Theme.accentNeon : Theme.textPrimary
                                 verticalAlignment: Text.AlignVCenter
                                 leftPadding: 4
                             }

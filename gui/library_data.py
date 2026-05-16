@@ -45,6 +45,7 @@ class LibraryWorkSummary:
     updated_at_iso: str
     folder_path: str | None
     favorite_score: int = 0
+    has_story_context: bool = False
 
 
 def _read_json(path: Path) -> dict[str, Any]:
@@ -542,6 +543,14 @@ def _row_to_summary_impl(row: Any, fast: bool = False) -> LibraryWorkSummary:
     # 커버 다운로드 필요 여부도 fast 모드에서는 생략 가능 (UI에서 처리)
     need_dl = False if fast else cover_needs_download(pc, cover_url, cover_local)
 
+    has_story_context = False
+    try:
+        from javstory.translation.story_grok_module import has_disk_grok_story_cache
+
+        has_story_context = bool(has_disk_grok_story_cache(pc))
+    except Exception:
+        has_story_context = False
+
     return LibraryWorkSummary(
         product_code=pc,
         title_ko=title_ko,
@@ -572,6 +581,7 @@ def _row_to_summary_impl(row: Any, fast: bool = False) -> LibraryWorkSummary:
         updated_at_iso=_row_updated_at_iso(row),
         folder_path=folder_path,
         favorite_score=int(getattr(row, "favorite_score", 0) or 0),
+        has_story_context=has_story_context,
     )
 
 

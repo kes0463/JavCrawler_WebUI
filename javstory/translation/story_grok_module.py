@@ -137,6 +137,24 @@ def _legacy_model_suffix_cache_exists(product_code: str) -> bool:
         return False
 
 
+def has_disk_grok_story_cache(product_code: str) -> bool:
+    """라이브러리 목록 필터용: Grok 스토리 캐시 JSON이 디스크에 있는지(파싱·API 없음)."""
+    raw = (product_code or "").strip()
+    if not raw:
+        return False
+    try:
+        if story_context_cache_path_grok(raw).is_file():
+            return True
+        if _legacy_model_suffix_cache_exists(raw):
+            return True
+        pc_u = raw.upper()
+        if story_context_cache_path(pc_u, "").is_file():
+            return True
+    except OSError:
+        return False
+    return False
+
+
 def merge_story_context_tier(raw: dict[str, Any] | None) -> dict[str, Any]:
     """env 기본 `story_context_llm_tier`에 호출자 오버라이드를 합친다."""
     base = story_context_llm_tier()
@@ -331,4 +349,5 @@ __all__ = [
     "story_context_cache_dir",
     "story_context_cache_path",
     "story_context_cache_path_grok",
+    "has_disk_grok_story_cache",
 ]

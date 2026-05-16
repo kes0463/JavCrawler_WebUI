@@ -6,6 +6,8 @@ import traceback
 from pathlib import Path
 from PySide6.QtCore import QThread, Signal
 
+from javstory.transcription.stt_types import STTCancelled
+
 _ROOT = Path(__file__).resolve().parent.parent.parent
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
@@ -114,6 +116,9 @@ class SubtitleWorker(QThread):
             else:
                 self.finished.emit(True, "자막 파이프라인 완료 (KO SRT 경로 확인 필요)")
 
+        except STTCancelled:
+            self.progress.emit("[중단] 자막 파이프라인이 취소되었습니다.", 0)
+            self.finished.emit(False, "[중단] 사용자가 작업을 취소했거나 처리 탭에서 중지했습니다.")
         except Exception as e:
             traceback.print_exc()
             self.finished.emit(False, f"자막 파이프라인 오류: {e}")

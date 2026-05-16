@@ -824,7 +824,7 @@ class LibraryModel(QObject):
         super().__init__(parent)
         LibraryModel._instance = self
         self._search_query = ""
-        self._filter_mode = 0  # 0:All, 1:Analyzed, 2:Pending, 3:Linked, 4:Subtitled, 5:내 평가, 6:하트만
+        self._filter_mode = 0  # 0:All, 1:Analyzed, 2:Pending, 3:Linked, 4:Subtitled, 5:내 평가, 6:하트만, 7:스토리컨텍스트
         self._sort_mode = 0
         self._favorite_delta_days = 0  # 0:기간 ♥ 증감 표시 안 함, 7/30/90
         self._month_filter = ""  # ""=전체, "YYYY-MM"=특정 월, "unknown"=출시일 미상
@@ -3114,6 +3114,7 @@ class LibraryModel(QObject):
                 "user_rating": int(wm.get("rating") or 0),
                 "user_liked": bool(wm.get("liked")),
                 "user_feedback_iso": str(wm.get("feedback_iso") or ""),
+                "has_story_context": any(bool(getattr(x, "has_story_context", False)) for x in lst),
             })
 
         if fm == 5:
@@ -3124,6 +3125,8 @@ class LibraryModel(QObject):
             ]
         if fm == 6:
             merged_items = [it for it in merged_items if bool(it.get("user_liked"))]
+        if fm == 7:
+            merged_items = [it for it in merged_items if bool(it.get("has_story_context"))]
 
         if mode == 0: merged_items.sort(key=lambda it: it.get("product_code", ""))
         elif mode == 1: merged_items.sort(key=lambda it: it.get("release_date", ""), reverse=True)

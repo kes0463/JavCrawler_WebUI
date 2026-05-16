@@ -13,7 +13,7 @@ from gui.watch_resume import (
     merge_last_positions_json,
     normalize_watch_video_key,
 )
-from javstory.harvest.database import get_db_session_ctx, UserPreference, WatchHistory
+import javstory.harvest.database as _harvest_db
 
 class PlayerModel(QObject):
     """
@@ -74,12 +74,12 @@ class PlayerModel(QObject):
         self._current_product = product_code
         self.currentProductChanged.emit()
 
-        with get_db_session_ctx() as session:
-            history = session.query(WatchHistory).filter_by(
+        with _harvest_db.get_db_session_ctx() as session:
+            history = session.query(_harvest_db.WatchHistory).filter_by(
                 product_code=product_code
             ).first()
             if not history:
-                history = WatchHistory(
+                history = _harvest_db.WatchHistory(
                     product_code=product_code,
                     total_duration=total_sec,
                     session_count=1,
@@ -115,8 +115,8 @@ class PlayerModel(QObject):
 
         vkey = normalize_watch_video_key(video_path or "")
 
-        with get_db_session_ctx() as session:
-            history = session.query(WatchHistory).filter_by(
+        with _harvest_db.get_db_session_ctx() as session:
+            history = session.query(_harvest_db.WatchHistory).filter_by(
                 product_code=product_code
             ).first()
             if history:
@@ -150,8 +150,8 @@ class PlayerModel(QObject):
         if not product_code or elapsed_sec <= 0:
             return
 
-        with get_db_session_ctx() as session:
-            history = session.query(WatchHistory).filter_by(
+        with _harvest_db.get_db_session_ctx() as session:
+            history = session.query(_harvest_db.WatchHistory).filter_by(
                 product_code=product_code
             ).first()
             if history:
@@ -173,8 +173,8 @@ class PlayerModel(QObject):
         if jump_sec < 5:
             return
 
-        with get_db_session_ctx() as session:
-            history = session.query(WatchHistory).filter_by(
+        with _harvest_db.get_db_session_ctx() as session:
+            history = session.query(_harvest_db.WatchHistory).filter_by(
                 product_code=product_code
             ).first()
             if history:
@@ -190,12 +190,12 @@ class PlayerModel(QObject):
         if not product_code:
             return
 
-        with get_db_session_ctx() as session:
-            history = session.query(WatchHistory).filter_by(
+        with _harvest_db.get_db_session_ctx() as session:
+            history = session.query(_harvest_db.WatchHistory).filter_by(
                 product_code=product_code
             ).first()
             if not history:
-                history = WatchHistory(
+                history = _harvest_db.WatchHistory(
                     product_code=product_code,
                     created_at=datetime.datetime.now(),
                 )
@@ -227,12 +227,12 @@ class PlayerModel(QObject):
         if not product_code:
             return
 
-        with get_db_session_ctx() as session:
-            history = session.query(WatchHistory).filter_by(
+        with _harvest_db.get_db_session_ctx() as session:
+            history = session.query(_harvest_db.WatchHistory).filter_by(
                 product_code=product_code
             ).first()
             if not history:
-                history = WatchHistory(
+                history = _harvest_db.WatchHistory(
                     product_code=product_code,
                     created_at=datetime.datetime.now(),
                 )
@@ -265,12 +265,12 @@ class PlayerModel(QObject):
             return
         rating = max(0, min(5, rating))
 
-        with get_db_session_ctx() as session:
-            history = session.query(WatchHistory).filter_by(
+        with _harvest_db.get_db_session_ctx() as session:
+            history = session.query(_harvest_db.WatchHistory).filter_by(
                 product_code=product_code
             ).first()
             if not history:
-                history = WatchHistory(
+                history = _harvest_db.WatchHistory(
                     product_code=product_code,
                     created_at=datetime.datetime.now(),
                 )
@@ -311,15 +311,15 @@ class PlayerModel(QObject):
         if not category_type or not value:
             return
 
-        with get_db_session_ctx() as session:
-            pref = session.query(UserPreference).filter_by(
+        with _harvest_db.get_db_session_ctx() as session:
+            pref = session.query(_harvest_db.UserPreference).filter_by(
                 category_type=category_type,
                 category_value=value,
                 time_slot="all",
             ).first()
 
             if not pref:
-                pref = UserPreference(
+                pref = _harvest_db.UserPreference(
                     category_type=category_type,
                     category_value=value,
                     score=1,
@@ -340,8 +340,8 @@ class PlayerModel(QObject):
         """현재 저장된 별점을 반환합니다 (QML 초기값 표시용)."""
         if not product_code:
             return 0
-        with get_db_session_ctx() as session:
-            h = session.query(WatchHistory).filter_by(
+        with _harvest_db.get_db_session_ctx() as session:
+            h = session.query(_harvest_db.WatchHistory).filter_by(
                 product_code=product_code
             ).first()
             return h.rating if h else 0
@@ -354,8 +354,8 @@ class PlayerModel(QObject):
         if not product_code or total_sec <= 0:
             return
         try:
-            with get_db_session_ctx() as session:
-                history = session.query(WatchHistory).filter_by(
+            with _harvest_db.get_db_session_ctx() as session:
+                history = session.query(_harvest_db.WatchHistory).filter_by(
                     product_code=product_code
                 ).first()
                 if history:
@@ -371,8 +371,8 @@ class PlayerModel(QObject):
         if not product_code:
             return 0
         try:
-            with get_db_session_ctx() as session:
-                h = session.query(WatchHistory).filter_by(
+            with _harvest_db.get_db_session_ctx() as session:
+                h = session.query(_harvest_db.WatchHistory).filter_by(
                     product_code=product_code
                 ).first()
                 if not h:
