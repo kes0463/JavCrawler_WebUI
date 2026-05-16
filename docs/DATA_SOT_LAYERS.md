@@ -21,6 +21,6 @@ DB v2·Alembic 이행 전·후, **어느 저장소가 무엇을 담당하는지*
 |------|------|
 | **DB v2** (2차: `products` / `video_files`, 씬은 L4 유지) | [DB_V2_DESIGN.md](DB_V2_DESIGN.md) |
 | **Alembic** (v9+ revision) | [ALEMBIC_MILESTONE.md](ALEMBIC_MILESTONE.md) |
-| ER 참고 초안 | [db_schema_v2_proposal.md](../db_schema_v2_proposal.md) |
+| ER 참고 초안 | [db_schema_v2_proposal.md](plans/db_schema_v2_proposal.md) |
 
 구현은 P0 설계 합의 후 단계별 착수(P1 Alembic stamp → P2 테이블·hydrate).

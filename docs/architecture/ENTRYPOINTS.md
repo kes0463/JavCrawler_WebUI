@@ -4,7 +4,7 @@
 신규 화면·버튼·상태는 `gui/qml/` 및 `gui/models/`(PySide6 `QObject`)에만 추가합니다.
 
 파이프라인·단계별 모듈 경로: [`WORKFLOW_PIPELINES.md`](../../WORKFLOW_PIPELINES.md)  
-에이전트 요약: [`_agent/workflows/jav_story_workflow.md`](../../_agent/workflows/jav_story_workflow.md)
+파이프라인 상세: [`WORKFLOW_PIPELINES.md`](../../WORKFLOW_PIPELINES.md) · (아카이브) [`jav_story_workflow.md`](../archive/agent/jav_story_workflow.md)
 
 ---
 

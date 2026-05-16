@@ -27,6 +27,6 @@
 | 도메인 | `javstory/` |
 | 스크래퍼 | `javstory/harvest/scrapers/` (루트 `.py` 스크래퍼 아님) |
 | 실험 UI (동결) | `frontend/`, `api/` |
-| 설계·ADR | `docs/` |
+| 설계·ADR | `docs/` (`plans/`, `backlog/`, `archive/`) |
 
 상세 진입점: [architecture/ENTRYPOINTS.md](architecture/ENTRYPOINTS.md)

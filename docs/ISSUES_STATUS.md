@@ -1,6 +1,6 @@
 # 이슈 현황 (2026-05-16 분석 대비)
 
-[2026-05-16-JAVSTORY-analysis.md](../2026-05-16-JAVSTORY-analysis.md) 항목을 **현재 HEAD** 기준으로 갱신합니다.
+[2026-05-16-JAVSTORY-analysis.md](archive/2026-05-16-JAVSTORY-analysis.md) 항목을 **현재 HEAD** 기준으로 갱신합니다.
 
 ---
 

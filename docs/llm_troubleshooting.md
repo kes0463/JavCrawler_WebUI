@@ -32,3 +32,16 @@
 - **파이프라인 실패·재시도 큐**: `data/error/04_ERROR/` (`javstory.utils.error_recovery`)
 
 설정 화면 하단 **«실패 작업 폴더 열기»** 로 `04_ERROR`를 열 수 있습니다.
+
+## Ollama CPU 부하 (로컬 번역)
+
+로컬 Ollama 사용 시 CPU 사용률이 높으면 `.env` 예:
+
+```bash
+OLLAMA_NUM_THREAD=2
+OLLAMA_THREADS=2
+JAVSTORY_TRANSLATION_CONCURRENCY=1
+```
+
+서버: `ollama serve` 전에 스레드 제한. 더 작은 모델(예: 4B)로 교체하면 부하가 줄어듭니다.  
+상세 메모: [archive/ollama_cpu_optimization.md](archive/ollama_cpu_optimization.md)

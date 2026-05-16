@@ -2,7 +2,7 @@
 
 **상태**: P1–P3 구현 완료 · P4( junction / locals ) 미착수  
 **구현 SoT**: 본 문서  
-**참고 초안**: [db_schema_v2_proposal.md](../db_schema_v2_proposal.md) (ER 방향성만)  
+**참고 초안**: [db_schema_v2_proposal.md](plans/db_schema_v2_proposal.md) (ER 방향성만)  
 **데이터 계층**: [DATA_SOT_LAYERS.md](DATA_SOT_LAYERS.md)  
 **Alembic 절차**: [ALEMBIC_MILESTONE.md](ALEMBIC_MILESTONE.md)
 
