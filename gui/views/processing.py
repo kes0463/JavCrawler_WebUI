@@ -1,4 +1,9 @@
-"""전사(Transcription) 뷰: STT(stable-ts) + 멀티파트 SRT 합성."""
+"""
+전사(Transcription) 위젯 뷰 — **deprecated**.
+
+주 UI는 `gui/qml/views/ProcessingView.qml`(QML 메인 `main.qml` 처리 탭).
+`gui/main_window.py`(PyQt6 Fluent)에서만 참조되며, 신규 기능은 QML 경로에만 추가한다.
+"""
 import os
 import sys
 from pathlib import Path

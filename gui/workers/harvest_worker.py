@@ -8,7 +8,7 @@ if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
 from javstory.harvest.coordinator import run_crawler_for_video_path
-from javstory.utils.product_code import extract_product_code_from_path
+from javstory.utils.product_code import resolve_product_code_for_video
 from javstory.harvest.database import get_db_session_ctx
 import asyncio
 from javstory.config.app_config import MEDIA_ROOT
@@ -79,7 +79,7 @@ class HarvestWorker(QThread):
 
                 pc_kw = (pc_override or "").strip() or None
                 if is_path_flag:
-                    sku = pc_kw or extract_product_code_from_path(target) or Path(target).stem
+                    sku = resolve_product_code_for_video(target, pc_kw)
                 else:
                     sku = pc_kw or str(target).strip().upper()
 

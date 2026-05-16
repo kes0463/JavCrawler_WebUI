@@ -725,6 +725,24 @@ class SettingsModel(QObject):
 
         threading.Thread(target=_job, daemon=True).start()
 
+    @Slot()
+    def openPipelineErrorFolder(self):
+        """파이프라인 실패 작업 폴더(`data/error/04_ERROR/`)를 탐색기에서 연다."""
+        from javstory.config.app_config import DATA_ROOT
+
+        err_dir = DATA_ROOT / "error" / "04_ERROR"
+        err_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            if sys.platform == "win32":
+                os.startfile(err_dir)  # type: ignore[attr-defined]
+            elif sys.platform == "darwin":
+                subprocess.run(["open", str(err_dir)], check=False)
+            else:
+                subprocess.run(["xdg-open", str(err_dir)], check=False)
+            self.toastMessage.emit(f"폴더를 열었습니다: {err_dir}", "info")
+        except Exception as e:
+            self.toastMessage.emit(f"폴더 열기 실패: {e}", "error")
+
     @Slot(result=str)
     def browseFolder(self):
         """QML에서 호출: 네이티브 폴더 선택 대화상자 (단일)."""

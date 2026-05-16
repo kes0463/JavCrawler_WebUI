@@ -1639,6 +1639,37 @@ Item {
                 }
             }
 
+            GlassCard {
+                width: parent.width
+                autoSize: true
+                Column {
+                    width: parent.width
+                    spacing: Theme.spacingSm
+                    Text {
+                        text: "파이프라인 · 문제 해결"
+                        font.pixelSize: Theme.fontSubtitle
+                        font.weight: Font.DemiBold
+                        color: Theme.textPrimary
+                    }
+                    Text {
+                        width: parent.width
+                        wrapMode: Text.WordWrap
+                        text: "자막 LLM 실패(OpenRouter 티어·검열)는 docs/llm_troubleshooting.md 를 참고하세요. " +
+                              "부트 크래시(logs/crash_report.txt)와 별도로, Harvest/STT/자막 실패 기록은 data/error/04_ERROR/ 에 저장됩니다."
+                        font.pixelSize: Theme.fontCaption
+                        color: Theme.textSecondary
+                    }
+                    Row {
+                        width: parent.width
+                        layoutDirection: Qt.RightToLeft
+                        ActionButton {
+                            text: "실패 작업 폴더 열기 (04_ERROR)"
+                            onClicked: SettingsModel.openPipelineErrorFolder()
+                        }
+                    }
+                }
+            }
+
             // ── 버전 정보 ───────────────────────────────
             Text {
                 text: "JAVSTORY Pro v3.0 — PySide6 + QML"

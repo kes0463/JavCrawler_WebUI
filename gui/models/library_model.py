@@ -1336,7 +1336,22 @@ class LibraryModel(QObject):
             if vp:
                 data["video_path"] = str(Path(vp).resolve())
             raw_paths = find_all_video_paths_for_product(s.product_code, fp_bind or None)
-            data["video_paths"] = [str(p.resolve()) for p in sort_video_parts(raw_paths)]
+            sorted_paths = sort_video_parts(raw_paths)
+            if fp_bind and sorted_paths:
+                try:
+                    from javstory.library.detail_persist import load_canonical_for_product
+                    from javstory.library.media_parts import part_refs_to_absolute_paths
+
+                    canon = load_canonical_for_product(s.product_code)
+                    if canon.media.parts:
+                        from_paths = part_refs_to_absolute_paths(
+                            canon.media.parts, Path(fp_bind)
+                        )
+                        if from_paths:
+                            sorted_paths = from_paths
+                except Exception:
+                    pass
+            data["video_paths"] = [str(p.resolve()) for p in sorted_paths]
             if not data.get("video_path") and data["video_paths"]:
                 data["video_path"] = data["video_paths"][0]
         except Exception:
@@ -1617,6 +1632,15 @@ class LibraryModel(QObject):
                     except Exception:
                         pass
                     session.commit()
+                    try:
+                        from gui.library_data import find_all_video_paths_for_product
+                        from javstory.library.media_parts import persist_media_parts_for_product
+
+                        vps = find_all_video_paths_for_product(pc, abs_path)
+                        if vps:
+                            persist_media_parts_for_product(pc, abs_path, vps)
+                    except Exception:
+                        pass
                     if mismatch and force:
                         self.toastMessage.emit(f"강제 연결 저장: {abs_path}", "warning")
                     else:

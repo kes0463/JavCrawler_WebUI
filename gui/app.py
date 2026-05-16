@@ -285,6 +285,11 @@ def create_engine(app) -> QQmlApplicationEngine:
     """QQmlApplicationEngine을 생성하고 Python 모델을 context에 등록한다."""
     from javstory.harvest.database import init_db
     init_db()
+    try:
+        from javstory.translation.story_grok_module import migrate_story_context_cache_files
+        migrate_story_context_cache_files()
+    except Exception:
+        pass
 
     _font_path = Path(__file__).resolve().parent / "fonts" / "MaterialSymbolsRounded.ttf"
     if _font_path.is_file():

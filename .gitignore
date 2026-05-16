@@ -78,6 +78,9 @@ crash_report.txt
 Transcription/reference_cache/
 Transcription/story_context_cache/
 
+# Story context Grok JSON (regeneratable; SoT under data/)
+data/cache/story_context/
+
 # Library state (per-user editable, not shared)
 library_state.json
 

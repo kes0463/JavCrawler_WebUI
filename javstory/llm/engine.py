@@ -103,7 +103,17 @@ async def ollama_ensure_model(
 
 class AllTiersExhaustedError(Exception):
     """모든 LLM 모델 시도가 실패했을 때 발생하는 예외"""
-    pass
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        last_model: str | None = None,
+        last_error: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.last_model = last_model
+        self.last_error = last_error
 
 class JSONValidationError(Exception):
     """JSON 형식이 유효하지 않거나 스키마가 일치하지 않을 때 발생하는 예외"""
@@ -388,6 +398,9 @@ class MultiTierRouter:
         else:
             tiers_to_try = sorted(LLM_TIERS, key=lambda x: x["rank"])
 
+        last_model: str | None = None
+        last_error: str | None = None
+
         for tier in tiers_to_try:
             model_name = tier["name"]
             model_id = tier["model"]
@@ -433,6 +446,8 @@ class MultiTierRouter:
                     return content 
 
                 except Exception as e:
+                    last_model = model_name
+                    last_error = type(e).__name__
                     delay = self.get_backoff_delay(attempt)
                     if tier_override:
                          self.logger(f"    ❌ [Manual Mode] {model_name} 오류: {e} | {delay:.1f}s 후 재시도 ({attempt+1}/4)")
@@ -445,8 +460,17 @@ class MultiTierRouter:
                  break
 
             self.logger(f"  [Router] {model_name} 실패. 다음 티어로 롤백...")
+            last_model = model_name
+            last_error = last_error or "tier_exhausted"
 
-        raise AllTiersExhaustedError("모든 AI 티어가 응답에 실패했거나 검열되었습니다.")
+        summary = "모든 AI 티어가 응답에 실패했거나 검열되었습니다."
+        if last_model:
+            self.logger(f"  [Router] 최종 실패 요약: {last_model} ({last_error or 'unknown'})")
+        raise AllTiersExhaustedError(
+            summary,
+            last_model=last_model,
+            last_error=last_error,
+        )
 
     async def process_chunks(self, chunks: List[List[Dict]], system_prompt: str, meta_context: str, tier_override: Optional[Dict] = None, sleep_sec: float = 1.0) -> List[str]:
         """

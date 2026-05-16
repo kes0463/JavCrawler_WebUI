@@ -1,13 +1,11 @@
-PySide6
+PySide6>=6.7.2,<6.9
 psutil
 win32mica
 darkdetect
 scenedetect[opencv]
 faster-whisper
 stable-ts
-# Py3.12: pip 격리 빌드 실패 시 — pip install "setuptools>=69,<81" 후:
-# pip install "openai-whisper==20240930" --no-build-isolation
-openai-whisper==20240930
+# whisper: stable-ts transitive 의존 — openai-whisper 직접 핀 제거(레거시)
 tenacity
 openai
 requests
@@ -29,7 +27,8 @@ httpx
 ollama
 nvidia-cublas-cu12
 nvidia-cudnn-cu12
-numpy<2.0
-torch
-torchaudio
-torchvision
+numpy>=1.24,<2.0
+# CUDA 12 wheel — 환경에 맞게 조정 시 requirements-torch.txt 분리 가능
+torch>=2.4.0,<2.6
+torchaudio>=2.4.0,<2.6
+torchvision>=0.19.0,<0.21

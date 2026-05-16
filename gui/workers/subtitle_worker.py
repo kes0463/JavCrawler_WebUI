@@ -7,6 +7,7 @@ from pathlib import Path
 from PySide6.QtCore import QThread, Signal
 
 from javstory.transcription.stt_types import STTCancelled
+from javstory.llm.engine import AllTiersExhaustedError
 
 _ROOT = Path(__file__).resolve().parent.parent.parent
 if str(_ROOT) not in sys.path:
@@ -119,6 +120,26 @@ class SubtitleWorker(QThread):
         except STTCancelled:
             self.progress.emit("[중단] 자막 파이프라인이 취소되었습니다.", 0)
             self.finished.emit(False, "[중단] 사용자가 작업을 취소했거나 처리 탭에서 중지했습니다.")
+        except AllTiersExhaustedError as e:
+            hint = (
+                "[OpenRouter] 모든 LLM 티어가 실패했거나 검열되었습니다. "
+                "API 키·모델 설정을 확인하세요. (docs/llm_troubleshooting.md)"
+            )
+            last = getattr(e, "last_model", None)
+            if last:
+                hint += f" 마지막 티어: {last}."
+            self.progress.emit(hint, 0)
+            self.finished.emit(False, hint)
         except Exception as e:
+            if type(e).__name__ == "AllTiersExhaustedError":
+                self.progress.emit(
+                    "[OpenRouter] 모든 LLM 티어가 실패했거나 검열되었습니다.", 0
+                )
+                self.finished.emit(
+                    False,
+                    "[OpenRouter] 모든 LLM 티어가 실패했거나 검열되었습니다. "
+                    "docs/llm_troubleshooting.md 참고.",
+                )
+                return
             traceback.print_exc()
             self.finished.emit(False, f"자막 파이프라인 오류: {e}")

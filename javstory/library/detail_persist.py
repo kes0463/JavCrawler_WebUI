@@ -143,6 +143,19 @@ def persist_metadata_row_and_sync_files(
 
     ls_path = library_state_path(pc)
     ls_path.parent.mkdir(parents=True, exist_ok=True)
+    folder_fp = (getattr(row, "folder_path", None) or "").strip()
+    if folder_fp:
+        try:
+            from gui.library_data import find_all_video_paths_for_product
+            from javstory.library.media_parts import sync_canonical_media_parts
+
+            vps = find_all_video_paths_for_product(pc, folder_fp)
+            if vps:
+                state = sync_canonical_media_parts(
+                    state, folder_path=folder_fp, video_paths=vps
+                )
+        except Exception:
+            pass
     save_library_state(ls_path, state)
 
     for gp in resolve_story_json_paths(pc):

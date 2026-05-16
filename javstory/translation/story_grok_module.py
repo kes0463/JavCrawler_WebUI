@@ -26,6 +26,8 @@ from .story_context_prompts import (
 OptionalLogger = Optional[Callable[[str], None]]
 
 _ROOT = Path(__file__).resolve().parent.parent.parent
+_LEGACY_STORY_CONTEXT_CACHE_DIR = _ROOT / "Transcription" / "story_context_cache"
+_story_cache_migrated = False
 
 # 폴더/파일명에 붙는 `품번__HD__A` 꼬리 — 기준 품번만으로 `*_grok.json` 을 맞추기 위함
 _STORY_CACHE_TAG_TOKENS = frozenset(
@@ -96,10 +98,65 @@ def _resolve_openrouter_api_key() -> str:
         return ""
 
 
+def story_context_legacy_cache_dir() -> Path:
+    """레거시 캐시 루트(읽기·이관 폴백 전용). 신규 저장은 `story_context_cache_dir`만 사용."""
+    return _LEGACY_STORY_CONTEXT_CACHE_DIR
+
+
 def story_context_cache_dir() -> Path:
-    d = _ROOT / "Transcription" / "story_context_cache"
+    """SoT: `data/cache/story_context/` ([`app_config.STORY_CONTEXT_CACHE_DIR`](d:/App/JAVSTORY/javstory/config/app_config.py))."""
+    from javstory.config.app_config import STORY_CONTEXT_CACHE_DIR
+
+    d = Path(STORY_CONTEXT_CACHE_DIR)
     d.mkdir(parents=True, exist_ok=True)
+    _ensure_story_context_cache_migrated()
     return d
+
+
+def _ensure_story_context_cache_migrated() -> None:
+    global _story_cache_migrated
+    if _story_cache_migrated:
+        return
+    _story_cache_migrated = True
+    try:
+        migrate_story_context_cache_files()
+    except Exception:
+        pass
+
+
+def migrate_story_context_cache_files(*, log: OptionalLogger = None) -> dict[str, int]:
+    """
+    `Transcription/story_context_cache/*.json` → `data/cache/story_context/` 1회 이관.
+    동일 파일명이 있으면 mtime이 더 최신인 쪽만 유지.
+    """
+    from javstory.config.app_config import STORY_CONTEXT_CACHE_DIR
+
+    primary = Path(STORY_CONTEXT_CACHE_DIR)
+    legacy = story_context_legacy_cache_dir()
+    primary.mkdir(parents=True, exist_ok=True)
+    stats = {"copied": 0, "skipped": 0, "errors": 0}
+    if not legacy.is_dir():
+        return stats
+
+    for src in legacy.glob("*.json"):
+        if not src.is_file():
+            continue
+        dst = primary / src.name
+        try:
+            if dst.is_file():
+                if src.stat().st_mtime <= dst.stat().st_mtime:
+                    stats["skipped"] += 1
+                    continue
+            dst.write_bytes(src.read_bytes())
+            stats["copied"] += 1
+        except OSError:
+            stats["errors"] += 1
+    if log and stats["copied"]:
+        log(
+            f"[Grok 캐시] 레거시 폴더에서 {stats['copied']}개 JSON을 "
+            f"{primary} 로 이관했습니다."
+        )
+    return stats
 
 
 def _sanitized_product_code(product_code: str) -> str:
@@ -124,17 +181,19 @@ def story_context_cache_path(product_code: str, model_hint: str = "") -> Path:
 
 def _legacy_model_suffix_cache_exists(product_code: str) -> bool:
     """`품번__*.json` 레거시 캐시 (기준 품번 접두 또는 원본 접두)."""
-    d = story_context_cache_dir()
     base = _story_cache_base_id(product_code)
     raw_san = _sanitized_product_code(product_code)
-    try:
-        if any(d.glob(f"{base}__*.json")):
-            return True
-        if raw_san != base and any(d.glob(f"{raw_san}__*.json")):
-            return True
-        return False
-    except OSError:
-        return False
+    for d in (story_context_cache_dir(), story_context_legacy_cache_dir()):
+        if not d.is_dir():
+            continue
+        try:
+            if any(d.glob(f"{base}__*.json")):
+                return True
+            if raw_san != base and any(d.glob(f"{raw_san}__*.json")):
+                return True
+        except OSError:
+            continue
+    return False
 
 
 def has_disk_grok_story_cache(product_code: str) -> bool:
@@ -150,6 +209,12 @@ def has_disk_grok_story_cache(product_code: str) -> bool:
         pc_u = raw.upper()
         if story_context_cache_path(pc_u, "").is_file():
             return True
+        # 이관 전: 레거시 디렉터리만 있는 경우
+        leg = story_context_legacy_cache_dir()
+        if leg.is_dir():
+            bid = _story_cache_base_id(raw)
+            if (leg / f"{bid}_grok.json").is_file():
+                return True
     except OSError:
         return False
     return False
@@ -241,10 +306,12 @@ def load_cached_grok_json(
     if not pc:
         return None
     tier = merge_story_context_tier(story_context_tier)
-    paths_try = (
-        story_context_cache_path_grok(pc),
+    grok_primary = story_context_cache_path_grok(pc)
+    paths_try: list[Path] = [
+        grok_primary,
+        story_context_legacy_cache_dir() / grok_primary.name,
         story_context_cache_path(pc, str(tier.get("model") or "")),
-    )
+    ]
     for path in paths_try:
         if not path.is_file():
             continue
@@ -277,9 +344,11 @@ def load_cached_grok_json_flexible(
         except (OSError, json.JSONDecodeError):
             return None
 
-    got = _read(story_context_cache_path_grok(pc_upper))
-    if got:
-        return got
+    grok_primary = story_context_cache_path_grok(pc_upper)
+    for grok_path in (grok_primary, story_context_legacy_cache_dir() / grok_primary.name):
+        got = _read(grok_path)
+        if got:
+            return got
 
     hit = load_cached_grok_json(raw, tier)
     if hit:
@@ -318,18 +387,20 @@ def load_cached_grok_json_flexible(
             return got
 
     try:
-        d = story_context_cache_dir()
         base_id = _story_cache_base_id(pc_upper)
         raw_id = _sanitized_product_code(pc_upper)
         matches: list[Path] = []
         seen: set[Path] = set()
-        for prefix in (base_id, raw_id):
-            if not prefix:
+        for d in (story_context_cache_dir(), story_context_legacy_cache_dir()):
+            if not d.is_dir():
                 continue
-            for p in d.glob(f"{prefix}__*.json"):
-                if p.is_file() and p not in seen:
-                    seen.add(p)
-                    matches.append(p)
+            for prefix in (base_id, raw_id):
+                if not prefix:
+                    continue
+                for p in d.glob(f"{prefix}__*.json"):
+                    if p.is_file() and p not in seen:
+                        seen.add(p)
+                        matches.append(p)
         if matches:
             matches.sort(key=lambda p: p.stat().st_mtime, reverse=True)
             got = _read(matches[0])
@@ -347,6 +418,8 @@ __all__ = [
     "load_cached_grok_json",
     "load_cached_grok_json_flexible",
     "story_context_cache_dir",
+    "story_context_legacy_cache_dir",
+    "migrate_story_context_cache_files",
     "story_context_cache_path",
     "story_context_cache_path_grok",
     "has_disk_grok_story_cache",

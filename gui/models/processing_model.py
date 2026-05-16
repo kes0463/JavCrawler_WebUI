@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from javstory.utils.product_code import extract_product_code_from_path
+from javstory.utils.product_code import extract_product_code_from_path, resolve_product_code_for_video
 from PySide6.QtCore import (
     QObject, Property, Signal, Slot,
     QAbstractListModel, QModelIndex, Qt,
@@ -320,12 +320,7 @@ class ProcessingModel(QObject):
 
         # Grok 캐시·DB 조회는 품번(예: ABW-358)이어야 함 — 전체 파일 stem을 쓰면
         # `-__ACTRESS_____ABW-358__HD___grok.json` 같은 비정상 캐시 파일이 생김.
-        pc = extract_product_code_from_path(video_path)
-        if not pc:
-            pc = (product_code or "").strip()
-        if not pc:
-            pc = os.path.splitext(os.path.basename(video_path))[0]
-        pc = pc.strip().upper()
+        pc = resolve_product_code_for_video(video_path, product_code)
 
         self._subtitle_worker = SubtitleWorker(
             product_code=pc,

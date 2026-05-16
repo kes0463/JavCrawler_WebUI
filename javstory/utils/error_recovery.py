@@ -1,7 +1,8 @@
 """
 Error Recovery Service - Stage 6 (에러 복구 자동화)
 
-실패한 작업을 04_ERROR 폴더에 저장하고, 자동으로 재시도하는 서비스입니다.
+파이프라인(Harvest/STT/자막) 실패 작업을 `data/error/04_ERROR/`에 저장·재시도한다.
+앱 부트 크래시는 `logs/crash_report.txt`(main.py)와 별도 — 여기서는 런타임 파이프라인만 다룬다.
 """
 
 import json

@@ -391,3 +391,20 @@ def extract_product_code_from_path(video_path: str | Path) -> str | None:
         return None
 
     return best
+
+
+def resolve_product_code_for_video(
+    video_path: str | Path,
+    hint: str | None = None,
+) -> str:
+    """
+    워커·큐 공통 품번 해석: 경로에서 추출 → hint → 파일 stem 순.
+    """
+    extracted = extract_product_code_from_path(video_path)
+    if extracted:
+        return extracted.strip().upper()
+    h = (hint or "").strip().upper()
+    if h:
+        return h
+    stem = Path(str(video_path)).stem.strip()
+    return stem.upper() if stem else ""

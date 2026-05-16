@@ -550,16 +550,15 @@ class MosaicQueueController(QObject):
 
     @Slot(str, str)
     def enqueue(self, product_code: str, video_path: str) -> None:
-        pc = (product_code or "").strip().upper()
+        from javstory.utils.product_code import resolve_product_code_for_video
+
+        pc = resolve_product_code_for_video(video_path, product_code)
         vp = (video_path or "").strip()
         if not vp:
             return
 
         if not pc:
-            try:
-                pc = Path(vp).stem.strip().upper()
-            except Exception:
-                pc = "FILE"
+            pc = resolve_product_code_for_video(vp, None) or "FILE"
         
         # 동일 파일이 queued/running이면 중복 등록 방지
         try:
