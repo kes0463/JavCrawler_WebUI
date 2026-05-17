@@ -81,7 +81,17 @@ def decay_and_sync(
         decayed = False
 
     synced = run_preference_sync(progress_callback=progress_callback)
-    return {"synced": synced, "decayed": decayed}
+
+    digest_ok = False
+    try:
+        from javstory.analytics.weekly_digest import generate_weekly_digest
+
+        generate_weekly_digest()
+        digest_ok = True
+    except Exception:
+        pass
+
+    return {"synced": synced, "decayed": decayed, "weekly_digest": digest_ok}
 
 
 def run_batch_in_thread(

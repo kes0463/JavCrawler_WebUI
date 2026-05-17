@@ -24,6 +24,8 @@ Item {
     property var makers:      parseJson(InsightModel.topMakers,    [])
     property var recs:        parseJson(InsightModel.todayRecs,    [])
     property var nextWatch:   parseJson(InsightModel.nextWatchRecs, [])
+    property var hiddenGems:  parseJson(InsightModel.hiddenGems, [])
+    property var actorCollections: parseJson(InsightModel.actorCollections, {actors:[]})
     property var tasteData:   parseJson(InsightModel.tasteVector,  {axes:[]})
     property var heatmapData: parseJson(InsightModel.watchHeatmap, {year: 2026, days:{}, max:0})
     property var persona:     parseJson(InsightModel.personaCard,  {})
@@ -31,7 +33,9 @@ Item {
     property var stats:       parseJson(InsightModel.libraryStats, {})
     property var trend:       parseJson(InsightModel.recentTrend,  {actors:[], genres:[]})
     property var monthlyData: parseJson(InsightModel.monthlyGenres, [])
+    property var tasteDrift:  parseJson(InsightModel.tasteDrift, {series:[]})
     property var libraryDist: parseJson(InsightModel.libraryDistribution, {actors:[], genres:[], makers:[]})
+    property var weeklyDigest: parseJson(InsightModel.weeklyDigest, {lines:[]})
 
     // InsightModel 변경 시 로컬 프로퍼티 갱신
     Connections {
@@ -41,6 +45,8 @@ Item {
         function onTopMakersChanged()    { root.makers      = root.parseJson(InsightModel.topMakers, []) }
         function onTodayRecsChanged()    { root.recs        = root.parseJson(InsightModel.todayRecs, []) }
         function onNextWatchRecsChanged(){ root.nextWatch   = root.parseJson(InsightModel.nextWatchRecs, []) }
+        function onHiddenGemsChanged()   { root.hiddenGems  = root.parseJson(InsightModel.hiddenGems, []) }
+        function onActorCollectionsChanged() { root.actorCollections = root.parseJson(InsightModel.actorCollections, {actors:[]}) }
         function onTasteVectorChanged()  { root.tasteData   = root.parseJson(InsightModel.tasteVector, {axes:[]}) }
         function onWatchHeatmapChanged() { root.heatmapData = root.parseJson(InsightModel.watchHeatmap, {}) }
         function onPersonaCardChanged()  { root.persona     = root.parseJson(InsightModel.personaCard, {}) }
@@ -48,7 +54,9 @@ Item {
         function onLibraryStatsChanged() { root.stats       = root.parseJson(InsightModel.libraryStats, {}) }
         function onRecentTrendChanged()  { root.trend       = root.parseJson(InsightModel.recentTrend, {actors:[], genres:[]}) }
         function onMonthlyGenresChanged(){ root.monthlyData = root.parseJson(InsightModel.monthlyGenres, []) }
+        function onTasteDriftChanged()    { root.tasteDrift  = root.parseJson(InsightModel.tasteDrift, {series:[]}) }
         function onLibraryDistributionChanged(){ root.libraryDist = root.parseJson(InsightModel.libraryDistribution, {actors:[], genres:[], makers:[]}) }
+        function onWeeklyDigestChanged()     { root.weeklyDigest = root.parseJson(InsightModel.weeklyDigest, {lines:[]}) }
     }
 
     // ── 헤더 ────────────────────────────────────────────────────────────────
@@ -118,6 +126,50 @@ Item {
                 anchors.margins: Theme.spacingLg
                 spacing: Theme.spacingLg
 
+                // ── 주간 취향 리포트 (다이제스트) ─────────────────
+                GlassCard {
+                    Layout.fillWidth: true
+                    Layout.preferredHeight: root.weeklyDigest.has_data ? Math.max(100, 56 + (root.weeklyDigest.lines || []).length * 22) : 72
+                    autoSize: false
+                    border.color: Qt.rgba(0, 229/255, 255/255, 0.35)
+
+                    ColumnLayout {
+                        anchors.fill: parent
+                        anchors.margins: Theme.spacingMd
+                        spacing: Theme.spacingSm
+
+                        RowLayout {
+                            Layout.fillWidth: true
+                            Text {
+                                text: "📋 지난 주 리포트"
+                                font.pixelSize: Theme.fontBody
+                                font.weight: Font.DemiBold
+                                color: Theme.textPrimary
+                            }
+                            Text {
+                                visible: !!root.weeklyDigest.week_label
+                                text: root.weeklyDigest.week_label || ""
+                                font.pixelSize: Theme.fontCaption
+                                color: Theme.accentNeon
+                                leftPadding: Theme.spacingSm
+                            }
+                            Item { Layout.fillWidth: true }
+                        }
+
+                        Repeater {
+                            model: root.weeklyDigest.has_data ? (root.weeklyDigest.lines || []) : [root.weeklyDigest.empty_message || "이번 주 시청 이력이 없습니다."]
+
+                            Text {
+                                Layout.fillWidth: true
+                                text: typeof modelData === "string" ? modelData : ""
+                                font.pixelSize: Theme.fontCaption
+                                color: root.weeklyDigest.has_data ? Theme.textSecondary : Theme.textMuted
+                                wrapMode: Text.Wrap
+                            }
+                        }
+                    }
+                }
+
                 // ── 통계 요약 카드 4종 ──────────────────────────
                 RowLayout {
                     Layout.fillWidth: true
@@ -162,19 +214,21 @@ Item {
                 // ── 취향 레이더 + 페르소나 ─────────────────────────
                 RowLayout {
                     Layout.fillWidth: true
+                    Layout.bottomMargin: Theme.spacingLg
                     spacing: Theme.spacingMd
 
                     TasteProfileCard {
                         Layout.fillWidth: true
                         Layout.preferredWidth: 1
-                        Layout.preferredHeight: 400
+                        Layout.alignment: Qt.AlignTop
                         profile: root.tasteData
                     }
 
                     PersonaCard {
                         Layout.fillWidth: true
                         Layout.preferredWidth: 1
-                        Layout.preferredHeight: 380
+                        Layout.fillHeight: true
+                        Layout.alignment: Qt.AlignTop
                         title: root.persona.title || "나의 취향 페르소나"
                         personaType: root.persona.persona_type || ""
                         summary: root.persona.summary || root.persona.body || ""
@@ -232,6 +286,54 @@ Item {
                                 year: root.heatmapData.year || new Date().getFullYear()
                                 days: root.heatmapData.days || {}
                             }
+                        }
+                    }
+                }
+
+                // ── 취향 드리프트 (월별 장르 스택) ─────────────────
+                GlassCard {
+                    Layout.fillWidth: true
+                    Layout.bottomMargin: Theme.spacingLg
+                    Layout.preferredHeight: root.tasteDrift.has_data ? 260 : 120
+                    Layout.minimumHeight: 120
+                    autoSize: false
+                    clip: false
+                    ColumnLayout {
+                        anchors.fill: parent
+                        anchors.margins: Theme.spacingMd
+                        spacing: Theme.spacingSm
+                        RowLayout {
+                            Layout.fillWidth: true
+                            Text {
+                                text: "📈 취향 드리프트"
+                                font.pixelSize: Theme.fontBody
+                                font.weight: Font.DemiBold
+                                color: Theme.textPrimary
+                            }
+                            Text {
+                                text: "최근 " + (root.tasteDrift.months_span || 6) + "개월 · 장르 비중"
+                                font.pixelSize: Theme.fontCaption
+                                color: Theme.textMuted
+                                leftPadding: Theme.spacingSm
+                            }
+                            Item { Layout.fillWidth: true }
+                        }
+                        AppScrollView {
+                            Layout.fillWidth: true
+                            Layout.preferredHeight: root.tasteDrift.has_data ? 200 : 48
+                            clip: true
+                            contentWidth: driftChartInner.implicitWidth
+                            ScrollBar.horizontal.policy: ScrollBar.AsNeeded
+                            ScrollBar.vertical.policy: ScrollBar.AlwaysOff
+                            TasteDriftChart {
+                                id: driftChartInner
+                                timeline: root.tasteDrift
+                            }
+                        }
+
+                        Item {
+                            Layout.fillWidth: true
+                            Layout.preferredHeight: Theme.spacingMd
                         }
                     }
                 }
@@ -472,6 +574,7 @@ Item {
                     GlassCard {
                         autoSize: false
                         Layout.fillWidth: true
+                        Layout.bottomMargin: Theme.spacingLg
                         Layout.preferredHeight: 340
 
                         ColumnLayout {
@@ -577,7 +680,10 @@ Item {
                                 wrapMode: Text.WordWrap
                             }
 
-                            Item { Layout.fillHeight: true }
+                            Item {
+                                Layout.fillWidth: true
+                                Layout.preferredHeight: Theme.spacingMd
+                            }
                         }
                     }
 
@@ -954,6 +1060,230 @@ Item {
                     }
                 }
 
+                // ── 숨은 보석 (Hidden Gems) ───────────────────────
+                GlassCard {
+                    autoSize: false
+                    Layout.fillWidth: true
+                    Layout.bottomMargin: Theme.spacingLg
+                    Layout.preferredHeight: root.hiddenGems.length > 0 ? 380 : 120
+
+                    ColumnLayout {
+                        anchors.fill: parent
+                        anchors.margins: Theme.spacingMd
+                        spacing: Theme.spacingMd
+
+                        RowLayout {
+                            Layout.fillWidth: true
+                            Text {
+                                text: "💎 놓친 보석"
+                                font.pixelSize: Theme.fontBody
+                                font.weight: Font.DemiBold
+                                color: Theme.textPrimary
+                            }
+                            Text {
+                                text: "미감상·저평가인데 취향과 잘 맞는 작품"
+                                font.pixelSize: Theme.fontCaption
+                                color: Theme.textMuted
+                                leftPadding: Theme.spacingSm
+                            }
+                            Item { Layout.fillWidth: true }
+                        }
+
+                        Rectangle { width: parent.width; height: 1; color: Theme.glassBorder }
+
+                        Row {
+                            spacing: Theme.spacingMd
+                            visible: root.hiddenGems.length > 0
+
+                            Repeater {
+                                model: root.hiddenGems.slice(0, 6)
+
+                                Rectangle {
+                                    id: gemCard
+                                    width: 150; height: 300
+                                    radius: Theme.radiusMd
+                                    color: Theme.surface
+                                    border.color: gemMa.containsMouse
+                                        ? Theme.glassBorderHover : Theme.glassBorder
+                                    border.width: 1
+                                    clip: true
+
+                                    scale: gemMa.containsMouse ? 1.04 : 1.0
+                                    Behavior on scale { NumberAnimation { duration: Theme.animFast; easing.type: Easing.OutCubic } }
+
+                                    Column {
+                                        anchors.fill: parent
+                                        spacing: 0
+
+                                        Rectangle {
+                                            width: parent.width
+                                            height: 200
+                                            color: Theme.bgSecondary
+
+                                            Image {
+                                                anchors.fill: parent
+                                                source: modelData.cover_path
+                                                    ? "file:///" + modelData.cover_path : ""
+                                                fillMode: Image.PreserveAspectCrop
+                                                asynchronous: true
+                                            }
+
+                                            Rectangle {
+                                                anchors.top: parent.top
+                                                anchors.left: parent.left
+                                                anchors.margins: 6
+                                                height: 22
+                                                radius: 11
+                                                width: gemTypeLabel.implicitWidth + 12
+                                                color: modelData.gem_type === "underrated"
+                                                    ? Qt.rgba(1, 180/255, 80/255, 0.92)
+                                                    : Qt.rgba(0.45, 0.75, 1, 0.92)
+
+                                                Text {
+                                                    id: gemTypeLabel
+                                                    anchors.centerIn: parent
+                                                    text: modelData.gem_type === "underrated" ? "재평가" : "미감상"
+                                                    font.pixelSize: 10
+                                                    font.weight: Font.Bold
+                                                    color: "#000"
+                                                }
+                                            }
+
+                                            Rectangle {
+                                                anchors.top: parent.top
+                                                anchors.right: parent.right
+                                                anchors.margins: 6
+                                                width: 48; height: 22; radius: 11
+                                                color: Qt.rgba(0, 229/255, 255/255, 0.9)
+
+                                                Text {
+                                                    anchors.centerIn: parent
+                                                    text: Math.round((modelData.rec_score || 0) * 100) + "%"
+                                                    font.pixelSize: 11
+                                                    font.weight: Font.Bold
+                                                    color: "#000"
+                                                }
+                                            }
+
+                                            Text {
+                                                anchors.centerIn: parent
+                                                text: modelData.product_code || ""
+                                                font.pixelSize: 14
+                                                font.weight: Font.Bold
+                                                color: Theme.textMuted
+                                                visible: !modelData.cover_path
+                                            }
+                                        }
+
+                                        Column {
+                                            width: parent.width
+                                            padding: 8
+                                            spacing: 3
+
+                                            Text {
+                                                text: modelData.product_code || ""
+                                                font.pixelSize: 11
+                                                font.weight: Font.Bold
+                                                color: Theme.accentNeon
+                                                width: parent.width - 16
+                                                elide: Text.ElideRight
+                                            }
+                                            Text {
+                                                text: modelData.title_ko || "제목 없음"
+                                                font.pixelSize: 11
+                                                color: Theme.textPrimary
+                                                width: parent.width - 16
+                                                elide: Text.ElideRight
+                                                maximumLineCount: 2
+                                                wrapMode: Text.WordWrap
+                                            }
+                                            Text {
+                                                text: modelData.reason || ""
+                                                font.pixelSize: 10
+                                                color: Theme.textSecondary
+                                                width: parent.width - 16
+                                                wrapMode: Text.WordWrap
+                                                maximumLineCount: 2
+                                            }
+                                        }
+                                    }
+
+                                    MouseArea {
+                                        id: gemMa
+                                        anchors.fill: parent
+                                        hoverEnabled: true
+                                        cursorShape: Qt.PointingHandCursor
+                                        onClicked: {
+                                            window.navigateToLibraryDetail(modelData.product_code)
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        Text {
+                            visible: root.hiddenGems.length === 0
+                            text: "취향 데이터가 쌓이면 미감상·저평가 작품 중\n취향과 잘 맞는 보석을 찾아 드립니다."
+                            color: Theme.textMuted
+                            font.pixelSize: Theme.fontCaption
+                            horizontalAlignment: Text.AlignHCenter
+                            Layout.alignment: Qt.AlignHCenter
+                            wrapMode: Text.Wrap
+                        }
+
+                        Item {
+                            Layout.fillWidth: true
+                            Layout.preferredHeight: Theme.spacingMd
+                        }
+                    }
+                }
+
+                // ── 배우별 완독률 ─────────────────────────────────
+                GlassCard {
+                    autoSize: false
+                    Layout.fillWidth: true
+                    Layout.preferredHeight: root.actorCollections.has_data
+                        ? Math.min(420, 80 + (root.actorCollections.actors || []).length * 28)
+                        : 120
+
+                    ColumnLayout {
+                        anchors.fill: parent
+                        anchors.margins: Theme.spacingMd
+                        spacing: Theme.spacingSm
+
+                        RowLayout {
+                            Layout.fillWidth: true
+                            Text {
+                                text: "🎭 배우별 컬렉션 완성도"
+                                font.pixelSize: Theme.fontBody
+                                font.weight: Font.DemiBold
+                                color: Theme.textPrimary
+                            }
+                            Text {
+                                text: "보유 작품 대비 완독"
+                                font.pixelSize: Theme.fontCaption
+                                color: Theme.textMuted
+                                leftPadding: Theme.spacingSm
+                            }
+                            Item { Layout.fillWidth: true }
+                        }
+
+                        Rectangle { Layout.fillWidth: true; height: 1; color: Theme.glassBorder }
+
+                        AppScrollView {
+                            Layout.fillWidth: true
+                            Layout.fillHeight: true
+                            Layout.preferredHeight: root.actorCollections.has_data ? 280 : 48
+                            clip: true
+                            contentWidth: availableWidth
+                            ActorCollectionCard {
+                                width: parent.width
+                                collection: root.actorCollections
+                            }
+                        }
+                    }
+                }
+
                 // ── 오늘의 추천 (규칙) ───────────────────────────
                 GlassCard {
                     autoSize: false
@@ -1031,12 +1361,15 @@ Item {
                                     color: Theme.surfaceLight
                                     border.color: Theme.glassBorder
                                     border.width: 1
-                                    width: makerLabel.implicitWidth + Theme.spacingMd * 2
-                                    height: 36
+                                    implicitWidth: makerChipRow.implicitWidth + Theme.spacingLg * 2
+                                    implicitHeight: 36
 
                                     RowLayout {
+                                        id: makerChipRow
                                         anchors.centerIn: parent
-                                        spacing: 6
+                                        anchors.leftMargin: Theme.spacingMd
+                                        anchors.rightMargin: Theme.spacingMd
+                                        spacing: Theme.spacingSm
                                         Text {
                                             id: makerLabel
                                             text: modelData.name || ""

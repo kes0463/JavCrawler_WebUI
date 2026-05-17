@@ -5,7 +5,7 @@ import ".."
 
 GlassCard {
     id: root
-    autoSize: false
+    autoSize: true
     clip: false
 
     property var profile: ({})
@@ -13,8 +13,7 @@ GlassCard {
     property int watchedCount: profile.watched_count || 0
 
     ColumnLayout {
-        anchors.fill: parent
-        anchors.margins: Theme.spacingMd
+        width: parent.width
         spacing: Theme.spacingMd
 
         ColumnLayout {
@@ -107,6 +106,7 @@ GlassCard {
         }
 
         RowLayout {
+            id: genreActorRow
             Layout.fillWidth: true
             spacing: Theme.spacingMd
             visible: root.hasData && ((profile.top_genres || []).length > 0 || (profile.top_actors || []).length > 0)
@@ -141,11 +141,16 @@ GlassCard {
                         }
                     }
                 }
+                Item {
+                    Layout.fillWidth: true
+                    Layout.preferredHeight: Theme.spacingMd
+                }
             }
 
             Rectangle {
                 width: 1
                 Layout.fillHeight: true
+                Layout.alignment: Qt.AlignTop
                 color: Theme.glassBorder
                 visible: (profile.top_genres || []).length > 0 && (profile.top_actors || []).length > 0
             }
@@ -180,7 +185,17 @@ GlassCard {
                         }
                     }
                 }
+                Item {
+                    Layout.fillWidth: true
+                    Layout.preferredHeight: Theme.spacingMd
+                }
             }
+        }
+
+        Item {
+            Layout.fillWidth: true
+            Layout.preferredHeight: Theme.spacingLg
+            visible: genreActorRow.visible
         }
 
         ColumnLayout {
@@ -215,6 +230,12 @@ GlassCard {
                     }
                 }
             }
+        }
+
+        Item {
+            Layout.fillWidth: true
+            Layout.preferredHeight: Theme.spacingMd
+            visible: root.hasData
         }
     }
 }

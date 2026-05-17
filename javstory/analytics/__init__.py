@@ -15,7 +15,12 @@ from javstory.analytics.library_stats import (
     compute_taste_vector,
     compute_taste_profile,
     get_watch_heatmap,
+    get_unwatched_gems,
+    get_preference_timeline,
+    get_monthly_genre_trend,
+    get_actor_collection_stats,
 )
+from javstory.analytics.weekly_digest import get_weekly_digest
 
 __all__ = [
     "score_preferences",
@@ -31,4 +36,9 @@ __all__ = [
     "compute_taste_vector",
     "compute_taste_profile",
     "get_watch_heatmap",
+    "get_unwatched_gems",
+    "get_preference_timeline",
+    "get_monthly_genre_trend",
+    "get_actor_collection_stats",
+    "get_weekly_digest",
 ]

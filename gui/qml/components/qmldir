@@ -21,4 +21,6 @@ RadarChartWidget 1.0 RadarChartWidget.qml
 TasteProfileCard 1.0 TasteProfileCard.qml
 HeatmapWidget 1.0 HeatmapWidget.qml
 PersonaCard 1.0 PersonaCard.qml
+TasteDriftChart 1.0 TasteDriftChart.qml
+ActorCollectionCard 1.0 ActorCollectionCard.qml
 AssOverlay 1.0 AssOverlay.qml
