@@ -23,7 +23,9 @@ JAVSTORY에는 UI 진입점이 두 갈래 존재한다.
 2. **`frontend/`(React+Electron)와 `api/`(FastAPI)는 non-production으로 동결**한다.
    - 신규 기능 추가 금지
    - 버그 수정·의존성 업데이트·P3/P4 연동 대상에서 제외
-   - 로컬 실험·UI 목업 참고용으로만 유지 가능
+   - `api/main.py` 기본: `/health`, `/api/status`만 — `/api/harvest/*`는 410
+   - 레거시 라우트: `JAVSTORY_ALLOW_FROZEN_API=1` (지원 없음, 명시적 opt-in)
+   - Electron은 동일 env 없으면 uvicorn 미기동
 3. **삭제는 동결 시작일 기준 6~12개월 후 검토**한다 (본 ADR 검토 예정일). 삭제 전에 `git` 히스토리·별도 브랜치 보존 여부를 확인한다.
 
 ## 하지 않는 것

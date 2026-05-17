@@ -8,7 +8,9 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from PySide6.QtCore import QThread, Signal
+from PySide6.QtCore import Signal
+
+from gui.workers.cancellable_thread import CancellableQThread
 
 
 @dataclass
@@ -19,7 +21,7 @@ class LadaPassConfig:
     detect_face: bool
 
 
-class MosaicRemovalWorker(QThread):
+class MosaicRemovalWorker(CancellableQThread):
     logEmitted = Signal(str)
     passStarted = Signal(int, int)  # current_pass, total_passes
     finished = Signal(bool, str, str)  # success, message, output_path
@@ -44,23 +46,6 @@ class MosaicRemovalWorker(QThread):
         self.encoder_options = str(encoder_options or "").strip()
         self.encoding_preset = str(encoding_preset or "").strip()
         self.fp16 = bool(fp16)
-        self._proc: subprocess.Popen | None = None
-        self._cancelled = False
-
-    def stop(self) -> None:
-        self._cancelled = True
-        p = self._proc
-        if p and p.poll() is None:
-            try:
-                if os.name == "nt":
-                    subprocess.call(
-                        ["taskkill", "/F", "/T", "/PID", str(p.pid)],
-                        creationflags=subprocess.CREATE_NO_WINDOW,
-                    )
-                else:
-                    p.terminate()
-            except Exception:
-                pass
 
     def _popen_and_stream(self, cmd: list[str]) -> int:
         self.logEmitted.emit(f"> {' '.join(cmd)}")
@@ -69,14 +54,17 @@ class MosaicRemovalWorker(QThread):
             kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
         # LADA 로그는 환경에 따라 UTF-8/CP949가 섞일 수 있어 기본은 auto로 둔다.
         log_enc = (os.environ.get("JAVSTORY_LADA_LOG_ENCODING", "") or "").strip() or ("auto" if os.name == "nt" else "utf-8")
-        self._proc = subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=False,  # tqdm/ffmpeg 진행 줄(\r) 스트리밍을 위해 바이트로 즉시 읽는다
-            **kwargs,
+        self._set_active_proc(
+            subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=False,  # tqdm/ffmpeg 진행 줄(\r) 스트리밍을 위해 바이트로 즉시 읽는다
+                **kwargs,
+            )
         )
 
+        assert self._proc is not None
         assert self._proc.stdout is not None
         out = self._proc.stdout  # bytes stream
 
@@ -105,7 +93,7 @@ class MosaicRemovalWorker(QThread):
 
         # tqdm·ffmpeg는 진행 줄을 \r만으로 갱신하는 경우가 많다. \n만 기다리면 UI/파싱에 안 올라갈 수 있어
         # \r/\n 둘 다 구분해 '줄' 단위로 방출한다.
-        while not self._cancelled:
+        while not self.is_cancelled():
             chunk = out.read1(8192) if hasattr(out, "read1") else out.read(8192)
             if not chunk:
                 break
@@ -127,7 +115,7 @@ class MosaicRemovalWorker(QThread):
                 if (s or "").strip():
                     self.logEmitted.emit(s)
 
-        if not self._cancelled:
+        if not self.is_cancelled():
             tail = _decode_line(buf)
             if (tail or "").strip():
                 self.logEmitted.emit(tail)
@@ -136,7 +124,9 @@ class MosaicRemovalWorker(QThread):
             self._proc.stdout.close()
         except Exception:
             pass
-        return int(self._proc.wait())
+        code = int(self._proc.wait())
+        self._clear_active_proc()
+        return code
 
     def run(self) -> None:
         try:
@@ -161,7 +151,7 @@ class MosaicRemovalWorker(QThread):
             input_file = src
             total = len(self.passes)
             for idx, cfg in enumerate(self.passes):
-                if self._cancelled:
+                if self.is_cancelled():
                     self.finished.emit(False, "작업이 중단되었습니다.", "")
                     return
 
@@ -215,7 +205,7 @@ class MosaicRemovalWorker(QThread):
                     cmd.extend(["--encoder", (self.encoder or "").strip()])
 
                 rc = self._popen_and_stream(cmd)
-                if self._cancelled:
+                if self.is_cancelled():
                     self.finished.emit(False, "작업이 중단되었습니다.", "")
                     return
                 if rc != 0:

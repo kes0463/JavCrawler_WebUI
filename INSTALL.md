@@ -111,6 +111,8 @@ pip uninstall -y torch torchaudio torchvision nvidia-cublas-cu12 nvidia-cudnn-cu
 
 앱 부트 시 `init_db()`(v0–v8) 후 `alembic upgrade head`(v9+)가 자동 실행됩니다.
 
+**마이그레이션 실패 시**: 앱은 종료하지 않고 **읽기 전용**으로 UI를 띄웁니다. 자동 백업은 `data/db/backups/jav_database_pre_upgrade_failed_*.db`, 복구 절차·트레이스백은 `logs/db_upgrade_recovery.txt`, 구조화 로그는 `logs/javstory.jsonl` (`boot_db_upgrade_failed`)입니다. 수집·DB 쓰기는 차단되며 라이브러리 조회는 가능합니다.
+
 수동 적용:
 
 ```bat
@@ -178,6 +180,7 @@ GPU·Whisper·PySide6 없이 핵심 로직·import만 검증합니다.
 | 앱 즉시 종료 | `logs/crash_report.txt`, `logs/javstory.jsonl` |
 | Ollama 로컬 번역 모델 | `config/ollama/README.md`, `scripts/ollama_create_model.bat` |
 | 부트 시 Alembic 후 오래 멈춤 | P2 hydrate 진행 중 — 로그 `P2 hydrate progress` 확인; 급하면 `JAVSTORY_SKIP_BOOT_HYDRATE=1` + `tools/hydrate_products_v2.py` |
+| 시작 시 "DB 마이그레이션 실패 (읽기 전용)" | `logs/db_upgrade_recovery.txt` 따라 `alembic upgrade head` 수동 실행; 필요 시 `data/db/backups/` 백업으로 `data/db/jav_database.db` 복원 |
 | LLM 전 구간 실패 | `docs/llm_troubleshooting.md`, OpenRouter 키·티어 |
 
 진입점·UI 스택: [`docs/architecture/ENTRYPOINTS.md`](docs/architecture/ENTRYPOINTS.md)

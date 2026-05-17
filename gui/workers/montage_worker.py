@@ -7,8 +7,9 @@ import tempfile
 import time
 from pathlib import Path
 
-from PySide6.QtCore import QThread, Signal as pyqtSignal
+from PySide6.QtCore import Signal as pyqtSignal
 
+from gui.workers.cancellable_thread import CancellableQThread
 from javstory.utils.ffmpeg_path import get_ffmpeg
 
 
@@ -20,7 +21,7 @@ def _startupinfo_hidden() -> object | None:
     return si
 
 
-class MontageWorker(QThread):
+class MontageWorker(CancellableQThread):
     """선택된 여러 작품의 하이라이트를 합쳐 몽타주(mp4) 생성."""
 
     resultReady = pyqtSignal(bool, str, str)  # success, message, output_path
@@ -32,6 +33,9 @@ class MontageWorker(QThread):
         self.output_path = Path(output_path)
 
     def run(self):
+        if self.is_cancelled():
+            self.resultReady.emit(False, "cancelled", "")
+            return
         success = False
         msg = ""
         out_path = ""
@@ -120,7 +124,26 @@ class MontageWorker(QThread):
                         ]
 
                     self.progressUpdated.emit(45, "영상 인코딩 중 (NVENC 가속)...")
-                    subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, startupinfo=_startupinfo_hidden(), check=False)
+                    kwargs = {
+                        "stdout": subprocess.DEVNULL,
+                        "stderr": subprocess.DEVNULL,
+                        "startupinfo": _startupinfo_hidden(),
+                    }
+                    if os.name == "nt":
+                        kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+                    self._set_active_proc(subprocess.Popen(cmd, **kwargs))
+                    proc = self._proc
+                    assert proc is not None
+                    while proc.poll() is None:
+                        if self.is_cancelled():
+                            self.kill_child_processes()
+                            break
+                        time.sleep(0.15)
+                    self._clear_active_proc()
+
+            if self.is_cancelled():
+                self.resultReady.emit(False, "cancelled", "")
+                return
 
             self.progressUpdated.emit(100, "완료!")
 

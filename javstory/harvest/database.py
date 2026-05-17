@@ -16,8 +16,12 @@ from sqlalchemy.orm import sessionmaker, relationship
 from sqlalchemy.pool import NullPool
 from contextlib import contextmanager
 import datetime
+import shutil
 import sys
+import traceback
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
 
 _ROOT = Path(__file__).resolve().parent.parent.parent
 if str(_ROOT) not in sys.path:
@@ -34,6 +38,42 @@ Base = declarative_base()
 _APP_DB_SCHEMA_VERSION = 8
 _ALEMBIC_HEAD_REVISION = "0001_stamp_v8"
 _SCHEMA_USER_VERSION_ALEMBIC = 9
+
+_db_boot_mode: Literal["ok", "read_only"] = "ok"
+_last_boot_result: "DbBootResult | None" = None
+
+
+class DbUpgradeError(Exception):
+    """Alembic upgrade failed (strict callers)."""
+
+
+class DbReadOnlyError(Exception):
+    """DB writes blocked after failed migration."""
+
+
+@dataclass(frozen=True)
+class DbBootResult:
+    ok: bool
+    read_only: bool
+    message: str
+    backup_path: str | None = None
+    recovery_log: str | None = None
+
+
+def is_db_read_only() -> bool:
+    return _db_boot_mode == "read_only"
+
+
+def get_last_db_boot_result() -> DbBootResult | None:
+    return _last_boot_result
+
+
+def assert_db_writable(context: str = "") -> None:
+    if is_db_read_only():
+        hint = (_last_boot_result.message if _last_boot_result else "") or "See logs/db_upgrade_recovery.txt"
+        raise DbReadOnlyError(
+            f"Database is read-only{f' ({context})' if context else ''}. {hint}"
+        )
 
 class JAVMetadata(Base):
     """
@@ -528,37 +568,158 @@ def get_schema_user_version() -> int:
         return 0
 
 
-def upgrade_alembic_head() -> None:
+def _alembic_revision_label() -> str:
+    import sqlite3
+
+    p = Path(DB_PATH)
+    if not p.is_file():
+        return "unknown"
+    try:
+        with sqlite3.connect(DB_PATH) as conn:
+            row = conn.execute("SELECT version_num FROM alembic_version").fetchone()
+            if row and row[0]:
+                return str(row[0])
+    except Exception:
+        pass
+    return "unknown"
+
+
+def _backup_database(reason: str) -> Path | None:
+    src = Path(DB_PATH)
+    if not src.is_file() or src.stat().st_size == 0:
+        return None
+    dest_dir = src.parent / "backups"
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    dest = dest_dir / f"jav_database_{reason}_{ts}.db"
+    shutil.copy2(src, dest)
+    return dest
+
+
+def _write_db_recovery_artifact(exc: BaseException, backup: Path | None) -> Path:
+    logs_dir = _ROOT / "logs"
+    logs_dir.mkdir(parents=True, exist_ok=True)
+    path = logs_dir / "db_upgrade_recovery.txt"
+    backup_line = str(backup) if backup else "(no backup — DB file missing)"
+    body = f"""JAVSTORY database migration failed
+================================
+
+The app started in READ-ONLY mode so your existing data is not corrupted further.
+
+Automatic backup:
+  {backup_line}
+
+Recovery steps:
+  1. Close JAVSTORY completely.
+  2. Copy the backup file over the active DB if you need to roll back:
+       {DB_PATH}
+  3. Ensure Alembic is installed in the app venv:
+       pip install -r requirements.txt
+  4. From the project root, try:
+       python -c "from javstory.harvest.database import init_db, upgrade_alembic_head; init_db(); upgrade_alembic_head(strict=True)"
+  5. If migration still fails, keep the backup and report the traceback below.
+
+Manual hydrate (after migration succeeds):
+  python tools/hydrate_products_v2.py
+
+Traceback:
+{traceback.format_exc()}
+"""
+    path.write_text(body, encoding="utf-8")
+    return path
+
+
+def _handle_upgrade_failure(exc: BaseException) -> DbBootResult:
+    global _db_boot_mode, _last_boot_result
+
+    backup = _backup_database("pre_upgrade_failed")
+    recovery = _write_db_recovery_artifact(exc, backup)
+    _db_boot_mode = "read_only"
+
+    try:
+        from javstory.utils.structured_log import log_event
+
+        log_event(
+            "ERROR",
+            "boot_db_upgrade_failed",
+            str(exc),
+            db_path=DB_PATH,
+            backup_path=str(backup) if backup else None,
+            recovery_log=str(recovery),
+            traceback=traceback.format_exc(),
+        )
+    except Exception:
+        pass
+
+    msg = (
+        "DB migration (Alembic) failed. The app will open in read-only mode.\n\n"
+        f"Backup: {backup or 'n/a'}\n"
+        f"Details: {recovery}\n\n"
+        "Close the app, fix the migration (see recovery file), then restart."
+    )
+    result = DbBootResult(
+        ok=False,
+        read_only=True,
+        message=msg,
+        backup_path=str(backup) if backup else None,
+        recovery_log=str(recovery),
+    )
+    _last_boot_result = result
+    print(f"[DB] Alembic upgrade failed — read-only mode. Recovery: {recovery}")
+    return result
+
+
+def upgrade_alembic_head(*, strict: bool = False) -> bool:
     """
     init_db() 이후 호출 — v9+ Alembic revision 적용.
-    P1: `0001_stamp_v8` — DDL 없음, user_version 8→9 + alembic_version 테이블.
+    Returns True on success. On failure: backup + recovery log; raises if strict=True.
     """
     ini_path = _ROOT / "alembic.ini"
     if not ini_path.is_file():
         print("[DB] alembic.ini not found — skipping Alembic upgrade")
-        return
+        return True
     try:
         from alembic import command
         from alembic.config import Config
 
         cfg = Config(str(ini_path))
         command.upgrade(cfg, "head")
-        print(f"[DB] Alembic upgrade head ({_ALEMBIC_HEAD_REVISION}) complete.")
+        rev = _alembic_revision_label()
+        print(f"[DB] Alembic upgrade head ({rev}) complete.")
+        return True
     except Exception as e:
         print(f"[DB] Alembic upgrade failed: {e}")
-        raise
+        _handle_upgrade_failure(e)
+        if strict:
+            raise DbUpgradeError(str(e)) from e
+        return False
 
 
-def init_and_upgrade_db() -> None:
-    """레거시 v0–v8 초기화 후 Alembic head, P2 hydrate(최초 1회)."""
+def init_and_upgrade_db() -> DbBootResult:
+    """레거시 v0–v8 초기화 후 Alembic head, P2 hydrate(최초 1회). 실패 시 읽기 전용."""
+    global _db_boot_mode, _last_boot_result
+
+    _db_boot_mode = "ok"
     init_db()
-    upgrade_alembic_head()
+    if not upgrade_alembic_head():
+        return _last_boot_result or DbBootResult(
+            ok=False,
+            read_only=True,
+            message="DB migration failed.",
+        )
+    if is_db_read_only():
+        return _last_boot_result or DbBootResult(ok=False, read_only=True, message="read-only")
+
     try:
         from javstory.harvest.product_repository import maybe_hydrate_products_v2
 
         maybe_hydrate_products_v2()
     except Exception as e:
         print(f"[DB] P2 hydrate skipped: {e}")
+
+    result = DbBootResult(ok=True, read_only=False, message="")
+    _last_boot_result = result
+    return result
 
 
 def _migrate_add_needs_review_columns():

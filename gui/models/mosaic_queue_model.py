@@ -982,15 +982,16 @@ class MosaicQueueController(QObject):
     def removeJob(self, job_id: str) -> None:
         worker = self._running.pop(job_id, None)
         if worker:
-            try:
-                # MosaicRemovalWorker.stop()
-                if hasattr(worker, "stop"):
-                    worker.stop()
-                worker.terminate()
-                worker.wait()
-            except Exception:
-                pass
-            self.logMessage.emit(f"[MosaicQueue] terminated worker: job={job_id}")
+            from gui.utils.qt_worker import stop_qthread
+
+            result = stop_qthread(
+                worker,
+                context=f"MosaicQueue job={job_id}",
+                cooperative_timeout_ms=12_000,
+            )
+            self.logMessage.emit(
+                f"[MosaicQueue] stop worker ({result.log_label()}): job={job_id}",
+            )
 
         if self._model._remove_by_id(job_id):
             self._job_mono_t0.pop(job_id, None)

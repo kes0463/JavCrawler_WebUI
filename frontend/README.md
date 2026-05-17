@@ -14,5 +14,13 @@ React + Vite + Electron 실험 UI입니다. **운영 앱이 아닙니다.**
 
 ```bash
 cd frontend && npm install && npm run dev
-# 별도 터미널: uvicorn api.main:app --reload
 ```
+
+레거시 API(미지원):
+
+```bat
+set JAVSTORY_ALLOW_FROZEN_API=1
+uvicorn api.main:app --host 127.0.0.1 --port 8765
+```
+
+기본값으로 API는 **동결** — Electron도 위 env 없으면 uvicorn을 시작하지 않습니다.

@@ -37,7 +37,7 @@
 | 루트 `av123_scraper.py` 등 | **해당 없음** — 스크래퍼는 [`javstory/harvest/scrapers/`](../javstory/harvest/scrapers/) (예: `favorites_only_worker`에서 사용 중) |
 | 루트 `.py` 과다 | **정상** — 실행 진입점은 [`main.py`](../main.py) 하나 ([ENTRYPOINTS.md](architecture/ENTRYPOINTS.md)) |
 | 루트 `.txt` / `.md` / `.log` 혼잡 | **로컬 산출물** — `.gitignore`가 루트 `*.txt`, `*.log`, `*.db` 등 제외. 샘플 품번 txt·디버그 로그는 저장소에 커밋하지 않음 ([REPO_LAYOUT.md](REPO_LAYOUT.md)) |
-| `frontend/` + `api/` | **동결** — [ADR 0001](adr/0001-ui-stack-qml-only.md) |
+| `frontend/` + `api/` | **동결** — [ADR 0001](adr/0001-ui-stack-qml-only.md). API 기본: `/health`만; `JAVSTORY_ALLOW_FROZEN_API=1` 시 레거시 라우트 |
 
 ---
 
@@ -48,6 +48,15 @@
 | Windows 전용 (`win32mica`, `.bat`) | **문서화** — [PLATFORM.md](PLATFORM.md). `win32mica`는 `sys_platform == "win32"` 조건부 설치. Linux는 `scripts/start.sh` + `JAVSTORY_DISABLE_MICA=1` |
 | 루트 `Modelfile` | **정리** — [`config/ollama/`](../config/ollama/README.md), `scripts/ollama_create_model.*` |
 | `crash_report.txt`만 | **보강** — `logs/javstory.jsonl` NDJSON (`boot_crash`, `pipeline_error`). 파이프라인 상세는 기존 `data/error/04_ERROR/` |
+
+---
+
+## 부트·안정성 (2026-05 갱신)
+
+| 항목 | 상태 |
+|------|------|
+| Alembic 실패 시 앱 즉시 종료 | **해결됨** — `upgrade_alembic_head(strict=False)` 실패 시 백업·`logs/db_upgrade_recovery.txt`·읽기 전용 부트 (`init_and_upgrade_db`, `gui/app.py` 경고 후 UI 계속) |
+| `QThread.terminate()` 즉시 강제 종료 | **해결됨** — `stop_qthread()`: 협력적 `stop` → `kill_child_processes`(ffmpeg/LADA) → 타임아웃 후 **제한적** `terminate`. 큐·`library_model` 적용 |
 
 ---
 

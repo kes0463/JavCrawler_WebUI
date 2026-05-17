@@ -557,6 +557,13 @@ class HarvestModel(QObject):
 
     def _enqueue_global(self, entries: list[tuple[str, bool, str | None]]) -> None:
         """전역 큐에 엔트리를 적재하고 UI에 waiting 상태로 노출."""
+        from javstory.harvest.database import assert_db_writable
+
+        try:
+            assert_db_writable("harvest queue")
+        except Exception as e:
+            self.logMessage.emit(str(e), "error")
+            return
         for e in entries or []:
             sku = self._entry_sku(e)
             if sku:

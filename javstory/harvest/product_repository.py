@@ -292,6 +292,11 @@ def hydrate_all_products(
 
 def maybe_hydrate_products_v2() -> None:
     """products 비어 있고 jav_metadata 있으면 1회 backfill."""
+    from javstory.harvest.database import is_db_read_only
+
+    if is_db_read_only():
+        print("[DB] P2 hydrate skipped: database read-only")
+        return
     if _skip_boot_hydrate():
         from javstory.config.app_config import ENV_SKIP_BOOT_HYDRATE
 

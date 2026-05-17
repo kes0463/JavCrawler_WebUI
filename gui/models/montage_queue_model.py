@@ -396,12 +396,12 @@ class MontageQueueController(QObject):
         """몽타주 생성 작업 삭제."""
         worker = self._running.pop(job_id, None)
         if worker:
-            try:
-                worker.terminate()
-                worker.wait()
-            except Exception:
-                pass
-            self.logMessage.emit(f"[MontageQueue] terminated worker: job={job_id}")
+            from gui.utils.qt_worker import stop_qthread
+
+            result = stop_qthread(worker, context=f"MontageQueue job={job_id}")
+            self.logMessage.emit(
+                f"[MontageQueue] stop worker ({result.log_label()}): job={job_id}",
+            )
 
         if self._model._remove_by_id(job_id):
             self.logMessage.emit(f"[MontageQueue] removed job: {job_id}")

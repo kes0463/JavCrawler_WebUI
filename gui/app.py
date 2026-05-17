@@ -287,7 +287,16 @@ def _maybe_start_ollama_serve(app) -> None:
 def create_engine(app) -> QQmlApplicationEngine:
     """QQmlApplicationEngine을 생성하고 Python 모델을 context에 등록한다."""
     from javstory.harvest.database import init_and_upgrade_db
-    init_and_upgrade_db()
+
+    db_boot = init_and_upgrade_db()
+    if db_boot.read_only:
+        from PySide6.QtWidgets import QMessageBox
+
+        QMessageBox.warning(
+            None,
+            "DB 마이그레이션 실패 (읽기 전용)",
+            db_boot.message,
+        )
     try:
         from javstory.translation.story_grok_module import migrate_story_context_cache_files
         migrate_story_context_cache_files()
@@ -372,6 +381,8 @@ def create_engine(app) -> QQmlApplicationEngine:
     ctx.setContextProperty("FolderBindingInboxStore", folder_binding_inbox_store)
     ctx.setContextProperty("PlayerModel", player_model)
     ctx.setContextProperty("InsightModel", insight_model)
+    ctx.setContextProperty("dbReadOnly", bool(db_boot.read_only))
+    ctx.setContextProperty("dbBootMessage", db_boot.message or "")
 
     # Settings ↔ Harvest 옵션 동기화 (특히 Grok 스토리 맥락)
     try:

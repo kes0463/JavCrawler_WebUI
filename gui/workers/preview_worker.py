@@ -2,10 +2,12 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import QThread, Signal as pyqtSignal
+from PySide6.QtCore import Signal as pyqtSignal
+
+from gui.workers.cancellable_thread import CancellableQThread
 
 
-class PreviewWorker(QThread):
+class PreviewWorker(CancellableQThread):
     """Golden Preview(WebP) 생성 워커 (Harvest 후 자동/백필용)."""
 
     resultReady = pyqtSignal(bool, str)  # success, message
@@ -19,6 +21,9 @@ class PreviewWorker(QThread):
         self.seed = seed
 
     def run(self):
+        if self.is_cancelled():
+            self.resultReady.emit(False, "cancelled")
+            return
         try:
             self.progressUpdated.emit(0, "준비 중...")
             if not self.video_path.exists():
@@ -46,6 +51,9 @@ class PreviewWorker(QThread):
 
             self.progressUpdated.emit(5, "리소스 확보 대기 중...")
             with ffmpeg_semaphore:
+                if self.is_cancelled():
+                    self.resultReady.emit(False, "cancelled")
+                    return
                 self.progressUpdated.emit(10, "프리뷰(WebP) 생성 시작...")
                 with perf_span(
                     "preview.create",
@@ -61,11 +69,16 @@ class PreviewWorker(QThread):
                         duration_sec=8.0,
                         seed=self.seed,
                     )
+            if self.is_cancelled():
+                self.resultReady.emit(False, "cancelled")
+                return
             if res and res.is_file():
                 mark_up_to_date(meta_path=meta_path, inputs={"video": self.video_path}, params=params)
                 self.resultReady.emit(True, "프리뷰(WebP)가 생성되었습니다!")
             else:
                 self.resultReady.emit(False, "프리뷰 생성에 실패했습니다.")
         except Exception as e:
+            if self.is_cancelled():
+                self.resultReady.emit(False, "cancelled")
+                return
             self.resultReady.emit(False, f"에러 발생: {e}")
-

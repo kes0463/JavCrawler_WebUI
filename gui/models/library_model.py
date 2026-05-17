@@ -315,6 +315,8 @@ class LibraryDetailObject(QObject):
 
 
 class LibraryReloadWorker(QThread):
+    """라이브러리 목록 로드 — 협력적 취소 지원."""
+
     finished = Signal(list)
     error = Signal(str)
 
@@ -322,8 +324,18 @@ class LibraryReloadWorker(QThread):
         super().__init__(parent)
         self._limit = int(limit)
         self._offset = int(offset)
+        self._cancelled = False
+
+    def stop(self) -> None:
+        self._cancelled = True
+        self.requestInterruption()
+
+    def is_cancelled(self) -> bool:
+        return bool(self._cancelled or self.isInterruptionRequested())
 
     def run(self):
+        if self.is_cancelled():
+            return
         try:
             from javstory.harvest.database import get_db_session
             from gui.library_data import load_library_summaries_fast_paged
@@ -894,8 +906,9 @@ class LibraryModel(QObject):
         self.isLoadingChanged.emit()
 
         if self._reload_worker and self._reload_worker.isRunning():
-            self._reload_worker.terminate()
-            self._reload_worker.wait()
+            from gui.utils.qt_worker import stop_qthread
+
+            stop_qthread(self._reload_worker, context="LibraryReload")
 
         self._page_offset = 0
         self._can_load_more = True

@@ -1,3 +1,5 @@
+"""Live Harvest API — mount only when JAVSTORY_ALLOW_FROZEN_API=1 (see api/main.py)."""
+
 from __future__ import annotations
 
 import asyncio
@@ -85,8 +87,7 @@ def _run_harvest_sync(item: HarvestItem, main_loop: asyncio.AbstractEventLoop) -
     try:
         loop.run_until_complete(
             run_crawler_for_video_path(
-                target=item.target,
-                is_path=False,
+                item.target,
                 product_code=item.product_code or item.target,
                 progress_cb=_progress_cb,
             )

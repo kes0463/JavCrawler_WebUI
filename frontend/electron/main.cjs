@@ -20,7 +20,18 @@ function findPython() {
   return candidates[0]; // venv 우선
 }
 
+function allowFrozenApi() {
+  const v = (process.env.JAVSTORY_ALLOW_FROZEN_API || "0").trim().toLowerCase();
+  return v === "1" || v === "true" || v === "yes" || v === "on";
+}
+
 function startApiServer() {
+  if (!allowFrozenApi()) {
+    console.warn(
+      "[API] Skipped — frozen. Use main.py (QML). Set JAVSTORY_ALLOW_FROZEN_API=1 to run legacy api."
+    );
+    return;
+  }
   const python = findPython();
   const cwd = path.join(__dirname, "../..");
 
@@ -89,10 +100,12 @@ function createWindow() {
 
 app.whenReady().then(async () => {
   startApiServer();
-  try {
-    await waitForPort(API_PORT);
-  } catch (e) {
-    console.error("[Electron] API 서버 응답 없음:", e.message);
+  if (allowFrozenApi()) {
+    try {
+      await waitForPort(API_PORT);
+    } catch (e) {
+      console.error("[Electron] API 서버 응답 없음:", e.message);
+    }
   }
   createWindow();
 });

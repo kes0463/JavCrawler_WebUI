@@ -19,7 +19,8 @@ from javstory.harvest.product_repository import (
 
 def main() -> int:
     init_db()
-    upgrade_alembic_head()
+    if not upgrade_alembic_head(strict=True):
+        raise SystemExit("Alembic upgrade failed — see logs/db_upgrade_recovery.txt")
     with get_db_session_ctx() as session:
         n_products, n_parts = hydrate_all_products(session)
         session.commit()
