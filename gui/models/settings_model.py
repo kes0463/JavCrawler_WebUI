@@ -33,6 +33,10 @@ class SettingsModel(QObject):
     embeddingsEnabledChanged = Signal()
     embeddingsModelChanged = Signal()
     excludedGenresChanged = Signal()
+    insightHarvestAlertEnabledChanged = Signal()
+    insightHarvestAlertThresholdChanged = Signal()
+    personaDeepAnalysisEnabledChanged = Signal()
+    personaSampleSizeChanged = Signal()
     toastMessage = Signal(str, str)
     similarEmbeddingsReady = Signal(str, str, str)  # productCode, model, formattedText
 
@@ -99,7 +103,21 @@ class SettingsModel(QObject):
         self._dpi_bypass = _env_bool("JAVSTORY_DPI_BYPASS_ENABLED", False)
         self._embeddings_enabled = _env_bool("JAVSTORY_EMBEDDINGS_ENABLED", False)
         self._embeddings_ollama_model = (os.environ.get("JAVSTORY_EMBEDDINGS_OLLAMA_MODEL", "") or "").strip() or "nomic-embed-text"
-        
+        self._insight_harvest_alert_enabled = _env_bool("JAVSTORY_INSIGHT_HARVEST_ALERT_ENABLED", True)
+        try:
+            self._insight_harvest_alert_threshold = float(
+                os.environ.get("JAVSTORY_INSIGHT_HARVEST_ALERT_THRESHOLD", "0.85") or "0.85"
+            )
+        except ValueError:
+            self._insight_harvest_alert_threshold = 0.85
+        self._insight_harvest_alert_threshold = max(0.5, min(1.0, self._insight_harvest_alert_threshold))
+        self._persona_deep_enabled = _env_bool("JAVSTORY_PERSONA_DEEP_ENABLED", True)
+        try:
+            self._persona_sample_size = int(os.environ.get("JAVSTORY_PERSONA_SAMPLE_SIZE", "8") or "8")
+        except ValueError:
+            self._persona_sample_size = 8
+        self._persona_sample_size = max(4, min(12, int(self._persona_sample_size or 8)))
+
         # 3-c. 유사도 제외 장르 (Similarity Excluded Genres)
         from javstory.config.app_config import SIMILARITY_EXCLUDED_GENRES
         default_excluded = ",".join(sorted(list(SIMILARITY_EXCLUDED_GENRES)))
@@ -291,6 +309,66 @@ class SettingsModel(QObject):
         if v != getattr(self, "_excluded_genres", ""):
             self._excluded_genres = v
             self.excludedGenresChanged.emit()
+
+    @Property(bool, notify=insightHarvestAlertEnabledChanged)
+    def insightHarvestAlertEnabled(self) -> bool:
+        return bool(getattr(self, "_insight_harvest_alert_enabled", True))
+
+    @insightHarvestAlertEnabled.setter  # type: ignore[attr-defined]
+    def insightHarvestAlertEnabled(self, v: bool):
+        b = bool(v)
+        if b != bool(getattr(self, "_insight_harvest_alert_enabled", True)):
+            self._insight_harvest_alert_enabled = b
+            from javstory.config.secrets_manager import set_env_runtime_value
+            set_env_runtime_value("JAVSTORY_INSIGHT_HARVEST_ALERT_ENABLED", "1" if b else "0")
+            self.insightHarvestAlertEnabledChanged.emit()
+
+    @Property(float, notify=insightHarvestAlertThresholdChanged)
+    def insightHarvestAlertThreshold(self) -> float:
+        return float(getattr(self, "_insight_harvest_alert_threshold", 0.85))
+
+    @insightHarvestAlertThreshold.setter  # type: ignore[attr-defined]
+    def insightHarvestAlertThreshold(self, v: float):
+        try:
+            f = float(v)
+        except (TypeError, ValueError):
+            f = 0.85
+        f = max(0.5, min(1.0, f))
+        if abs(f - float(getattr(self, "_insight_harvest_alert_threshold", 0.85))) > 1e-6:
+            self._insight_harvest_alert_threshold = f
+            from javstory.config.secrets_manager import set_env_runtime_value
+            set_env_runtime_value("JAVSTORY_INSIGHT_HARVEST_ALERT_THRESHOLD", str(f))
+            self.insightHarvestAlertThresholdChanged.emit()
+
+    @Property(bool, notify=personaDeepAnalysisEnabledChanged)
+    def personaDeepAnalysisEnabled(self) -> bool:
+        return bool(getattr(self, "_persona_deep_enabled", True))
+
+    @personaDeepAnalysisEnabled.setter  # type: ignore[attr-defined]
+    def personaDeepAnalysisEnabled(self, v: bool):
+        b = bool(v)
+        if b != bool(getattr(self, "_persona_deep_enabled", True)):
+            self._persona_deep_enabled = b
+            from javstory.config.secrets_manager import set_env_runtime_value
+            set_env_runtime_value("JAVSTORY_PERSONA_DEEP_ENABLED", "1" if b else "0")
+            self.personaDeepAnalysisEnabledChanged.emit()
+
+    @Property(int, notify=personaSampleSizeChanged)
+    def personaSampleSize(self) -> int:
+        return int(getattr(self, "_persona_sample_size", 8))
+
+    @personaSampleSize.setter  # type: ignore[attr-defined]
+    def personaSampleSize(self, v: int):
+        try:
+            n = int(v)
+        except (TypeError, ValueError):
+            n = 8
+        n = max(4, min(12, n))
+        if n != int(getattr(self, "_persona_sample_size", 8)):
+            self._persona_sample_size = n
+            from javstory.config.secrets_manager import set_env_runtime_value
+            set_env_runtime_value("JAVSTORY_PERSONA_SAMPLE_SIZE", str(n))
+            self.personaSampleSizeChanged.emit()
 
     @Property('QVariantList', notify=apiKeyChanged) # allGenres는 변하지 않는 리스트는 아니지만 일단 apiKeyChanged 등에 편승하거나 필요시 전용 시그널
     def allGenres(self):
@@ -607,6 +685,10 @@ class SettingsModel(QObject):
         set_env_runtime_value("JAVSTORY_DPI_BYPASS_ENABLED", "1" if self._dpi_bypass else "0")
         set_env_runtime_value("JAVSTORY_EMBEDDINGS_ENABLED", "1" if bool(getattr(self, "_embeddings_enabled", False)) else "0")
         set_env_runtime_value("JAVSTORY_EMBEDDINGS_OLLAMA_MODEL", str(getattr(self, "_embeddings_ollama_model", "nomic-embed-text") or "nomic-embed-text"))
+        set_env_runtime_value("JAVSTORY_INSIGHT_HARVEST_ALERT_ENABLED", "1" if bool(getattr(self, "_insight_harvest_alert_enabled", True)) else "0")
+        set_env_runtime_value("JAVSTORY_INSIGHT_HARVEST_ALERT_THRESHOLD", str(float(getattr(self, "_insight_harvest_alert_threshold", 0.85))))
+        set_env_runtime_value("JAVSTORY_PERSONA_DEEP_ENABLED", "1" if bool(getattr(self, "_persona_deep_enabled", True)) else "0")
+        set_env_runtime_value("JAVSTORY_PERSONA_SAMPLE_SIZE", str(int(getattr(self, "_persona_sample_size", 8))))
         set_env_runtime_value("JAVSTORY_SIMILARITY_EXCLUDED_GENRES", str(getattr(self, "_excluded_genres", "")))
         set_env_runtime_value("JAVSTORY_HARVEST_CONCURRENCY", str(int(self._harvest_concurrency or 2)))
 

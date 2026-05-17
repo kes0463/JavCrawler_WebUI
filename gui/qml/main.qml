@@ -297,6 +297,11 @@ ApplicationWindow {
         function onToastMessage(msg, level) { window.showToast(msg, level); }
     }
 
+    Connections {
+        target: HarvestModel
+        function onToastMessage(msg, level) { window.showToast(msg, level); }
+    }
+
     RowLayout {
         anchors.fill: parent
         spacing: 0

@@ -168,3 +168,62 @@ def find_similar_products(
     return out[:top_k]
 
 
+def _vector_for_product_code(product_code: str, *, model: str) -> Optional[List[float]]:
+    pc = (product_code or "").strip().upper()
+    if not pc:
+        return None
+    for _p, payload in _iter_embedding_payloads(model=model):
+        if str(payload.get("product_code") or "").strip().upper() == pc:
+            return _pick_representative_vector(payload)
+    return None
+
+
+def average_vectors(vectors: List[List[float]]) -> Optional[List[float]]:
+    if not vectors:
+        return None
+    dim = min(len(v) for v in vectors)
+    if dim <= 0:
+        return None
+    out = [0.0] * dim
+    for v in vectors:
+        for i in range(dim):
+            out[i] += float(v[i])
+    inv = 1.0 / float(len(vectors))
+    return [x * inv for x in out]
+
+
+def build_user_profile_vector(*, model: str, seed_codes: List[str]) -> Optional[List[float]]:
+    """시청·좋아요 작품 임베딩의 평균 벡터."""
+    vecs: List[List[float]] = []
+    for pc in seed_codes:
+        v = _vector_for_product_code(pc, model=model)
+        if v:
+            vecs.append(v)
+    return average_vectors(vecs)
+
+
+def rank_unwatched_by_vector(
+    profile_vec: List[float],
+    *,
+    model: str,
+    exclude_codes: set[str],
+    top_k: int = 10,
+    min_score: float = 0.35,
+) -> List[SimilarResult]:
+    if not profile_vec:
+        return []
+    out: List[SimilarResult] = []
+    for p, payload in _iter_embedding_payloads(model=model):
+        other_pc = str(payload.get("product_code") or "").strip().upper()
+        if not other_pc or other_pc in exclude_codes:
+            continue
+        other_vec = _pick_representative_vector(payload)
+        if not other_vec:
+            continue
+        score = _cosine(profile_vec, other_vec)
+        if math.isfinite(score) and score >= min_score:
+            out.append(SimilarResult(product_code=other_pc, score=float(score), path=p, match_reasons=["취향 프로필 유사"]))
+    out.sort(key=lambda r: r.score, reverse=True)
+    return out[:top_k]
+
+

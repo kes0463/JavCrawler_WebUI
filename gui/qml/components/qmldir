@@ -17,4 +17,8 @@ RatingWidget 1.0 RatingWidget.qml
 QueueAccordionCard 1.0 QueueAccordionCard.qml
 SimilarProductsPopup 1.0 SimilarProductsPopup.qml
 AppScrollView 1.0 AppScrollView.qml
+RadarChartWidget 1.0 RadarChartWidget.qml
+TasteProfileCard 1.0 TasteProfileCard.qml
+HeatmapWidget 1.0 HeatmapWidget.qml
+PersonaCard 1.0 PersonaCard.qml
 AssOverlay 1.0 AssOverlay.qml

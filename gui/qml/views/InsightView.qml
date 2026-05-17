@@ -13,10 +13,21 @@ Item {
         try { var v = JSON.parse(s || ""); return v !== null ? v : fallback } catch(e) { return fallback }
     }
 
+    function personaCoverageLabel(p) {
+        if (!p || !p.coverage) return ""
+        var c = p.coverage
+        return "분석 샘플 — Grok " + (c.grok || 0) + " · 캐논 " + (c.canonical || 0) + " · 자막 " + (c.subtitle || 0)
+    }
+
     property var actors:      parseJson(InsightModel.topActors,    [])
     property var genres:      parseJson(InsightModel.topGenres,    [])
     property var makers:      parseJson(InsightModel.topMakers,    [])
     property var recs:        parseJson(InsightModel.todayRecs,    [])
+    property var nextWatch:   parseJson(InsightModel.nextWatchRecs, [])
+    property var tasteData:   parseJson(InsightModel.tasteVector,  {axes:[]})
+    property var heatmapData: parseJson(InsightModel.watchHeatmap, {year: 2026, days:{}, max:0})
+    property var persona:     parseJson(InsightModel.personaCard,  {})
+    property var pipeline:    parseJson(InsightModel.pipelineReport, {})
     property var stats:       parseJson(InsightModel.libraryStats, {})
     property var trend:       parseJson(InsightModel.recentTrend,  {actors:[], genres:[]})
     property var monthlyData: parseJson(InsightModel.monthlyGenres, [])
@@ -29,6 +40,11 @@ Item {
         function onTopGenresChanged()    { root.genres      = root.parseJson(InsightModel.topGenres, []) }
         function onTopMakersChanged()    { root.makers      = root.parseJson(InsightModel.topMakers, []) }
         function onTodayRecsChanged()    { root.recs        = root.parseJson(InsightModel.todayRecs, []) }
+        function onNextWatchRecsChanged(){ root.nextWatch   = root.parseJson(InsightModel.nextWatchRecs, []) }
+        function onTasteVectorChanged()  { root.tasteData   = root.parseJson(InsightModel.tasteVector, {axes:[]}) }
+        function onWatchHeatmapChanged() { root.heatmapData = root.parseJson(InsightModel.watchHeatmap, {}) }
+        function onPersonaCardChanged()  { root.persona     = root.parseJson(InsightModel.personaCard, {}) }
+        function onPipelineReportChanged(){ root.pipeline   = root.parseJson(InsightModel.pipelineReport, {}) }
         function onLibraryStatsChanged() { root.stats       = root.parseJson(InsightModel.libraryStats, {}) }
         function onRecentTrendChanged()  { root.trend       = root.parseJson(InsightModel.recentTrend, {actors:[], genres:[]}) }
         function onMonthlyGenresChanged(){ root.monthlyData = root.parseJson(InsightModel.monthlyGenres, []) }
@@ -139,6 +155,107 @@ Item {
                                     Layout.alignment: Qt.AlignHCenter
                                 }
                             }
+                        }
+                    }
+                }
+
+                // ── 취향 레이더 + 페르소나 ─────────────────────────
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: Theme.spacingMd
+
+                    TasteProfileCard {
+                        Layout.fillWidth: true
+                        Layout.preferredWidth: 1
+                        Layout.preferredHeight: 400
+                        profile: root.tasteData
+                    }
+
+                    PersonaCard {
+                        Layout.fillWidth: true
+                        Layout.preferredWidth: 1
+                        Layout.preferredHeight: 380
+                        title: root.persona.title || "나의 취향 페르소나"
+                        personaType: root.persona.persona_type || ""
+                        summary: root.persona.summary || root.persona.body || ""
+                        body: root.persona.body || root.persona.summary || ""
+                        driftNote: root.persona.drift_note || ""
+                        affinities: root.persona.affinities || []
+                        evidence: root.persona.evidence || []
+                        generatedAt: root.persona.generated_at || ""
+                        sourceLabel: root.persona.source ? ("출처: " + root.persona.source) : ""
+                        coverageLabel: root.personaCoverageLabel(root.persona)
+                        regenerating: InsightModel.isPersonaRegenerating
+                        onRegenerateRequested: InsightModel.regeneratePersona()
+                    }
+                }
+
+                // ── 감상 캘린더 히트맵 ───────────────────────────
+                GlassCard {
+                    Layout.fillWidth: true
+                    Layout.preferredHeight: 200
+                    Layout.minimumHeight: 200
+                    autoSize: false
+                    clip: false
+                    ColumnLayout {
+                        anchors.fill: parent
+                        anchors.margins: Theme.spacingMd
+                        spacing: Theme.spacingSm
+                        RowLayout {
+                            Layout.fillWidth: true
+                            spacing: Theme.spacingMd
+                            Text {
+                                text: "📅 감상 캘린더"
+                                font.pixelSize: Theme.fontBody
+                                font.weight: Font.DemiBold
+                                color: Theme.textPrimary
+                            }
+                            Text {
+                                text: (root.heatmapData.year || new Date().getFullYear()) + "년"
+                                font.pixelSize: Theme.fontCaption
+                                color: Theme.textMuted
+                            }
+                            Item { Layout.fillWidth: true }
+                        }
+                        AppScrollView {
+                            Layout.fillWidth: true
+                            Layout.fillHeight: true
+                            Layout.minimumHeight: 100
+                            clip: true
+                            contentWidth: heatmapInner.width
+                            ScrollBar.horizontal.policy: ScrollBar.AsNeeded
+                            ScrollBar.vertical.policy: ScrollBar.AlwaysOff
+
+                            HeatmapWidget {
+                                id: heatmapInner
+                                showYearLabel: false
+                                year: root.heatmapData.year || new Date().getFullYear()
+                                days: root.heatmapData.days || {}
+                            }
+                        }
+                    }
+                }
+
+                // ── 파이프라인 운영 리포트 ─────────────────────────
+                GlassCard {
+                    Layout.fillWidth: true
+                    Layout.preferredHeight: 120
+                    autoSize: false
+                    ColumnLayout {
+                        anchors.fill: parent
+                        anchors.margins: Theme.spacingMd
+                        spacing: Theme.spacingXs
+                        Text {
+                            text: "⚙️ 파이프라인 리포트 (최근 " + (root.pipeline.days || 30) + "일)"
+                            font.pixelSize: Theme.fontBody
+                            font.weight: Font.DemiBold
+                            color: Theme.textPrimary
+                        }
+                        Text {
+                            text: "이벤트 " + (root.pipeline.total_events || 0) + "건 · 오류 " + (root.pipeline.error_events || 0)
+                                + "건 · 에러 JSON " + (root.pipeline.error_json_files || 0) + "개"
+                            font.pixelSize: Theme.fontCaption
+                            color: Theme.textSecondary
                         }
                     }
                 }
@@ -680,11 +797,11 @@ Item {
                     }
                 }
 
-                // ── 오늘의 추천 ──────────────────────────────────
+                // ── 다음에 볼 작품 (스마트 추천) ─────────────────
                 GlassCard {
                     autoSize: false
                     Layout.fillWidth: true
-                    Layout.preferredHeight: root.recs.length > 0 ? 380 : 120
+                    Layout.preferredHeight: root.nextWatch.length > 0 ? 380 : 120
 
                     ColumnLayout {
                         anchors.fill: parent
@@ -694,13 +811,14 @@ Item {
                         RowLayout {
                             Layout.fillWidth: true
                             Text {
-                                text: "✨ 오늘의 추천"
+                                text: "🎯 다음에 볼 작품"
                                 font.pixelSize: Theme.fontBody
                                 font.weight: Font.DemiBold
                                 color: Theme.textPrimary
                             }
                             Text {
-                                text: "취향 점수 기반 미시청 작품"
+                                text: root.nextWatch.length > 0 && root.nextWatch[0].source === "embedding"
+                                    ? "임베딩 기반 추천" : "취향 점수 기반 (규칙)"
                                 font.pixelSize: Theme.fontCaption
                                 color: Theme.textMuted
                                 leftPadding: Theme.spacingSm
@@ -710,13 +828,12 @@ Item {
 
                         Rectangle { width: parent.width; height: 1; color: Theme.glassBorder }
 
-                        // 추천 작품 카드 행
                         Row {
                             spacing: Theme.spacingMd
-                            visible: root.recs.length > 0
+                            visible: root.nextWatch.length > 0
 
                             Repeater {
-                                model: root.recs.slice(0, 6)
+                                model: root.nextWatch.slice(0, 5)
 
                                 Rectangle {
                                     id: recCard
@@ -824,7 +941,7 @@ Item {
                         }
 
                         Text {
-                            visible: root.recs.length === 0
+                            visible: root.nextWatch.length === 0
                             text: "아직 충분한 취향 데이터가 없습니다.\n영상을 시청하고 별점을 남기면 추천이 시작됩니다."
                             color: Theme.textMuted
                             font.pixelSize: Theme.fontCaption
@@ -834,6 +951,51 @@ Item {
                         }
 
                         Item { Layout.fillHeight: true }
+                    }
+                }
+
+                // ── 오늘의 추천 (규칙) ───────────────────────────
+                GlassCard {
+                    autoSize: false
+                    Layout.fillWidth: true
+                    Layout.preferredHeight: root.recs.length > 0 ? 200 : 80
+                    visible: root.recs.length > 0
+                    ColumnLayout {
+                        anchors.fill: parent
+                        anchors.margins: Theme.spacingMd
+                        spacing: Theme.spacingSm
+                        Text {
+                            text: "✨ 오늘의 추천 (규칙)"
+                            font.pixelSize: Theme.fontBody
+                            font.weight: Font.DemiBold
+                            color: Theme.textPrimary
+                        }
+                        Flow {
+                            Layout.fillWidth: true
+                            spacing: Theme.spacingSm
+                            Repeater {
+                                model: root.recs.slice(0, 6)
+                                Rectangle {
+                                    radius: Theme.radiusSm
+                                    color: Theme.surfaceLight
+                                    border.color: Theme.glassBorder
+                                    height: 28
+                                    width: recChipText.implicitWidth + 16
+                                    Text {
+                                        id: recChipText
+                                        anchors.centerIn: parent
+                                        text: (modelData.product_code || "") + " " + Math.round((modelData.rec_score || 0) * 100) + "%"
+                                        font.pixelSize: Theme.fontCaption
+                                        color: Theme.textPrimary
+                                    }
+                                    MouseArea {
+                                        anchors.fill: parent
+                                        cursorShape: Qt.PointingHandCursor
+                                        onClicked: window.navigateToLibraryDetail(modelData.product_code)
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
 

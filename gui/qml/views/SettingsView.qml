@@ -970,6 +970,151 @@ Item {
 
                     Rectangle { width: parent.width; height: 1; color: Theme.glassBorder }
 
+                    Row {
+                        spacing: Theme.spacingSm
+                        Text {
+                            text: "수집 취향 알림"
+                            font.pixelSize: Theme.fontBody
+                            color: Theme.textSecondary
+                            width: 160
+                            anchors.verticalCenter: parent.verticalCenter
+                        }
+                        Switch {
+                            id: harvestAlertSwitch
+                            checked: SettingsModel.insightHarvestAlertEnabled
+                            onToggled: SettingsModel.insightHarvestAlertEnabled = checked
+                            indicator: Rectangle {
+                                implicitWidth: 40
+                                implicitHeight: 20
+                                x: harvestAlertSwitch.leftPadding
+                                y: parent.height / 2 - height / 2
+                                radius: 10
+                                color: harvestAlertSwitch.checked ? Theme.accentNeon : Theme.surfaceLight
+                                border.color: harvestAlertSwitch.checked ? Theme.accentNeon : Theme.glassBorder
+                                border.width: 1
+                                Rectangle {
+                                    x: harvestAlertSwitch.checked ? parent.width - width - 2 : 2
+                                    y: 2
+                                    width: 16
+                                    height: 16
+                                    radius: 8
+                                    color: "white"
+                                    Behavior on x { NumberAnimation { duration: 150 } }
+                                }
+                            }
+                        }
+                    }
+
+                    Row {
+                        spacing: Theme.spacingSm
+                        width: parent.width
+                        Text {
+                            text: "알림 임계값"
+                            font.pixelSize: Theme.fontBody
+                            color: Theme.textSecondary
+                            width: 160
+                            anchors.verticalCenter: parent.verticalCenter
+                        }
+                        Slider {
+                            id: harvestAlertSlider
+                            width: parent.width - 220
+                            from: 0.5
+                            to: 1.0
+                            stepSize: 0.05
+                            value: SettingsModel.insightHarvestAlertThreshold
+                            onMoved: SettingsModel.insightHarvestAlertThreshold = value
+                        }
+                        Text {
+                            text: Math.round(SettingsModel.insightHarvestAlertThreshold * 100) + "%"
+                            font.pixelSize: Theme.fontBody
+                            color: Theme.accentNeon
+                            width: 48
+                            horizontalAlignment: Text.AlignRight
+                            anchors.verticalCenter: parent.verticalCenter
+                        }
+                    }
+
+                    Text {
+                        text: "Harvest 수집 완료 시 취향 일치도가 임계값 이상이면 토스트로 알립니다."
+                        font.pixelSize: Theme.fontCaption
+                        color: Theme.textMuted
+                        leftPadding: 168
+                        wrapMode: Text.Wrap
+                        width: parent.width
+                    }
+
+                    Rectangle { width: parent.width; height: 1; color: Theme.glassBorder }
+
+                    Row {
+                        spacing: Theme.spacingSm
+                        Text {
+                            text: "페르소나 심층 분석"
+                            font.pixelSize: Theme.fontBody
+                            color: Theme.textSecondary
+                            width: 160
+                            anchors.verticalCenter: parent.verticalCenter
+                        }
+                        Switch {
+                            id: personaDeepSwitch
+                            checked: SettingsModel.personaDeepAnalysisEnabled
+                            onToggled: SettingsModel.personaDeepAnalysisEnabled = checked
+                            indicator: Rectangle {
+                                implicitWidth: 40
+                                implicitHeight: 20
+                                x: personaDeepSwitch.leftPadding
+                                y: parent.height / 2 - height / 2
+                                radius: 10
+                                color: personaDeepSwitch.checked ? Theme.accentNeon : Theme.surfaceLight
+                                border.color: personaDeepSwitch.checked ? Theme.accentNeon : Theme.glassBorder
+                                border.width: 1
+                                Rectangle {
+                                    x: personaDeepSwitch.checked ? parent.width - width - 2 : 2
+                                    y: 2
+                                    width: 16
+                                    height: 16
+                                    radius: 8
+                                    color: "white"
+                                    Behavior on x { NumberAnimation { duration: 150 } }
+                                }
+                            }
+                        }
+                    }
+
+                    Row {
+                        spacing: Theme.spacingSm
+                        width: parent.width
+                        Text {
+                            text: "페르소나 샘플 수"
+                            font.pixelSize: Theme.fontBody
+                            color: Theme.textSecondary
+                            width: 160
+                            anchors.verticalCenter: parent.verticalCenter
+                        }
+                        SpinBox {
+                            from: 4
+                            to: 12
+                            value: SettingsModel.personaSampleSize
+                            onValueModified: SettingsModel.personaSampleSize = value
+                        }
+                        Text {
+                            text: "작품 (Grok·캐논·자막)"
+                            font.pixelSize: Theme.fontCaption
+                            color: Theme.textMuted
+                            anchors.verticalCenter: parent.verticalCenter
+                        }
+                    }
+
+                    Text {
+                        text: "시청·좋아요 작품에서 Grok 캐시·캐노니컬·자막 메트릭을 샘플링해 Ollama가 페르소나를 생성합니다. 끄면 경량 통계 요약만 사용합니다."
+                        font.pixelSize: Theme.fontCaption
+                        color: Theme.textMuted
+                        leftPadding: 168
+                        wrapMode: Text.Wrap
+                        width: parent.width
+                    }
+
+                    Rectangle { width: parent.width; height: 1; color: Theme.glassBorder }
+
 
                     // ── 임베딩 수동 실행 ─────────────────────
                     Row {

@@ -750,6 +750,18 @@ class HarvestModel(QObject):
         self._tasks.upsert(sku, status, 100 if success else 0, message)
         self.logMessage.emit(f"[{sku}] {'성공' if success else '실패'}: {message}")
         self.finishedCountChanged.emit()
+        if success and sku:
+            self._maybe_taste_harvest_toast(sku.strip().upper())
+
+    def _maybe_taste_harvest_toast(self, product_code: str) -> None:
+        """수집 완료 작품의 취향 일치도가 임계값 이상이면 토스트 알림."""
+        try:
+            from javstory.analytics.harvest_alert import evaluate_harvest_taste_alert
+            msg = evaluate_harvest_taste_alert(product_code)
+            if msg:
+                self.toastMessage.emit(msg, "success")
+        except Exception:
+            pass
 
     def _on_thread_done(self, worker):
         # 워커 키 추출

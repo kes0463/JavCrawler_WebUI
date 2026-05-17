@@ -193,3 +193,257 @@ def get_library_distribution() -> Dict[str, List[Dict[str, Any]]]:
             "genres": [{"name": k, "count": v} for k, v in genre_counter.most_common(30)],
             "makers": [{"name": k, "count": v} for k, v in maker_counter.most_common(30)],
         }
+
+
+def _parse_comma_list(text: str | None) -> list[str]:
+    if not text:
+        return []
+    return [v.strip() for v in text.replace("、", ",").split(",") if v.strip()]
+
+
+def _hhi_normalized(counts: list[int]) -> float:
+    """Herfindahl 지수 → 0(분산)~1(편중) 정규화."""
+    if not counts:
+        return 0.0
+    total = sum(counts)
+    if total <= 0:
+        return 0.0
+    shares = [c / total for c in counts if c > 0]
+    if len(shares) <= 1:
+        return 1.0 if len(shares) == 1 else 0.0
+    hhi = sum(s * s for s in shares)
+    n = len(shares)
+    return round((hhi - 1.0 / n) / (1.0 - 1.0 / n), 4)
+
+
+def _parse_release_year(release_date: str | None) -> int | None:
+    if not release_date:
+        return None
+    s = str(release_date).strip()
+    if len(s) >= 4 and s[:4].isdigit():
+        return int(s[:4])
+    return None
+
+
+def _counter_top(counter: Counter, n: int = 3) -> List[Dict[str, Any]]:
+    total = sum(counter.values()) or 1
+    out: List[Dict[str, Any]] = []
+    for name, count in counter.most_common(n):
+        out.append({
+            "name": name,
+            "count": int(count),
+            "share_pct": int(round(100 * count / total)),
+        })
+    return out
+
+
+def _sample_scene_tags_from_watched(max_products: int = 5) -> List[Dict[str, Any]]:
+    """최근 시청 작품 Grok 캐시에서 씬 태그만 가볍게 집계."""
+    tag_counter: Counter = Counter()
+    codes: List[str] = []
+    with get_db_session_ctx() as session:
+        rows = (
+            session.query(WatchHistory)
+            .order_by(WatchHistory.updated_at.desc())
+            .limit(max_products * 2)
+            .all()
+        )
+        seen: set[str] = set()
+        for h in rows:
+            pc = str(h.product_code or "").strip().upper()
+            if pc and pc not in seen:
+                seen.add(pc)
+                codes.append(pc)
+            if len(codes) >= max_products:
+                break
+
+    try:
+        from javstory.translation.story_grok_module import load_cached_grok_json_flexible
+    except ImportError:
+        return []
+
+    for pc in codes:
+        grok = load_cached_grok_json_flexible(pc)
+        if not grok or grok.get("code_mismatch") or grok.get("verification_ok") is False:
+            continue
+        for s in grok.get("scenes") or []:
+            if not isinstance(s, dict):
+                continue
+            for t in s.get("key_tags") or []:
+                if isinstance(t, str) and t.strip():
+                    tag_counter[t.strip()] += 1
+
+    return [{"name": k, "count": v} for k, v in tag_counter.most_common(8)]
+
+
+def compute_taste_profile() -> Dict[str, Any]:
+    """
+    시청 이력 중심 취향 프로필 (읽기 쉬운 축 + TOP 목록).
+    Returns:
+        watched_count, has_data, axes[{label, value, pct, hint}], top_genres, top_actors, scene_tags
+    """
+    import os
+    from javstory.config.app_config import SIMILARITY_EXCLUDED_GENRES
+
+    excluded_str = os.environ.get("JAVSTORY_SIMILARITY_EXCLUDED_GENRES", "")
+    excluded = (
+        {v.strip() for v in excluded_str.split(",") if v.strip()}
+        if excluded_str
+        else set(SIMILARITY_EXCLUDED_GENRES)
+    )
+
+    current_year = datetime.datetime.now().year
+    watched_genres: Counter = Counter()
+    watched_actors: Counter = Counter()
+    recent_year_hits = 0
+    watched_with_year = 0
+    watched_n = 0
+    completed = 0
+
+    with get_db_session_ctx() as session:
+        histories = session.query(WatchHistory).all()
+        completed = sum(1 for h in histories if h.is_completed)
+        watched_n = len(histories)
+        meta_by_code = {
+            str(r.product_code or "").strip().upper(): r
+            for r in session.query(JAVMetadata).filter(
+                JAVMetadata.product_code.in_(
+                    [str(h.product_code or "").strip().upper() for h in histories if h.product_code]
+                )
+            ).all()
+            if r.product_code
+        }
+
+        for h in histories:
+            pc = str(h.product_code or "").strip().upper()
+            row = meta_by_code.get(pc)
+            if not row:
+                continue
+            for g in _parse_comma_list(row.genres_ko or row.genres):
+                if g not in excluded:
+                    watched_genres[g] += 1
+            for a in _parse_comma_list(row.actors_ko or row.actors_ja or row.actors):
+                watched_actors[a] += 1
+            yr = _parse_release_year(row.release_date)
+            if yr:
+                watched_with_year += 1
+                if yr >= current_year - 3:
+                    recent_year_hits += 1
+
+    top_genres = _counter_top(watched_genres, 5)
+    top_actors = _counter_top(watched_actors, 5)
+    scene_tags = _sample_scene_tags_from_watched(5) if watched_n > 0 else []
+
+    if watched_n <= 0:
+        return {
+            "watched_count": 0,
+            "has_data": False,
+            "axes": [],
+            "top_genres": [],
+            "top_actors": [],
+            "scene_tags": [],
+            "empty_message": "아직 시청 이력이 없습니다. 재생·별점·좋아요 후 다시 확인하세요.",
+        }
+
+    new_release_pref = round(recent_year_hits / watched_with_year, 4) if watched_with_year > 0 else 0.0
+    completion_focus = round(completed / watched_n, 4)
+
+    genre_focus = _hhi_normalized(list(watched_genres.values())) if watched_genres else 0.0
+    top_g = top_genres[0]["name"] if top_genres else ""
+    genre_hint = (
+        f"주로 『{top_g}』 등 {top_genres[0]['share_pct']}% 집중"
+        if top_genres and genre_focus >= 0.55
+        else (f"가장 많이 본 장르: {top_g}" if top_g else "장르 데이터 부족")
+    )
+
+    actor_variety = 0.0
+    if watched_actors:
+        actor_variety = min(1.0, len(watched_actors) / max(1, watched_n * 1.5))
+    top_a = top_actors[0]["name"] if top_actors else ""
+    actor_hint = (
+        f"다양한 배우 탐색 ({len(watched_actors)}명)"
+        if actor_variety >= 0.6
+        else (f"자주 보는 배우: {top_a}" if top_a else "배우 데이터 부족")
+    )
+
+    axes = [
+        {
+            "key": "new_release",
+            "label": "신작 취향",
+            "value": new_release_pref,
+            "pct": int(round(new_release_pref * 100)),
+            "hint": (
+                f"시청 작품의 {int(round(new_release_pref * 100))}%가 최근 3년 내 발매"
+                if watched_with_year > 0
+                else "발매연도 정보 없음"
+            ),
+        },
+        {
+            "key": "completion",
+            "label": "완독 성향",
+            "value": completion_focus,
+            "pct": int(round(completion_focus * 100)),
+            "hint": f"{completed}편 완독 / 시청 이력 {watched_n}편",
+        },
+        {
+            "key": "genre_focus",
+            "label": "장르 집중도",
+            "value": genre_focus,
+            "pct": int(round(genre_focus * 100)),
+            "hint": genre_hint,
+        },
+        {
+            "key": "actor_variety",
+            "label": "배우 탐색 폭",
+            "value": round(actor_variety, 4),
+            "pct": int(round(actor_variety * 100)),
+            "hint": actor_hint,
+        },
+    ]
+
+    return {
+        "watched_count": watched_n,
+        "has_data": True,
+        "axes": axes,
+        "top_genres": top_genres,
+        "top_actors": top_actors,
+        "scene_tags": scene_tags,
+        "empty_message": "",
+    }
+
+
+def compute_taste_vector() -> Dict[str, Any]:
+    """하위 호환 + InsightModel JSON. 시청 프로필 전체를 반환."""
+    profile = compute_taste_profile()
+    profile["axes"] = profile.get("axes") or []
+    return profile
+
+
+def get_watch_heatmap(year: int | None = None) -> Dict[str, Any]:
+    """
+    날짜별 시청 횟수 (watch_history.updated_at 기준).
+    Returns: {"year": int, "days": {"2026-05-01": 2, ...}, "max": int}
+    """
+    y = int(year or datetime.datetime.now().year)
+    start = datetime.datetime(y, 1, 1)
+    end = datetime.datetime(y, 12, 31, 23, 59, 59)
+    day_counts: Counter = Counter()
+
+    with get_db_session_ctx() as session:
+        rows = (
+            session.query(WatchHistory)
+            .filter(
+                WatchHistory.updated_at >= start,
+                WatchHistory.updated_at <= end,
+            )
+            .all()
+        )
+        for h in rows:
+            if not h.updated_at:
+                continue
+            key = h.updated_at.strftime("%Y-%m-%d")
+            day_counts[key] += 1
+
+    days = {k: int(v) for k, v in sorted(day_counts.items())}
+    mx = max(days.values()) if days else 0
+    return {"year": y, "days": days, "max": mx}

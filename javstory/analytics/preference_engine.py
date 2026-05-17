@@ -269,3 +269,111 @@ def get_recommendation_score(product_code: str) -> float:
         m_norm = min(1.0, maker_score / maker_max if maker_max > 0 else 0.0)
 
         return round(a_norm * 0.4 + g_norm * 0.4 + m_norm * 0.2, 4)
+
+
+def get_recommendations(n: int = 5, context: str | None = None) -> List[Dict[str, Any]]:
+    """
+    미시청 작품 추천. 임베딩 캐시·프로필 벡터 우선, 없으면 규칙 기반 fallback.
+    context: 'morning'|'afternoon'|'night'|'evening' (evening→night)
+    """
+    limit = max(1, min(20, int(n or 5)))
+    _ = context or get_time_slot()  # reserved for time-slot weighting
+
+    from javstory.library.embeddings.pipeline import (
+        embeddings_enabled_from_env,
+        embeddings_ollama_model_from_env,
+    )
+
+    if embeddings_enabled_from_env():
+        model = embeddings_ollama_model_from_env()
+        emb_recs = _recommendations_via_embeddings(limit, model)
+        if emb_recs:
+            return emb_recs
+
+    from javstory.analytics.library_stats import get_today_recommendation
+
+    items = get_today_recommendation(limit)
+    for row in items:
+        row["source"] = "rules"
+        row.setdefault("match_reasons", [])
+    return items
+
+
+def _recommendations_via_embeddings(limit: int, model: str) -> List[Dict[str, Any]]:
+    from javstory.library.embeddings.similarity import (
+        build_user_profile_vector,
+        find_similar_products,
+        rank_unwatched_by_vector,
+    )
+
+    with get_db_session_ctx() as session:
+        watched_codes = {
+            str(r.product_code or "").strip().upper()
+            for r in session.query(WatchHistory.product_code).all()
+            if r.product_code
+        }
+        seeds: List[str] = []
+        histories = (
+            session.query(WatchHistory)
+            .filter(
+                (WatchHistory.liked == True)  # noqa: E712
+                | (WatchHistory.is_completed == True)  # noqa: E712
+                | (WatchHistory.rating >= 4)
+            )
+            .order_by(WatchHistory.updated_at.desc())
+            .limit(30)
+            .all()
+        )
+        for h in histories:
+            pc = str(h.product_code or "").strip().upper()
+            if pc and pc not in seeds:
+                seeds.append(pc)
+
+    profile = build_user_profile_vector(model=model, seed_codes=seeds)
+    ranked: List[tuple[str, float, List[str]]] = []
+
+    if profile:
+        for r in rank_unwatched_by_vector(
+            profile, model=model, exclude_codes=watched_codes, top_k=limit * 3
+        ):
+            ranked.append((r.product_code, r.score, list(r.match_reasons)))
+    elif seeds:
+        for sim in find_similar_products(seeds[0], model=model, top_k=limit * 3):
+            if sim.product_code not in watched_codes:
+                ranked.append((sim.product_code, sim.score, list(sim.match_reasons)))
+
+    if not ranked:
+        return []
+
+    seen: set[str] = set()
+    unique: List[tuple[str, float, List[str]]] = []
+    for pc, score, reasons in ranked:
+        if pc in seen:
+            continue
+        seen.add(pc)
+        unique.append((pc, score, reasons))
+    unique.sort(key=lambda x: x[1], reverse=True)
+    unique = unique[:limit]
+
+    codes = [pc for pc, _, _ in unique]
+    meta_by_code: Dict[str, JAVMetadata] = {}
+    with get_db_session_ctx() as session:
+        for row in session.query(JAVMetadata).filter(JAVMetadata.product_code.in_(codes)).all():
+            meta_by_code[row.product_code] = row
+
+    out: List[Dict[str, Any]] = []
+    for pc, score, reasons in unique:
+        row = meta_by_code.get(pc)
+        if not row:
+            continue
+        out.append({
+            "product_code": pc,
+            "title_ko": row.title_ko or "",
+            "cover_path": row.cover_image_local_path or "",
+            "actors_ko": row.actors_ko or "",
+            "release_date": row.release_date or "",
+            "rec_score": round(float(score), 4),
+            "source": "embedding",
+            "match_reasons": reasons,
+        })
+    return out
