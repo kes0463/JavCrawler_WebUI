@@ -218,11 +218,37 @@ def _write_cache(payload: Dict[str, Any]) -> None:
         pass
 
 
-def get_persona_card(*, force_refresh: bool = False) -> Dict[str, Any]:
+def _empty_persona_payload() -> Dict[str, Any]:
+    return _normalize_v2_payload(
+        {"persona_type": "탐색형", "summary": "", "drift_note": "", "affinities": [], "evidence": []},
+        "none",
+    )
+
+
+def get_persona_card(*, force_refresh: bool = False, cache_only: bool = False) -> Dict[str, Any]:
     """
     v2: persona_type, summary, drift_note, affinities, evidence, coverage, ...
   v1 호환: body == summary
+
+    cache_only: 캐시만 읽고 Ollama/딥 합성은 생략 (시작 시 UI 블로킹 방지).
     """
+    if cache_only and not force_refresh:
+        if _CACHE_PATH.is_file():
+            try:
+                payload = json.loads(_CACHE_PATH.read_text(encoding="utf-8"))
+                if isinstance(payload, dict) and _cache_valid(payload):
+                    if int(payload.get("schema_version") or 0) < _SCHEMA_VERSION:
+                        payload = _normalize_v2_payload(
+                            {"summary": payload.get("body", ""), "persona_type": "탐색형"},
+                            "cache",
+                        )
+                    else:
+                        payload = _normalize_v2_payload(payload, "cache")
+                    return payload
+            except (OSError, json.JSONDecodeError):
+                pass
+        return _empty_persona_payload()
+
     if not force_refresh and _CACHE_PATH.is_file():
         try:
             payload = json.loads(_CACHE_PATH.read_text(encoding="utf-8"))

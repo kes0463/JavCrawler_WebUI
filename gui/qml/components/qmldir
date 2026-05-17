@@ -23,4 +23,12 @@ HeatmapWidget 1.0 HeatmapWidget.qml
 PersonaCard 1.0 PersonaCard.qml
 TasteDriftChart 1.0 TasteDriftChart.qml
 ActorCollectionCard 1.0 ActorCollectionCard.qml
+InsightSectionHeader 1.0 InsightSectionHeader.qml
+EmptyInsightHint 1.0 EmptyInsightHint.qml
+InsightTabBar 1.0 InsightTabBar.qml
+CollapsibleInsightCard 1.0 CollapsibleInsightCard.qml
+RecommendationRow 1.0 RecommendationRow.qml
+InsightKpiGrid 1.0 InsightKpiGrid.qml
+RankedListCard 1.0 RankedListCard.qml
+RankedListRow 1.0 RankedListRow.qml
 AssOverlay 1.0 AssOverlay.qml

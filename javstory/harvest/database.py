@@ -696,7 +696,11 @@ def upgrade_alembic_head(*, strict: bool = False) -> bool:
 
 
 def init_and_upgrade_db() -> DbBootResult:
-    """레거시 v0–v8 초기화 후 Alembic head, P2 hydrate(최초 1회). 실패 시 읽기 전용."""
+    """레거시 v0–v8 초기화 후 Alembic head 적용. 실패 시 읽기 전용.
+
+    P2 hydrate(maybe_hydrate_products_v2)는 UI 블로킹 방지를 위해
+    호출 측에서 백그라운드 스레드로 별도 실행한다.
+    """
     global _db_boot_mode, _last_boot_result
 
     _db_boot_mode = "ok"
@@ -709,13 +713,6 @@ def init_and_upgrade_db() -> DbBootResult:
         )
     if is_db_read_only():
         return _last_boot_result or DbBootResult(ok=False, read_only=True, message="read-only")
-
-    try:
-        from javstory.harvest.product_repository import maybe_hydrate_products_v2
-
-        maybe_hydrate_products_v2()
-    except Exception as e:
-        print(f"[DB] P2 hydrate skipped: {e}")
 
     result = DbBootResult(ok=True, read_only=False, message="")
     _last_boot_result = result

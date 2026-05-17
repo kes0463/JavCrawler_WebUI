@@ -10,6 +10,7 @@ import re
 import sys
 import atexit
 import subprocess
+import threading
 from pathlib import Path
 
 import shutil
@@ -284,11 +285,29 @@ def _maybe_start_ollama_serve(app) -> None:
         print(f"[UI] Ollama 자동 실행 실패: {e}")
 
 
+def _start_db_hydrate_background() -> None:
+    """P2 hydrate(products 백필)를 백그라운드 스레드에서 실행한다.
+
+    DB init/migration 완료 후 호출해야 하며, UI 스레드를 블로킹하지 않는다.
+    """
+    def _run() -> None:
+        try:
+            from javstory.harvest.product_repository import maybe_hydrate_products_v2
+            maybe_hydrate_products_v2()
+        except Exception as e:
+            print(f"[DB] P2 hydrate (background) skipped: {e}")
+
+    threading.Thread(target=_run, daemon=True, name="db-hydrate").start()
+
+
 def create_engine(app) -> QQmlApplicationEngine:
     """QQmlApplicationEngine을 생성하고 Python 모델을 context에 등록한다."""
     from javstory.harvest.database import init_and_upgrade_db
 
     db_boot = init_and_upgrade_db()
+    if not db_boot.read_only:
+        _start_db_hydrate_background()
+
     if db_boot.read_only:
         from PySide6.QtWidgets import QMessageBox
 

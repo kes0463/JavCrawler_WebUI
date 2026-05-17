@@ -105,11 +105,29 @@ GlassCard {
             visible: root.hasData
         }
 
+        AppScrollView {
+            id: detailScroll
+            Layout.fillWidth: true
+            Layout.preferredHeight: Math.min(280, detailColumn.implicitHeight)
+            Layout.maximumHeight: 280
+            clip: true
+            visible: root.hasData && detailColumn.hasVisibleChildren
+            contentWidth: availableWidth
+            ScrollBar.vertical.policy: detailColumn.implicitHeight > 280 ? ScrollBar.AsNeeded : ScrollBar.AlwaysOff
+
+            ColumnLayout {
+                id: detailColumn
+                width: detailScroll.availableWidth
+                spacing: Theme.spacingMd
+
+                readonly property bool hasVisibleChildren:
+                    genreActorRow.visible || sceneBlock.visible
+
         RowLayout {
             id: genreActorRow
             Layout.fillWidth: true
             spacing: Theme.spacingMd
-            visible: root.hasData && ((profile.top_genres || []).length > 0 || (profile.top_actors || []).length > 0)
+            visible: (profile.top_genres || []).length > 0 || (profile.top_actors || []).length > 0
 
             ColumnLayout {
                 Layout.fillWidth: true
@@ -192,16 +210,11 @@ GlassCard {
             }
         }
 
-        Item {
-            Layout.fillWidth: true
-            Layout.preferredHeight: Theme.spacingLg
-            visible: genreActorRow.visible
-        }
-
         ColumnLayout {
+            id: sceneBlock
             Layout.fillWidth: true
             spacing: Theme.spacingXs
-            visible: root.hasData && (profile.scene_tags || []).length > 0
+            visible: (profile.scene_tags || []).length > 0
 
             Text {
                 text: "씬 태그 (Grok 캐시 · 최근 시청 샘플)"
@@ -229,6 +242,9 @@ GlassCard {
                         }
                     }
                 }
+            }
+        }
+
             }
         }
 

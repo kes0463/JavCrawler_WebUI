@@ -8,7 +8,7 @@ import sys
 import threading
 from pathlib import Path
 
-from PySide6.QtCore import QObject, Property, Signal, Slot
+from PySide6.QtCore import QObject, Property, Signal, Slot, QMetaObject, Qt, QTimer
 
 _ROOT = Path(__file__).resolve().parent.parent.parent
 
@@ -164,8 +164,9 @@ class SettingsModel(QObject):
         self._lada_pass3_max_clip_length = _pass_clip(3)
         self._lada_pass3_detect_face = _pass_face(3)
 
-        # CUDA 디바이스 목록(표시용)
-        self._cuda_devices: list[str] = self._detect_cuda_devices()
+        # CUDA 디바이스 목록(표시용) — nvidia-smi 호출은 백그라운드 스레드에서 수행
+        self._cuda_devices: list[str] = []
+        QTimer.singleShot(0, self._start_cuda_detection)
 
         # 4. 교정 (Correction) 모델
         self._correction_profile = os.environ.get("JAVSTORY_CORRECTION_PASS2_MODEL", "qwen/qwen3-235b-a22b-2507")
@@ -423,6 +424,18 @@ class SettingsModel(QObject):
     @Property('QVariantList', notify=cudaDevicesChanged)
     def cudaDevices(self):
         return list(getattr(self, "_cuda_devices", []) or [])
+
+    def _start_cuda_detection(self) -> None:
+        threading.Thread(target=self._run_cuda_detection, daemon=True, name="cuda-detect").start()
+
+    def _run_cuda_detection(self) -> None:
+        self._cuda_devices = self._detect_cuda_devices()
+        # 메인 스레드에서 시그널 발생 (Qt 스레드 안전 규칙)
+        QMetaObject.invokeMethod(self, "_on_cuda_detected", Qt.ConnectionType.QueuedConnection)
+
+    @Slot()
+    def _on_cuda_detected(self) -> None:
+        self.cudaDevicesChanged.emit()
 
     def _detect_cuda_devices(self) -> list[str]:
         try:

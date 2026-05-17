@@ -7,8 +7,12 @@
 from __future__ import annotations
 
 import datetime
+import time
 from collections import Counter, defaultdict
 from typing import List, Dict, Any
+
+_DIST_CACHE: tuple[float, Dict[str, List[Dict[str, Any]]]] | None = None
+_DIST_CACHE_TTL_SEC = 300.0
 
 from javstory.harvest.database import get_db_session_ctx, JAVMetadata, WatchHistory
 from javstory.analytics.preference_engine import get_recommendation_score
@@ -616,7 +620,7 @@ def get_monthly_genre_trend(months: int = 3) -> List[Dict[str, Any]]:
     return result
 
 
-def get_library_distribution() -> Dict[str, List[Dict[str, Any]]]:
+def get_library_distribution(*, force_refresh: bool = False) -> Dict[str, List[Dict[str, Any]]]:
     """
     라이브러리 전체에서 배우/장르/제작사별 보유 작품 수를 집계합니다.
     - 설정된 '제외 장르'는 집계에서 제외합니다.
@@ -627,6 +631,12 @@ def get_library_distribution() -> Dict[str, List[Dict[str, Any]]]:
             "makers": [{"name": str, "count": int}, ...]
         }
     """
+    global _DIST_CACHE
+    if not force_refresh and _DIST_CACHE is not None:
+        ts, cached = _DIST_CACHE
+        if time.time() - ts < _DIST_CACHE_TTL_SEC:
+            return cached
+
     import os
     from javstory.config.app_config import SIMILARITY_EXCLUDED_GENRES
     
@@ -666,11 +676,13 @@ def get_library_distribution() -> Dict[str, List[Dict[str, Any]]]:
             if m:
                 maker_counter[m] += 1
 
-        return {
+        result = {
             "actors": [{"name": k, "count": v} for k, v in actor_counter.most_common(30)],
             "genres": [{"name": k, "count": v} for k, v in genre_counter.most_common(30)],
             "makers": [{"name": k, "count": v} for k, v in maker_counter.most_common(30)],
         }
+        _DIST_CACHE = (time.time(), result)
+        return result
 
 
 def _parse_comma_list(text: str | None) -> list[str]:

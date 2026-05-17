@@ -271,10 +271,16 @@ def get_recommendation_score(product_code: str) -> float:
         return round(a_norm * 0.4 + g_norm * 0.4 + m_norm * 0.2, 4)
 
 
-def get_recommendations(n: int = 5, context: str | None = None) -> List[Dict[str, Any]]:
+def get_recommendations(
+    n: int = 5,
+    context: str | None = None,
+    *,
+    use_embeddings: bool = True,
+) -> List[Dict[str, Any]]:
     """
     미시청 작품 추천. 임베딩 캐시·프로필 벡터 우선, 없으면 규칙 기반 fallback.
     context: 'morning'|'afternoon'|'night'|'evening' (evening→night)
+    use_embeddings: False면 규칙 기반만 (시작·백그라운드 갱신용).
     """
     limit = max(1, min(20, int(n or 5)))
     _ = context or get_time_slot()  # reserved for time-slot weighting
@@ -284,7 +290,7 @@ def get_recommendations(n: int = 5, context: str | None = None) -> List[Dict[str
         embeddings_ollama_model_from_env,
     )
 
-    if embeddings_enabled_from_env():
+    if use_embeddings and embeddings_enabled_from_env():
         model = embeddings_ollama_model_from_env()
         emb_recs = _recommendations_via_embeddings(limit, model)
         if emb_recs:

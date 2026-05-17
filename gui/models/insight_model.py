@@ -16,13 +16,16 @@ Properties:
     batchProgress   : int (0~100)
 
 Slots:
-    refresh()       : 모든 데이터 재조회
-    runBatch()      : 백그라운드 배치 sync 실행
+    refresh()           : 단계별 전체 재조회 (UI는 phase마다 1회 갱신)
+    ensureTabData(int)  : 탭 진입 시 해당 구간만 보장
+    runBatch()          : 백그라운드 배치 sync 실행
 """
 from __future__ import annotations
 
 import json
 import threading
+from typing import Any
+
 from PySide6.QtCore import QObject, QTimer, Property, Signal, Slot
 
 
@@ -48,15 +51,19 @@ class InsightModel(QObject):
     personaRegeneratingChanged = Signal()
     pipelineReportChanged = Signal()
     weeklyDigestChanged = Signal()
+    allDataChanged = Signal()
     logMessage          = Signal(str)
 
-    # 백그라운드 → UI 스레드 데이터 전달용 내부 시그널
-    # Signal은 cross-thread emit 시 자동으로 QueuedConnection을 사용하므로 thread-safe
     _refreshReady = Signal(object)
     _refreshError = Signal(str)
     _batchDone    = Signal(object)
     _personaReady = Signal(str)
     _personaError = Signal(str)
+
+    _PHASE_CORE = "core"
+    _PHASE_TRENDS = "trends"
+    _PHASE_RECOMMEND = "recommend"
+    _PHASE_COLLECTION = "collection"
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -81,15 +88,17 @@ class InsightModel(QObject):
         self._batch_progress = 0
         self._refresh_running = False
         self._persona_regenerating = False
+        self._phase_loaded: set[str] = set()
+        self._pending_full_refresh = False
+        self._pending_phases: list[str] = []
 
-        self._refreshReady.connect(self._apply_refresh)
+        self._refreshReady.connect(self._on_refresh_ready)
         self._refreshError.connect(lambda msg: self.logMessage.emit(msg))
         self._batchDone.connect(self._on_batch_done)
         self._personaReady.connect(self._apply_persona)
         self._personaError.connect(lambda msg: self.logMessage.emit(msg))
 
-        # 앱 시작 2초 후 최초 조회
-        QTimer.singleShot(2000, self.refresh)
+        QTimer.singleShot(2000, self._start_initial_load)
 
     # ── Properties ──────────────────────────────────────────────────────────
 
@@ -173,67 +182,153 @@ class InsightModel(QObject):
     def isPersonaRegenerating(self):
         return self._persona_regenerating
 
-    # ── Slots ────────────────────────────────────────────────────────────────
+    # ── 데이터 수집 (백그라운드) ───────────────────────────────────────────
 
-    @Slot()
-    def refresh(self):
-        """모든 취향 분석 데이터를 백그라운드 스레드에서 재조회합니다."""
+    @staticmethod
+    def _excluded_genres() -> set[str]:
+        import os
+
+        raw = os.environ.get("JAVSTORY_SIMILARITY_EXCLUDED_GENRES", "")
+        return {g.strip() for g in raw.split(",") if g.strip()}
+
+    @classmethod
+    def _fetch_phase(cls, phase: str) -> dict[str, str]:
+        excluded = cls._excluded_genres()
+        dump = lambda o: json.dumps(o, ensure_ascii=False)
+
+        if phase == cls._PHASE_CORE:
+            from javstory.analytics.preference_engine import (
+                get_top_actors,
+                get_top_genres,
+                get_top_makers,
+                compute_recent_trend,
+            )
+            from javstory.analytics.library_stats import get_library_stats, get_monthly_genre_trend
+            from javstory.analytics.persona_card import get_persona_card
+            from javstory.analytics.pipeline_stats import get_pipeline_report
+            from javstory.analytics.weekly_digest import get_weekly_digest
+
+            return {
+                "actors": dump(get_top_actors(5)),
+                "genres": dump(get_top_genres(8, excluded=excluded)),
+                "makers": dump(get_top_makers(5)),
+                "stats": dump(get_library_stats()),
+                "trend": dump(compute_recent_trend(excluded_genres=excluded)),
+                "persona": dump(get_persona_card(cache_only=True)),
+                "pipeline": dump(get_pipeline_report(30)),
+                "monthly": dump(get_monthly_genre_trend(3)),
+                "weekly_digest": dump(get_weekly_digest()),
+            }
+
+        if phase == cls._PHASE_TRENDS:
+            from javstory.analytics.library_stats import (
+                compute_taste_vector,
+                get_watch_heatmap,
+                get_preference_timeline,
+            )
+
+            return {
+                "taste": dump(compute_taste_vector()),
+                "heatmap": dump(get_watch_heatmap()),
+                "taste_drift": dump(
+                    get_preference_timeline("month", 6, top_genres=5, excluded=excluded),
+                ),
+            }
+
+        if phase == cls._PHASE_RECOMMEND:
+            from javstory.analytics.preference_engine import get_recommendations
+            from javstory.analytics.library_stats import (
+                get_today_recommendation,
+                get_unwatched_gems,
+            )
+
+            return {
+                "recs": dump(get_today_recommendation(6)),
+                "next_watch": dump(get_recommendations(5, use_embeddings=False)),
+                "hidden_gems": dump(get_unwatched_gems(6)),
+            }
+
+        if phase == cls._PHASE_COLLECTION:
+            from javstory.analytics.library_stats import (
+                get_actor_collection_stats,
+                get_library_distribution,
+            )
+
+            return {
+                "dist": dump(get_library_distribution()),
+                "actor_collections": dump(get_actor_collection_stats(12)),
+            }
+
+        return {}
+
+    def _run_phases(self, phases: list[str], *, full: bool) -> None:
         if self._refresh_running:
+            if full:
+                self._pending_full_refresh = True
+            else:
+                for p in phases:
+                    if p not in self._pending_phases:
+                        self._pending_phases.append(p)
             return
         self._refresh_running = True
+        if full:
+            self._phase_loaded.clear()
 
-        def _worker():
+        def _worker() -> None:
             try:
-                import os
-                from javstory.analytics.preference_engine import (
-                    get_top_actors, get_top_genres, get_top_makers, compute_recent_trend
-                )
-                from javstory.analytics.preference_engine import get_recommendations
-                from javstory.analytics.library_stats import (
-                    get_library_stats, get_today_recommendation, get_monthly_genre_trend,
-                    get_library_distribution, compute_taste_vector, get_watch_heatmap,
-                    get_unwatched_gems, get_preference_timeline,
-                    get_actor_collection_stats,
-                )
-                from javstory.analytics.persona_card import get_persona_card
-                from javstory.analytics.pipeline_stats import get_pipeline_report
-                from javstory.analytics.weekly_digest import get_weekly_digest
-
-                # 설정의 "제외할 장르" 값을 공용으로 적용 (env 변수는 저장 시 반영됨)
-                _raw = os.environ.get("JAVSTORY_SIMILARITY_EXCLUDED_GENRES", "")
-                excluded_genres: set[str] = {
-                    g.strip() for g in _raw.split(",") if g.strip()
-                }
-
-                results = {
-                    "actors":  json.dumps(get_top_actors(5), ensure_ascii=False),
-                    "genres":  json.dumps(get_top_genres(8, excluded=excluded_genres), ensure_ascii=False),
-                    "makers":  json.dumps(get_top_makers(5), ensure_ascii=False),
-                    "stats":   json.dumps(get_library_stats(), ensure_ascii=False),
-                    "trend":   json.dumps(compute_recent_trend(excluded_genres=excluded_genres), ensure_ascii=False),
-                    "recs":    json.dumps(get_today_recommendation(6), ensure_ascii=False),
-                    "next_watch": json.dumps(get_recommendations(5), ensure_ascii=False),
-                    "hidden_gems": json.dumps(get_unwatched_gems(6), ensure_ascii=False),
-                    "actor_collections": json.dumps(get_actor_collection_stats(12), ensure_ascii=False),
-                    "taste":   json.dumps(compute_taste_vector(), ensure_ascii=False),
-                    "heatmap": json.dumps(get_watch_heatmap(), ensure_ascii=False),
-                    "persona": json.dumps(get_persona_card(), ensure_ascii=False),
-                    "pipeline": json.dumps(get_pipeline_report(30), ensure_ascii=False),
-                    "monthly": json.dumps(get_monthly_genre_trend(3), ensure_ascii=False),
-                    "taste_drift": json.dumps(
-                        get_preference_timeline("month", 6, top_genres=5, excluded=excluded_genres),
-                        ensure_ascii=False,
-                    ),
-                    "dist":    json.dumps(get_library_distribution(), ensure_ascii=False),
-                    "weekly_digest": json.dumps(get_weekly_digest(), ensure_ascii=False),
-                }
-                self._refreshReady.emit(results)
+                for phase in phases:
+                    data = self._fetch_phase(phase)
+                    self._refreshReady.emit({"phase": phase, "data": data, "full": full})
             except Exception as e:
                 self._refreshError.emit(f"[InsightModel] refresh 실패: {e}")
             finally:
                 self._refresh_running = False
+                if self._pending_phases:
+                    queued = self._pending_phases
+                    self._pending_phases = []
+                    QTimer.singleShot(50, lambda: self._run_phases(queued, full=False))
+                elif self._pending_full_refresh:
+                    self._pending_full_refresh = False
+                    QTimer.singleShot(100, lambda: self.refresh())
 
         threading.Thread(target=_worker, daemon=True, name="insight-refresh").start()
+
+    def _start_initial_load(self) -> None:
+        self._run_phases([self._PHASE_CORE], full=False)
+
+    def _schedule_deferred_phases(self) -> None:
+        pending: list[str] = []
+        if self._PHASE_RECOMMEND not in self._phase_loaded:
+            pending.append(self._PHASE_RECOMMEND)
+        if self._PHASE_COLLECTION not in self._phase_loaded:
+            pending.append(self._PHASE_COLLECTION)
+        if pending:
+            self._run_phases(pending, full=False)
+
+    # ── Slots ────────────────────────────────────────────────────────────────
+
+    @Slot()
+    def refresh(self):
+        """전체 데이터를 단계별로 재조회합니다 (페이즈마다 UI 1회 갱신)."""
+        self._run_phases(
+            [
+                self._PHASE_CORE,
+                self._PHASE_TRENDS,
+                self._PHASE_RECOMMEND,
+                self._PHASE_COLLECTION,
+            ],
+            full=True,
+        )
+
+    @Slot(int)
+    def ensureTabData(self, tab_index: int) -> None:
+        """인사이트 탭 전환 시 해당 탭 데이터만 선로드."""
+        if tab_index == 1 and self._PHASE_TRENDS not in self._phase_loaded:
+            self._run_phases([self._PHASE_TRENDS], full=False)
+        elif tab_index == 2 and self._PHASE_RECOMMEND not in self._phase_loaded:
+            self._run_phases([self._PHASE_RECOMMEND], full=False)
+        elif tab_index == 3 and self._PHASE_COLLECTION not in self._phase_loaded:
+            self._run_phases([self._PHASE_COLLECTION], full=False)
 
     @Slot()
     def regeneratePersona(self):
@@ -246,6 +341,7 @@ class InsightModel(QObject):
         def _worker():
             try:
                 from javstory.analytics.persona_card import get_persona_card
+
                 payload = json.dumps(get_persona_card(force_refresh=True), ensure_ascii=False)
                 self._personaReady.emit(payload)
             except Exception as e:
@@ -260,60 +356,53 @@ class InsightModel(QObject):
         if persona_json != self._persona_card:
             self._persona_card = persona_json
             self.personaCardChanged.emit()
+            self.allDataChanged.emit()
 
-    def _apply_refresh(self, results: dict) -> None:
-        """UI 스레드에서 프로퍼티에 반영합니다 (_refreshReady 시그널로 호출)."""
-        if results["actors"] != self._top_actors:
-            self._top_actors = results["actors"]
-            self.topActorsChanged.emit()
-        if results["genres"] != self._top_genres:
-            self._top_genres = results["genres"]
-            self.topGenresChanged.emit()
-        if results["makers"] != self._top_makers:
-            self._top_makers = results["makers"]
-            self.topMakersChanged.emit()
-        if results["stats"] != self._library_stats:
-            self._library_stats = results["stats"]
-            self.libraryStatsChanged.emit()
-        if results["trend"] != self._recent_trend:
-            self._recent_trend = results["trend"]
-            self.recentTrendChanged.emit()
-        if results["recs"] != self._today_recs:
-            self._today_recs = results["recs"]
-            self.todayRecsChanged.emit()
-        if results["monthly"] != self._monthly_genres:
-            self._monthly_genres = results["monthly"]
-            self.monthlyGenresChanged.emit()
-        if results.get("taste_drift") != self._taste_drift:
-            self._taste_drift = results.get("taste_drift", "{}")
-            self.tasteDriftChanged.emit()
-        if results["dist"] != self._library_distribution:
-            self._library_distribution = results["dist"]
-            self.libraryDistributionChanged.emit()
-        if results.get("taste") != self._taste_vector:
-            self._taste_vector = results.get("taste", "{}")
-            self.tasteVectorChanged.emit()
-        if results.get("next_watch") != self._next_watch_recs:
-            self._next_watch_recs = results.get("next_watch", "[]")
-            self.nextWatchRecsChanged.emit()
-        if results.get("hidden_gems") != self._hidden_gems:
-            self._hidden_gems = results.get("hidden_gems", "[]")
-            self.hiddenGemsChanged.emit()
-        if results.get("actor_collections") != self._actor_collections:
-            self._actor_collections = results.get("actor_collections", "{}")
-            self.actorCollectionsChanged.emit()
-        if results.get("heatmap") != self._watch_heatmap:
-            self._watch_heatmap = results.get("heatmap", "{}")
-            self.watchHeatmapChanged.emit()
-        if results.get("persona") != self._persona_card:
-            self._persona_card = results.get("persona", "{}")
-            self.personaCardChanged.emit()
-        if results.get("pipeline") != self._pipeline_report:
-            self._pipeline_report = results.get("pipeline", "{}")
-            self.pipelineReportChanged.emit()
-        if results.get("weekly_digest") != self._weekly_digest:
-            self._weekly_digest = results.get("weekly_digest", "{}")
-            self.weeklyDigestChanged.emit()
+    def _on_refresh_ready(self, payload: object) -> None:
+        if not isinstance(payload, dict):
+            return
+        phase = str(payload.get("phase") or "")
+        results: dict[str, Any] = payload.get("data") or {}
+        if phase:
+            self._phase_loaded.add(phase)
+        self._apply_phase(results)
+        full = bool(payload.get("full"))
+        if phase == self._PHASE_CORE and not full:
+            QTimer.singleShot(100, lambda: self._run_phases([self._PHASE_TRENDS], full=False))
+        elif phase == self._PHASE_TRENDS and not full:
+            QTimer.singleShot(200, self._schedule_deferred_phases)
+
+    def _apply_phase(self, results: dict[str, Any]) -> None:
+        """UI 스레드: 한 페이즈의 변경만 반영 후 allDataChanged 1회."""
+        mapping: list[tuple[str, str, Signal]] = [
+            ("actors", "_top_actors", self.topActorsChanged),
+            ("genres", "_top_genres", self.topGenresChanged),
+            ("makers", "_top_makers", self.topMakersChanged),
+            ("stats", "_library_stats", self.libraryStatsChanged),
+            ("trend", "_recent_trend", self.recentTrendChanged),
+            ("recs", "_today_recs", self.todayRecsChanged),
+            ("monthly", "_monthly_genres", self.monthlyGenresChanged),
+            ("taste_drift", "_taste_drift", self.tasteDriftChanged),
+            ("dist", "_library_distribution", self.libraryDistributionChanged),
+            ("taste", "_taste_vector", self.tasteVectorChanged),
+            ("next_watch", "_next_watch_recs", self.nextWatchRecsChanged),
+            ("hidden_gems", "_hidden_gems", self.hiddenGemsChanged),
+            ("actor_collections", "_actor_collections", self.actorCollectionsChanged),
+            ("heatmap", "_watch_heatmap", self.watchHeatmapChanged),
+            ("persona", "_persona_card", self.personaCardChanged),
+            ("pipeline", "_pipeline_report", self.pipelineReportChanged),
+            ("weekly_digest", "_weekly_digest", self.weeklyDigestChanged),
+        ]
+        changed = False
+        for key, attr, _sig in mapping:
+            if key not in results:
+                continue
+            val = results[key]
+            if getattr(self, attr) != val:
+                setattr(self, attr, val)
+                changed = True
+        if changed:
+            self.allDataChanged.emit()
 
     @Slot()
     def runBatch(self):
@@ -327,7 +416,7 @@ class InsightModel(QObject):
 
         try:
             from javstory.analytics.batch_worker import run_batch_in_thread
-            # _on_done은 백그라운드 스레드에서 호출되므로 _batchDone 시그널로 전달
+
             run_batch_in_thread(done_callback=lambda r: self._batchDone.emit(r))
         except Exception as e:
             self.logMessage.emit(f"[InsightModel] 배치 실패: {e}")
@@ -335,7 +424,6 @@ class InsightModel(QObject):
             self.batchRunningChanged.emit()
 
     def _on_batch_done(self, result: dict) -> None:
-        """UI 스레드에서 배치 완료를 처리합니다 (_batchDone 시그널로 호출)."""
         synced = result.get("synced", 0)
         self.logMessage.emit(f"[InsightModel] 배치 완료 — {synced}건 동기화")
         self._batch_running = False
