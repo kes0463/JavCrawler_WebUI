@@ -17,7 +17,8 @@ ColumnLayout {
 
     property bool digestExpanded: false
     readonly property var digestLines: tab.weeklyDigest.lines || []
-    readonly property bool digestShowMore: tab.weeklyDigest.has_data && tab.digestLines.length > 3
+    readonly property bool digestHasData: !!(tab.weeklyDigest && tab.weeklyDigest.has_data)
+    readonly property bool digestShowMore: tab.digestHasData && tab.digestLines.length > 3
     readonly property var digestVisibleLines: {
         if (!tab.digestShowMore || tab.digestExpanded)
             return tab.digestLines
@@ -31,7 +32,7 @@ ColumnLayout {
         autoSize: false
         border.color: Qt.rgba(0, 229/255, 255/255, 0.35)
         Layout.preferredHeight: {
-            if (!tab.weeklyDigest.has_data)
+            if (!tab.digestHasData)
                 return 72
             var n = tab.digestVisibleLines.length
             var h = 56 + n * 22
@@ -53,14 +54,14 @@ ColumnLayout {
             }
 
             Repeater {
-                model: tab.weeklyDigest.has_data
+                model: tab.digestHasData
                     ? tab.digestVisibleLines
                     : [tab.weeklyDigest.empty_message || "이번 주 시청 이력이 없습니다."]
                 Text {
                     Layout.fillWidth: true
                     text: typeof modelData === "string" ? modelData : ""
                     font.pixelSize: Theme.fontCaption
-                    color: tab.weeklyDigest.has_data ? Theme.textSecondary : Theme.textMuted
+                    color: tab.digestHasData ? Theme.textSecondary : Theme.textMuted
                     wrapMode: Text.Wrap
                 }
             }
