@@ -814,8 +814,18 @@ LLM_REFUSAL_PATTERNS = [
 SIMILARITY_EXCLUDED_GENRES = {
     "단독작품", "독점", "모자이크", "고화질",
     "VR 전용", "VR 전용 기기 불필요", "스마트폰 전용",
-    "독점 전송", "단독 배포", "블루레이"
+    "독점 전송", "단독 배포", "블루레이",
+    "단독 작품", "스태프 강력 추천", "직원 강력 추천",
+    "스태프 추천", "하이비전", "HD", "4K"
 }
+
+
+def similarity_excluded_genres_from_env() -> set[str]:
+    """작품 속성 태그를 취향 장르 계산에서 제외하기 위한 공통 설정."""
+    raw = (os.environ.get("JAVSTORY_SIMILARITY_EXCLUDED_GENRES", "") or "").strip()
+    if raw:
+        return {v.strip() for v in raw.split(",") if v.strip()}
+    return set(SIMILARITY_EXCLUDED_GENRES)
 
 # 유사도 분석 시 '문맥적 유사성'의 구체적 근거로 활용할 테마 키워드 목록
 SIMILARITY_THEME_KEYWORDS = [

@@ -186,10 +186,9 @@ class InsightModel(QObject):
 
     @staticmethod
     def _excluded_genres() -> set[str]:
-        import os
+        from javstory.config.app_config import similarity_excluded_genres_from_env
 
-        raw = os.environ.get("JAVSTORY_SIMILARITY_EXCLUDED_GENRES", "")
-        return {g.strip() for g in raw.split(",") if g.strip()}
+        return similarity_excluded_genres_from_env()
 
     @classmethod
     def _fetch_phase(cls, phase: str) -> dict[str, str]:

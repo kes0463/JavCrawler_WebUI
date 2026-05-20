@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import os
 from collections import Counter
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -21,12 +20,9 @@ def _parse_comma_list(text: str | None) -> list[str]:
 
 
 def _load_excluded_genres() -> set[str]:
-    from javstory.config.app_config import SIMILARITY_EXCLUDED_GENRES
+    from javstory.config.app_config import similarity_excluded_genres_from_env
 
-    excluded_str = os.environ.get("JAVSTORY_SIMILARITY_EXCLUDED_GENRES", "")
-    if excluded_str:
-        return {v.strip() for v in excluded_str.split(",") if v.strip()}
-    return set(SIMILARITY_EXCLUDED_GENRES)
+    return similarity_excluded_genres_from_env()
 
 
 def _period_bounds(days: int = 7) -> Tuple[datetime, datetime, datetime, datetime]:

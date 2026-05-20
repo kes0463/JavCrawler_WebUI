@@ -855,6 +855,9 @@ Item {
             anchors.fill: parent
             contentWidth: zoomContainer.width * zoomContainer.scale
             contentHeight: zoomContainer.height * zoomContainer.scale
+            interactive: !lightboxOverlay.allViewMode
+                && !(lightboxOverlay.coverMode && lightboxOverlay.coverModePage !== 0)
+                && zoomContainer.scale > 1.0
             clip: true
 
             Item {
@@ -862,8 +865,16 @@ Item {
                 width: lightboxFlick.width
                 height: lightboxFlick.height
                 scale: 1.0
+                transformOrigin: Item.TopLeft
 
                 Behavior on scale { NumberAnimation { duration: 150; easing.type: Easing.OutCubic } }
+
+                onScaleChanged: {
+                    if (scale <= 1.0) {
+                        lightboxFlick.contentX = 0
+                        lightboxFlick.contentY = 0
+                    }
+                }
 
                 // 단일 이미지 보기 (썸네일 클릭 시 들어오는 원본 화면 또는 커버 화면)
                 Image {
@@ -1075,28 +1086,39 @@ Item {
             // 휠 이벤트로 확대/축소 및 바둑판 배열 개수 조절
             MouseArea {
                 anchors.fill: parent
+                acceptedButtons: Qt.NoButton
                 onWheel: (wheel) => {
-                    if (lightboxOverlay.allViewMode && (wheel.modifiers & Qt.ControlModifier)) {
-                        // Ctrl + 마우스 휠: 바둑판 모드 해상도(열 개수) 동적 조절 (2~8칸)
-                        if (wheel.angleDelta.y > 0) {
+                    var wheelDelta = wheel.angleDelta.y !== 0 ? wheel.angleDelta.y : wheel.pixelDelta.y
+                    if (wheelDelta === 0) {
+                        wheel.accepted = false
+                        return
+                    }
+
+                    if (lightboxOverlay.allViewMode) {
+                        // 전체 보기: 마우스 휠로 썸네일 크기(열 개수)를 조절한다.
+                        if (wheelDelta > 0) {
                             lightboxOverlay.allViewCols = Math.max(2, lightboxOverlay.allViewCols - 1)
                         } else {
                             lightboxOverlay.allViewCols = Math.min(8, lightboxOverlay.allViewCols + 1)
                         }
                         // 확대/축소 직후엔 현재 포커싱된 이미지가 항상 보이도록 화면 당겨주기
                         allViewGrid.positionViewAtIndex(lightboxOverlay.currentIndex, GridView.Contain)
+                        wheel.accepted = true
                     } else if (!lightboxOverlay.allViewMode) {
                         // 개별 사진 확대/축소
                         var zoomStep = 0.15
-                        if (wheel.angleDelta.y > 0) {
+                        if (wheelDelta > 0) {
                             zoomContainer.scale = Math.min(zoomContainer.scale + zoomStep, 5.0)
                         } else {
-                            zoomContainer.scale = Math.max(zoomContainer.scale - zoomStep, 0.5)
+                            zoomContainer.scale = Math.max(zoomContainer.scale - zoomStep, 1.0)
                         }
+                        if (zoomContainer.scale <= 1.0) {
+                            lightboxFlick.contentX = 0
+                            lightboxFlick.contentY = 0
+                        }
+                        wheel.accepted = true
                     }
                 }
-                // 클릭 이벤트 전파 방지 (배경 클릭 유지)
-                onClicked: (mouse) => mouse.accepted = false
             }
         }
 

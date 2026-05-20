@@ -115,9 +115,15 @@ ColumnLayout {
             personaType: tab.persona.persona_type || ""
             summary: tab.persona.summary || tab.persona.body || ""
             body: tab.persona.body || tab.persona.summary || ""
+            sensualSummary: tab.persona.sensual_summary || ""
             driftNote: tab.persona.drift_note || ""
             affinities: tab.persona.affinities || []
+            turnOns: tab.persona.turn_ons || []
+            avoidances: tab.persona.avoidances || []
             evidence: tab.persona.evidence || []
+            semanticMatches: (tab.persona.semantic_profile && tab.persona.semantic_profile.nearest_unwatched)
+                ? tab.persona.semantic_profile.nearest_unwatched
+                : []
             generatedAt: tab.persona.generated_at || ""
             sourceLabel: tab.persona.source ? ("출처: " + tab.persona.source) : ""
             coverageLabel: tab.personaCoverageLabel(tab.persona)

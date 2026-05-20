@@ -300,13 +300,9 @@ def get_unwatched_gems(
 
 
 def _load_excluded_genres() -> set[str]:
-    import os
-    from javstory.config.app_config import SIMILARITY_EXCLUDED_GENRES
+    from javstory.config.app_config import similarity_excluded_genres_from_env
 
-    excluded_str = os.environ.get("JAVSTORY_SIMILARITY_EXCLUDED_GENRES", "")
-    if excluded_str:
-        return {v.strip() for v in excluded_str.split(",") if v.strip()}
-    return set(SIMILARITY_EXCLUDED_GENRES)
+    return similarity_excluded_genres_from_env()
 
 
 def _period_key_from_date(dt: datetime.datetime, granularity: str) -> str | None:
@@ -637,15 +633,9 @@ def get_library_distribution(*, force_refresh: bool = False) -> Dict[str, List[D
         if time.time() - ts < _DIST_CACHE_TTL_SEC:
             return cached
 
-    import os
-    from javstory.config.app_config import SIMILARITY_EXCLUDED_GENRES
-    
-    # 제외 장르 로드
-    excluded_str = os.environ.get("JAVSTORY_SIMILARITY_EXCLUDED_GENRES", "")
-    if excluded_str:
-        excluded = {v.strip() for v in excluded_str.split(",") if v.strip()}
-    else:
-        excluded = set(SIMILARITY_EXCLUDED_GENRES)
+    from javstory.config.app_config import similarity_excluded_genres_from_env
+
+    excluded = similarity_excluded_genres_from_env()
 
     with get_db_session_ctx() as session:
         # 모든 메타데이터 로드
@@ -772,15 +762,9 @@ def compute_taste_profile() -> Dict[str, Any]:
     Returns:
         watched_count, has_data, axes[{label, value, pct, hint}], top_genres, top_actors, scene_tags
     """
-    import os
-    from javstory.config.app_config import SIMILARITY_EXCLUDED_GENRES
+    from javstory.config.app_config import similarity_excluded_genres_from_env
 
-    excluded_str = os.environ.get("JAVSTORY_SIMILARITY_EXCLUDED_GENRES", "")
-    excluded = (
-        {v.strip() for v in excluded_str.split(",") if v.strip()}
-        if excluded_str
-        else set(SIMILARITY_EXCLUDED_GENRES)
-    )
+    excluded = similarity_excluded_genres_from_env()
 
     current_year = datetime.datetime.now().year
     watched_genres: Counter = Counter()

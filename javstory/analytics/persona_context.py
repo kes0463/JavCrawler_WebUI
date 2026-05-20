@@ -25,9 +25,34 @@ def persona_sample_size() -> int:
     return max(4, min(12, n))
 
 
-def _sample_product_codes(max_products: int) -> List[str]:
-    codes: List[str] = []
+def _completion_ratio(h: WatchHistory) -> float:
+    total = int(h.total_duration or 0)
+    watched = int(h.watch_duration or 0)
+    if total <= 0:
+        return 1.0 if h.is_completed else 0.0
+    return max(0.0, min(1.0, watched / float(total)))
+
+
+def _sample_product_groups(max_products: int) -> Dict[str, List[str]]:
+    """긍정/최근/장기/부정 신호를 분리해 페르소나 근거 샘플을 뽑는다."""
+    groups: Dict[str, List[str]] = {
+        "positive": [],
+        "recent": [],
+        "long_term": [],
+        "negative": [],
+        "codes": [],
+    }
     seen: set[str] = set()
+
+    def add(group: str, product_code: str | None) -> None:
+        pc = str(product_code or "").strip().upper()
+        if not pc:
+            return
+        if pc not in groups[group]:
+            groups[group].append(pc)
+        if pc not in seen:
+            seen.add(pc)
+            groups["codes"].append(pc)
 
     with get_db_session_ctx() as session:
         preferred = (
@@ -38,31 +63,55 @@ def _sample_product_codes(max_products: int) -> List[str]:
                 | (WatchHistory.rating >= 4)
             )
             .order_by(WatchHistory.updated_at.desc())
+            .limit(max_products)
             .all()
         )
         for h in preferred:
-            pc = str(h.product_code or "").strip().upper()
-            if pc and pc not in seen:
-                seen.add(pc)
-                codes.append(pc)
-            if len(codes) >= max_products:
-                return codes
+            add("positive", h.product_code)
 
-        if len(codes) < max_products:
-            rest = (
-                session.query(WatchHistory)
-                .order_by(WatchHistory.updated_at.desc())
-                .limit(max_products * 3)
-                .all()
+        recent = (
+            session.query(WatchHistory)
+            .order_by(WatchHistory.updated_at.desc())
+            .limit(max_products)
+            .all()
+        )
+        for h in recent:
+            add("recent", h.product_code)
+
+        long_term = (
+            session.query(WatchHistory)
+            .filter(
+                (WatchHistory.liked == True)  # noqa: E712
+                | (WatchHistory.is_completed == True)  # noqa: E712
+                | (WatchHistory.rating >= 4)
             )
-            for h in rest:
-                pc = str(h.product_code or "").strip().upper()
-                if pc and pc not in seen:
-                    seen.add(pc)
-                    codes.append(pc)
-                if len(codes) >= max_products:
-                    break
-    return codes[:max_products]
+            .order_by(WatchHistory.updated_at.asc())
+            .limit(max(2, max_products // 2))
+            .all()
+        )
+        for h in long_term:
+            add("long_term", h.product_code)
+
+        candidates = (
+            session.query(WatchHistory)
+            .order_by(WatchHistory.updated_at.desc())
+            .limit(max_products * 6)
+            .all()
+        )
+        for h in candidates:
+            rating = int(h.rating or 0)
+            low_completion = (
+                int(h.watch_duration or 0) >= 60
+                and not bool(h.is_completed)
+                and _completion_ratio(h) <= 0.35
+            )
+            if (0 < rating <= 2) or low_completion:
+                add("negative", h.product_code)
+            if len(groups["negative"]) >= max(2, max_products // 3):
+                break
+
+    groups["codes"] = groups["codes"][: max_products * 2]
+    return groups
 
 
 def _watch_meta_by_codes(codes: List[str]) -> Dict[str, Dict[str, Any]]:
@@ -80,6 +129,8 @@ def _watch_meta_by_codes(codes: List[str]) -> Dict[str, Dict[str, Any]]:
                 "is_completed": bool(h.is_completed),
                 "liked": bool(h.liked),
                 "rating": int(h.rating or 0),
+                "completion_ratio": round(_completion_ratio(h), 3),
+                "updated_at": h.updated_at.isoformat() if h.updated_at else "",
             }
         for row in session.query(JAVMetadata).filter(JAVMetadata.product_code.in_(codes)).all():
             pc = str(row.product_code or "").strip().upper()
@@ -203,6 +254,72 @@ def _find_srt_paths(pc: str, folder_path: str, meta: Dict[str, Any]) -> List[Pat
     return paths
 
 
+def _is_excluded_tag(value: str, excluded: set[str]) -> bool:
+    text = str(value or "").strip()
+    if not text:
+        return True
+    compact = text.replace(" ", "").lower()
+    return any(
+        text == ex or ex in text or compact == ex.replace(" ", "").lower()
+        for ex in excluded
+    )
+
+
+def _filtered_counter(counter: Counter, excluded: set[str], limit: int) -> List[Dict[str, Any]]:
+    items: List[Dict[str, Any]] = []
+    for name, count in counter.most_common(limit * 2):
+        if _is_excluded_tag(name, excluded):
+            continue
+        items.append({"name": name, "count": count})
+        if len(items) >= limit:
+            break
+    return items
+
+
+def _sample_roles_by_code(groups: Dict[str, List[str]]) -> Dict[str, List[str]]:
+    roles: Dict[str, List[str]] = {}
+    for group in ("positive", "recent", "long_term", "negative"):
+        for pc in groups.get(group) or []:
+            roles.setdefault(pc, []).append(group)
+    return roles
+
+
+def _build_semantic_profile(seed_codes: List[str], exclude_codes: set[str]) -> Dict[str, Any]:
+    try:
+        from javstory.library.embeddings.pipeline import (
+            embeddings_enabled_from_env,
+            embeddings_ollama_model_from_env,
+        )
+        from javstory.library.embeddings.similarity import (
+            build_user_profile_vector,
+            rank_unwatched_by_vector,
+        )
+    except Exception:
+        return {}
+
+    if not embeddings_enabled_from_env():
+        return {}
+
+    model = embeddings_ollama_model_from_env()
+    profile = build_user_profile_vector(model=model, seed_codes=seed_codes[:30])
+    if not profile:
+        return {"enabled": True, "model": model, "seed_count": len(seed_codes), "nearest_unwatched": []}
+
+    nearest = []
+    for item in rank_unwatched_by_vector(profile, model=model, exclude_codes=exclude_codes, top_k=5):
+        nearest.append({
+            "product_code": item.product_code,
+            "score": round(float(item.score), 4),
+            "reasons": list(item.match_reasons or []),
+        })
+    return {
+        "enabled": True,
+        "model": model,
+        "seed_count": len(seed_codes),
+        "nearest_unwatched": nearest,
+    }
+
+
 def _build_drift_hint(monthly: List[Dict[str, Any]], recent_genres: List[Dict[str, Any]]) -> str:
     if not monthly and not recent_genres:
         return ""
@@ -225,15 +342,9 @@ def build_persona_context(*, max_products: int | None = None) -> Dict[str, Any]:
     페르소나 합성용 구조화 컨텍스트.
     """
     n = int(max_products or persona_sample_size())
-    import os as _os
-    from javstory.config.app_config import SIMILARITY_EXCLUDED_GENRES
+    from javstory.config.app_config import similarity_excluded_genres_from_env
 
-    excluded_str = _os.environ.get("JAVSTORY_SIMILARITY_EXCLUDED_GENRES", "")
-    excluded = (
-        {v.strip() for v in excluded_str.split(",") if v.strip()}
-        if excluded_str
-        else set(SIMILARITY_EXCLUDED_GENRES)
-    )
+    excluded = similarity_excluded_genres_from_env()
 
     stats = get_library_stats()
     taste = compute_taste_vector()
@@ -251,6 +362,10 @@ def build_persona_context(*, max_products: int | None = None) -> Dict[str, Any]:
         "monthly_genres": monthly,
         "drift_hint": drift_hint,
         "samples": [],
+        "sample_codes": [],
+        "sample_groups": {},
+        "excluded_genres": sorted(excluded),
+        "semantic_profile": {},
         "coverage": {"grok": 0, "canonical": 0, "subtitle": 0},
         "tag_counter": [],
         "tone_counter": [],
@@ -262,7 +377,22 @@ def build_persona_context(*, max_products: int | None = None) -> Dict[str, Any]:
 
     from javstory.translation.story_grok_module import load_cached_grok_json_flexible
 
-    codes = _sample_product_codes(n)
+    sample_groups = _sample_product_groups(n)
+    codes = sample_groups.get("codes") or []
+    ctx["sample_codes"] = codes
+    roles_by_code = _sample_roles_by_code(sample_groups)
+    ctx["sample_groups"] = {
+        key: value
+        for key, value in sample_groups.items()
+        if key in ("positive", "recent", "long_term", "negative")
+    }
+    positive_seed_codes = []
+    for key in ("positive", "long_term", "recent"):
+        for pc in sample_groups.get(key) or []:
+            if pc not in positive_seed_codes and pc not in set(sample_groups.get("negative") or []):
+                positive_seed_codes.append(pc)
+    ctx["semantic_profile"] = _build_semantic_profile(positive_seed_codes, set(codes))
+
     meta_by_code = _watch_meta_by_codes(codes)
     tag_counter: Counter = Counter()
     tone_counter: Counter = Counter()
@@ -270,9 +400,16 @@ def build_persona_context(*, max_products: int | None = None) -> Dict[str, Any]:
     products: List[Dict[str, Any]] = []
 
     for pc in codes:
-        entry: Dict[str, Any] = {"product_code": pc}
+        entry: Dict[str, Any] = {"product_code": pc, "sample_roles": roles_by_code.get(pc, [])}
         meta = meta_by_code.get(pc, {})
         folder_path = meta.get("folder_path") or ""
+        if meta:
+            entry["watch"] = {
+                "completion_ratio": meta.get("completion_ratio", 0),
+                "is_completed": bool(meta.get("is_completed")),
+                "liked": bool(meta.get("liked")),
+                "rating": int(meta.get("rating") or 0),
+            }
 
         grok = load_cached_grok_json_flexible(pc)
         if grok and grok.get("verification_ok") is not False and not grok.get("code_mismatch"):
@@ -280,7 +417,8 @@ def build_persona_context(*, max_products: int | None = None) -> Dict[str, Any]:
             entry["grok"] = g
             ctx["coverage"]["grok"] += 1
             for t in g.get("tags") or []:
-                tag_counter[t] += 1
+                if not _is_excluded_tag(t, excluded):
+                    tag_counter[t] += 1
             for t in g.get("tones") or []:
                 tone_counter[t] += 1
 
@@ -295,7 +433,8 @@ def build_persona_context(*, max_products: int | None = None) -> Dict[str, Any]:
                 entry["canonical"] = c
                 ctx["coverage"]["canonical"] += 1
                 for t in c.get("tags") or []:
-                    tag_counter[t] += 1
+                    if not _is_excluded_tag(t, excluded):
+                        tag_counter[t] += 1
                 for t in c.get("tones") or []:
                     tone_counter[t] += 1
         except Exception:
@@ -313,7 +452,7 @@ def build_persona_context(*, max_products: int | None = None) -> Dict[str, Any]:
             products.append(entry)
 
     ctx["samples"] = products
-    ctx["tag_counter"] = [{"name": k, "count": v} for k, v in tag_counter.most_common(15)]
+    ctx["tag_counter"] = _filtered_counter(tag_counter, excluded, 15)
     ctx["tone_counter"] = [{"name": k, "count": v} for k, v in tone_counter.most_common(8)]
 
     if cues_per_min_list:

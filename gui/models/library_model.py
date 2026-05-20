@@ -1691,13 +1691,8 @@ class LibraryModel(QObject):
                                 
                             common_genres = query_genres.intersection(res_genres)
                             # [고도화] 너무 일반적인 장르(독점, 고화질 등)는 공통 장르 분석에서 제외
-                            from javstory.config.app_config import SIMILARITY_EXCLUDED_GENRES
-                            import os
-                            env_ex = os.environ.get("JAVSTORY_SIMILARITY_EXCLUDED_GENRES", "")
-                            if env_ex.strip():
-                                excluded_set = set([x.strip() for x in env_ex.split(",") if x.strip()])
-                            else:
-                                excluded_set = SIMILARITY_EXCLUDED_GENRES
+                            from javstory.config.app_config import similarity_excluded_genres_from_env
+                            excluded_set = similarity_excluded_genres_from_env()
                             
                             common_genres = {g for g in common_genres if g not in excluded_set}
 

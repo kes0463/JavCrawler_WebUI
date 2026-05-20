@@ -12,9 +12,13 @@ GlassCard {
     property string personaType: ""
     property string summary: ""
     property string body: ""
+    property string sensualSummary: ""
     property string driftNote: ""
     property var affinities: []
+    property var turnOns: []
+    property var avoidances: []
     property var evidence: []
+    property var semanticMatches: []
     property string generatedAt: ""
     property string sourceLabel: ""
     property string coverageLabel: ""
@@ -84,12 +88,54 @@ GlassCard {
 
                 Text {
                     Layout.fillWidth: true
+                    visible: root.sensualSummary.length > 0 && root.sensualSummary !== root.summary
+                    text: root.sensualSummary
+                    font.pixelSize: Theme.fontBody
+                    color: Theme.textPrimary
+                    wrapMode: Text.Wrap
+                    lineHeight: 1.35
+                }
+
+                Text {
+                    Layout.fillWidth: true
                     visible: root.driftNote.length > 0
                     text: "📈 " + root.driftNote
                     font.pixelSize: Theme.fontCaption
                     color: Theme.textPrimary
                     wrapMode: Text.Wrap
                     font.italic: true
+                }
+
+                ColumnLayout {
+                    Layout.fillWidth: true
+                    spacing: 4
+                    visible: (root.turnOns || []).length > 0
+                    Text {
+                        text: "끌리는 포인트"
+                        font.pixelSize: Theme.fontCaption
+                        color: Theme.textMuted
+                    }
+                    Flow {
+                        Layout.fillWidth: true
+                        spacing: Theme.spacingXs
+                        Repeater {
+                            model: root.turnOns || []
+                            Rectangle {
+                                radius: Theme.radiusSm
+                                color: Qt.rgba(244/255, 114/255, 182/255, 0.14)
+                                border.color: Qt.rgba(244/255, 114/255, 182/255, 0.35)
+                                height: 24
+                                width: turnOnChip.implicitWidth + 16
+                                Text {
+                                    id: turnOnChip
+                                    anchors.centerIn: parent
+                                    text: modelData
+                                    font.pixelSize: Theme.fontCaption
+                                    color: "#f9a8d4"
+                                }
+                            }
+                        }
+                    }
                 }
 
                 Flow {
@@ -118,6 +164,27 @@ GlassCard {
                 ColumnLayout {
                     Layout.fillWidth: true
                     spacing: 4
+                    visible: (root.avoidances || []).length > 0
+                    Text {
+                        text: "덜 맞는 패턴"
+                        font.pixelSize: Theme.fontCaption
+                        color: Theme.textMuted
+                    }
+                    Repeater {
+                        model: root.avoidances || []
+                        Text {
+                            Layout.fillWidth: true
+                            text: "· " + modelData
+                            font.pixelSize: Theme.fontCaption
+                            color: Theme.textSecondary
+                            wrapMode: Text.Wrap
+                        }
+                    }
+                }
+
+                ColumnLayout {
+                    Layout.fillWidth: true
+                    spacing: 4
                     visible: (root.evidence || []).length > 0
                     Text {
                         text: "근거 (샘플 작품)"
@@ -135,6 +202,29 @@ GlassCard {
                             wrapMode: Text.Wrap
                             elide: Text.ElideRight
                             maximumLineCount: 2
+                        }
+                    }
+                }
+
+                ColumnLayout {
+                    Layout.fillWidth: true
+                    spacing: 4
+                    visible: (root.semanticMatches || []).length > 0
+                    Text {
+                        text: "의미 기반 근접작"
+                        font.pixelSize: Theme.fontCaption
+                        color: Theme.textMuted
+                    }
+                    Repeater {
+                        model: Math.min(3, (root.semanticMatches || []).length)
+                        Text {
+                            Layout.fillWidth: true
+                            property var match: (root.semanticMatches || [])[index]
+                            text: (match && match.product_code ? match.product_code : "")
+                                + (match && match.score ? (" · " + Math.round(match.score * 100) + "%") : "")
+                            font.pixelSize: Theme.fontCaption
+                            color: Theme.textSecondary
+                            wrapMode: Text.Wrap
                         }
                     }
                 }
