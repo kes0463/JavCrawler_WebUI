@@ -80,6 +80,11 @@ METADATA_CONFIG = {
 # ============================================================
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 OLLAMA_BASE_URL     = "http://localhost:11434"
+LLAMACPP_BASE_URL   = (
+    os.environ.get("JAVSTORY_LLAMACPP_URL", "").strip().rstrip("/")
+    or f"http://{(os.environ.get('JAVSTORY_LLAMACPP_HOST', '127.0.0.1') or '127.0.0.1').strip()}:"
+    f"{int(os.environ.get('JAVSTORY_LLAMACPP_PORT', '8081') or '8081')}"
+)
 GEMINI_BASE_URL     = "https://generativelanguage.googleapis.com/v1beta/openai/"
 
 # keyring 계정 및 환경변수 — Gemini API 키
@@ -244,9 +249,57 @@ def correction_llm_tier(pass_n: int) -> dict:
         }
     if pass_n == 2:
         # Pass2 모델은 설정(UI)에서 런타임에 바뀔 수 있으므로, 상수 대신 환경변수 값을 매 호출 시 읽는다.
-        model = os.environ.get("JAVSTORY_CORRECTION_PASS2_MODEL", CORRECTION_PASS2_MODEL)
-        if model.lower().startswith("gemini:"):
-            model_id_raw = model.split(":", 1)[1].strip() or "gemini-2.0-flash"
+        raw = (os.environ.get("JAVSTORY_CORRECTION_PASS2_MODEL", CORRECTION_PASS2_MODEL) or "").strip()
+        vlow = raw.lower()
+
+        if vlow.startswith("ollama:"):
+            omodel = raw.split(":", 1)[1].strip() if ":" in raw else "gemma4:e4b"
+            _mt = (os.environ.get("JAVSTORY_CORRECTION_OLLAMA_MAX_TOKENS", "") or "").strip() or "8192"
+            try:
+                max_tokens = max(512, int(_mt))
+            except ValueError:
+                max_tokens = 8192
+            return {
+                "rank": 99,
+                "name": "correction_pass2_ollama",
+                "model": omodel or "gemma4:e4b",
+                "provider": "ollama",
+                "cost_tier": "free",
+                "uncensored": True,
+                "timeout": 600,
+                "max_ctx": 32768,
+                "max_tokens": max_tokens,
+                "ollama_think": False,
+            }
+
+        if vlow.startswith("llamacpp:"):
+            preset_id = raw.split(":", 1)[1].strip() if ":" in raw else "qwen3.5-35b-a3b-uncensored"
+            from javstory.llm.llamacpp_backend import resolve_llamacpp_preset
+
+            preset = resolve_llamacpp_preset(preset_id or "qwen3.5-35b-a3b-uncensored")
+            from javstory.llm.llamacpp_backend import llamacpp_max_tokens_from_env
+
+            max_tokens = llamacpp_max_tokens_from_env(correction=True)
+            ctx_raw = (os.environ.get("JAVSTORY_LLAMACPP_CTX", "") or "").strip()
+            try:
+                max_ctx = max(512, int(ctx_raw)) if ctx_raw else preset.default_ctx
+            except ValueError:
+                max_ctx = preset.default_ctx
+            return {
+                "rank": 99,
+                "name": "correction_pass2_llamacpp",
+                "model": preset.serve_alias or preset.id,
+                "llamacpp_preset": preset.id,
+                "provider": "llamacpp",
+                "cost_tier": "free",
+                "uncensored": True,
+                "timeout": 600,
+                "max_ctx": max_ctx,
+                "max_tokens": max_tokens,
+            }
+
+        if vlow.startswith("gemini:"):
+            model_id_raw = raw.split(":", 1)[1].strip() or "gemini-2.0-flash"
             model_id = normalize_gemini_model_id(model_id_raw)
             meta = GEMINI_MODELS.get(model_id, {}) or GEMINI_MODELS.get(model_id_raw, {})
             return {
@@ -262,7 +315,7 @@ def correction_llm_tier(pass_n: int) -> dict:
         return {
             "rank": 99,
             "name": "correction_pass2_glm51",
-            "model": model,
+            "model": raw,
             "provider": "openrouter",
             "cost_tier": "high",
             "uncensored": True,
@@ -308,8 +361,18 @@ def correction_skip_enabled() -> bool:
 TRANSLATION_PROVIDER_DEFAULT = (
     os.environ.get("JAVSTORY_TRANSLATION_PROVIDER", "openrouter").strip().lower() or "openrouter"
 )
-if TRANSLATION_PROVIDER_DEFAULT not in ("openrouter", "ollama", "gemini"):
+if TRANSLATION_PROVIDER_DEFAULT not in ("openrouter", "ollama", "gemini", "llamacpp"):
     TRANSLATION_PROVIDER_DEFAULT = "openrouter"
+
+
+def llm_platform_from_env() -> str:
+    """Settings ``llmPlatform``: openai | ollama | llamacpp (openai → OpenRouter API)."""
+    raw = (os.environ.get("JAVSTORY_LLM_PLATFORM", "openai") or "openai").strip().lower()
+    if raw in ("openai", "openrouter"):
+        return "openai"
+    if raw in ("ollama", "llamacpp"):
+        return raw
+    return "openai"
 
 # OpenRouter 번역 전용 슬러그(Non-Thinking 계열; R1·reasoning 전용 아님)
 TRANSLATION_OPENROUTER_MODEL_DEFAULT = "deepseek/deepseek-v3.2"
@@ -402,10 +465,15 @@ def _ollama_translation_model() -> str:
 def _effective_translation_provider(translation_provider: str | None) -> str:
     if translation_provider and str(translation_provider).strip():
         p = str(translation_provider).strip().lower()
-        if p in ("openrouter", "ollama", "gemini"):
+        if p in ("openrouter", "ollama", "gemini", "llamacpp"):
             return p
+    platform = llm_platform_from_env()
+    if platform == "llamacpp":
+        return "llamacpp"
+    if platform == "ollama":
+        return "ollama"
     env_p = os.environ.get("JAVSTORY_TRANSLATION_PROVIDER", "").strip().lower()
-    if env_p in ("openrouter", "ollama", "gemini"):
+    if env_p in ("openrouter", "ollama", "gemini", "llamacpp"):
         return env_p
     prof = _translation_profile()
     if prof in ("budget", "qwen35", "qwen3_14", "gemma3_12", "jkv_12b"):
@@ -429,6 +497,12 @@ def translation_llm_tier_openrouter() -> dict:
         "timeout": 240 if is_glm else 120,
         "max_ctx": 196608 if is_glm else 65536,
     }
+
+
+def translation_llm_tier_llamacpp() -> dict:
+    from javstory.llm.llamacpp_backend import tier_from_llamacpp_env
+
+    return tier_from_llamacpp_env()
 
 
 def translation_llm_tier_ollama() -> dict:
@@ -493,6 +567,8 @@ def resolve_translation_llm_tier(
             base = gemini_translation_llm_tier(str(translation_tier.get("model", "")))
         elif prov == "ollama":
             base = translation_llm_tier_ollama()
+        elif prov == "llamacpp":
+            base = translation_llm_tier_llamacpp()
         else:
             base = translation_llm_tier_openrouter()
         return {**base, **translation_tier}
@@ -501,6 +577,8 @@ def resolve_translation_llm_tier(
         return gemini_translation_llm_tier()
     if prov == "ollama":
         return translation_llm_tier_ollama()
+    if prov == "llamacpp":
+        return translation_llm_tier_llamacpp()
     return translation_llm_tier_openrouter()
 
 
@@ -544,6 +622,17 @@ def harvest_translation_llm_tier() -> dict:
             "timeout": 300,
             "max_ctx": 8192,
         }
+
+    if v.startswith("llamacpp:"):
+        model = raw.split(":", 1)[1].strip() if ":" in raw else "gemma-4-e4b"
+        from javstory.llm.llamacpp_backend import resolve_llamacpp_preset
+
+        preset = resolve_llamacpp_preset(model or "gemma-4-e4b")
+        tier = translation_llm_tier_llamacpp()
+        tier["model"] = preset.serve_alias or preset.id
+        tier["llamacpp_preset"] = preset.id
+        tier["name"] = "harvest_translation_llamacpp"
+        return tier
 
     if v.startswith("openrouter:"):
         model = raw.split(":", 1)[1].strip() if ":" in raw else "deepseek/deepseek-v3.2"

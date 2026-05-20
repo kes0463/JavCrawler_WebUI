@@ -104,6 +104,12 @@ class SubtitleWorker(QThread):
                 try:
                     await orch.run_for_product(self.product_code, **kwargs)
                 finally:
+                    from javstory.llm.llamacpp_backend import cleanup_llamacpp_after_job
+
+                    cleanup_llamacpp_after_job(
+                        cancelled=not self._is_running,
+                        logger_func=_logger,
+                    )
                     await router.close()
 
             asyncio.run(_run_subtitle())

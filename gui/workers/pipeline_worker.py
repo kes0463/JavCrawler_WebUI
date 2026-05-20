@@ -66,18 +66,27 @@ class PipelineWorker(QThread):
             sk = {**self.subtitle_kwargs}
             sk["should_cancel"] = lambda: not self._is_running
 
-            result = asyncio.run(
-                run_product_pipeline_async(
-                    product_code=self.product_code,
-                    video_path=self.video_path,
-                    stages=self.stages,
-                    force=self.force,
-                    harvest_kwargs=self.harvest_kwargs,
-                    subtitle_kwargs=sk,
-                    logger_func=_logger,
-                    skip_if_outputs_exist=not self.force,
-                )
-            )
+            async def _run_pipeline():
+                try:
+                    return await run_product_pipeline_async(
+                        product_code=self.product_code,
+                        video_path=self.video_path,
+                        stages=self.stages,
+                        force=self.force,
+                        harvest_kwargs=self.harvest_kwargs,
+                        subtitle_kwargs=sk,
+                        logger_func=_logger,
+                        skip_if_outputs_exist=not self.force,
+                    )
+                finally:
+                    from javstory.llm.llamacpp_backend import cleanup_llamacpp_after_job
+
+                    cleanup_llamacpp_after_job(
+                        cancelled=not self._is_running,
+                        logger_func=_logger,
+                    )
+
+            result = asyncio.run(_run_pipeline())
 
             parts = []
             for key in ("harvest", "stt", "subtitle"):

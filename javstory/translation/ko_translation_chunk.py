@@ -211,6 +211,12 @@ def _default_chunk_durations(tier: Dict[str, Any]) -> tuple[float, float]:
     model_l = (tier.get("model") or "").lower()
     if tier.get("provider") == "ollama":
         return _ollama_chunk_params_by_model(model_l)
+    if tier.get("provider") == "llamacpp":
+        if "gemma" in model_l:
+            return 16.0, 4.0
+        if "qwen" in model_l:
+            return 16.0, 4.5
+        return 16.0, 4.0
     if tier.get("provider") == "gemini":
         try:
             from javstory.config.app_config import gemini_default_chunk_params
@@ -232,6 +238,28 @@ def _default_chunk_durations(tier: Dict[str, Any]) -> tuple[float, float]:
 
 def _effective_translation_chunk_durations(tier: Dict[str, Any]) -> tuple[float, float]:
     target_dur, overlap_dur = _default_chunk_durations(tier)
+    if tier.get("provider") == "llamacpp":
+        if os.environ.get("JAVSTORY_TRANSLATION_LLAMACPP_CHUNK_TARGET_SEC"):
+            target_dur = max(
+                5.0,
+                _env_float("JAVSTORY_TRANSLATION_LLAMACPP_CHUNK_TARGET_SEC", target_dur),
+            )
+        elif os.environ.get("JAVSTORY_CORRECTION_LLAMACPP_CHUNK_TARGET_SEC"):
+            target_dur = max(
+                5.0,
+                _env_float("JAVSTORY_CORRECTION_LLAMACPP_CHUNK_TARGET_SEC", target_dur),
+            )
+        if os.environ.get("JAVSTORY_TRANSLATION_LLAMACPP_CHUNK_OVERLAP_SEC"):
+            overlap_dur = max(
+                0.0,
+                _env_float("JAVSTORY_TRANSLATION_LLAMACPP_CHUNK_OVERLAP_SEC", overlap_dur),
+            )
+        elif os.environ.get("JAVSTORY_CORRECTION_LLAMACPP_CHUNK_OVERLAP_SEC"):
+            overlap_dur = max(
+                0.0,
+                _env_float("JAVSTORY_CORRECTION_LLAMACPP_CHUNK_OVERLAP_SEC", overlap_dur),
+            )
+        return target_dur, overlap_dur
     # 번역 전용 → 없으면 교정과 동일 env 폴백
     if os.environ.get("JAVSTORY_TRANSLATION_CHUNK_TARGET_SEC"):
         target_dur = max(5.0, _env_float("JAVSTORY_TRANSLATION_CHUNK_TARGET_SEC", target_dur))
@@ -252,6 +280,8 @@ def _translation_concurrency(tier: Dict[str, Any]) -> int:
         except ValueError:
             pass
     if tier.get("provider") == "ollama":
+        return 1
+    if tier.get("provider") == "llamacpp":
         return 1
     if tier.get("provider") == "gemini":
         try:
@@ -295,7 +325,7 @@ def _retry_translation_user_content(tier: Dict[str, Any], *, attempt: int) -> st
     """attempt 1=첫 재시도, 2=2차 재시도. Gemma는 JSON 강조, 전 티어에 한국어 단일 출력 재확인."""
     prov = str(tier.get("provider") or "").lower()
     model = str(tier.get("model") or "").lower()
-    gemma_extra = prov == "ollama" and "gemma" in model
+    gemma_extra = prov in ("ollama", "llamacpp") and "gemma" in model
     tail = RETRY_TRANSLATION_KO_MIX_APPEND
     if attempt == 1:
         base = RETRY_TRANSLATION_PROMPT
@@ -459,7 +489,8 @@ async def translate_ja_segments_to_ko_async(
         translation_provider=translation_provider,
         translation_tier=translation_tier,
     )
-    if str(tier.get("provider") or "").lower() == "ollama" and "qwen" in (tier.get("model") or "").lower():
+    prov_l = str(tier.get("provider") or "").lower()
+    if prov_l in ("ollama", "llamacpp") and "qwen" in (tier.get("model") or "").lower():
         qt = os.environ.get("JAVSTORY_TRANSLATION_QWEN_TEMPERATURE", "0.22").strip()
         try:
             tier = {**tier, "temperature": float(qt)}
@@ -501,6 +532,10 @@ async def translate_ja_segments_to_ko_async(
 
     if tier.get("provider") == "ollama":
         await before_ko_translate_work(tier["model"], logger_func=log)
+    elif tier.get("provider") == "llamacpp":
+        from javstory.llm.llamacpp_backend import llamacpp_ensure_model
+
+        await llamacpp_ensure_model(tier, logger_func=log)
 
     target_dur, overlap_dur = _effective_translation_chunk_durations(tier)
     chunks_data = _build_chunks(segments, target_dur, overlap_dur)
@@ -524,9 +559,9 @@ async def translate_ja_segments_to_ko_async(
             translation_note_actress=translation_note_actress or "",
             translation_note_work=translation_note_work or "",
         )
-    if tier.get("provider") == "ollama" and "qwen" in (tier.get("model") or "").lower():
+    if prov_l in ("ollama", "llamacpp") and "qwen" in (tier.get("model") or "").lower():
         log(
-            "[KO-TRANSLATE] 로컬 Qwen(Ollama)은 GPU·모델 크기에 따라 청크당 매우 느릴 수 있습니다. "
+            "[KO-TRANSLATE] 로컬 Qwen(llama.cpp/Ollama)은 GPU·모델 크기에 따라 청크당 매우 느릴 수 있습니다. "
             "실사용 속도가 필요하면 OpenRouter 프로필(default/keeper 등) 권장. "
             "로컬 유지 시: VRAM 여유면 JAVSTORY_TRANSLATION_CONCURRENCY=2, "
             "여전히 느리면 JAVSTORY_TRANSLATION_QWEN_MAX_TOKENS=1536 등으로 추가 하향."
@@ -668,13 +703,13 @@ async def translate_ja_segments_to_ko_async(
             ):
                 log(f"[KO-TRANSLATE] 현재 {idx + 1} / {total_chunks} — JSON 적용 실패 — 재시도")
                 use_neutral_ollama_qwen = (
-                    str(tier.get("provider") or "").lower() == "ollama"
+                    str(tier.get("provider") or "").lower() in ("ollama", "llamacpp")
                     and "qwen" in (tier.get("model") or "").lower()
                     and not _env_truthy("JAVSTORY_TRANSLATION_OLLAMA_NO_NEUTRAL_FALLBACK")
                 )
                 if use_neutral_ollama_qwen:
                     log(
-                        "[KO-TRANSLATE] Ollama+Qwen: JSON 실패 — 완화 system(JSON 전용)으로 재시도"
+                        "[KO-TRANSLATE] 로컬 Qwen: JSON 실패 — 완화 system(JSON 전용)으로 재시도"
                         + (" (거절 문구 감지)" if _looks_like_model_refusal(processed) else "")
                     )
                     base_for_retry: List[dict[str, str]] = [
@@ -768,5 +803,10 @@ async def translate_ja_segments_to_ko_async(
     finally:
         if tier.get("provider") == "ollama":
             await after_ko_translate_work(tier["model"], logger_func=log)
+        elif tier.get("provider") == "llamacpp":
+            from javstory.llm.llamacpp_backend import cleanup_llamacpp_after_job
+
+            cancelled = bool(should_cancel and should_cancel())
+            cleanup_llamacpp_after_job(cancelled=cancelled, logger_func=log)
 
     return segments

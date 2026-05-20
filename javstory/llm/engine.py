@@ -12,6 +12,7 @@ from javstory.config.app_config import (
     LLM_TIERS, LLM_BACKOFF_STAGES, LLM_REFUSAL_PATTERNS,
     OPENROUTER_BASE_URL, OLLAMA_BASE_URL, GEMINI_BASE_URL,
 )
+from javstory.llm.llamacpp_backend import llamacpp_openai_base_url
 
 
 async def ollama_unload_model(
@@ -226,6 +227,12 @@ class MultiTierRouter:
             api_key="ollama",
             timeout=httpx.Timeout(300.0, connect=5.0)
         )
+        # llama.cpp (llama-server OpenAI 호환) — TurboQuant 빌드
+        self.lc_client = AsyncOpenAI(
+            base_url=llamacpp_openai_base_url(),
+            api_key="llamacpp",
+            timeout=httpx.Timeout(600.0, connect=5.0),
+        )
         # Gemini 비동기 클라이언트 (API 키 미설정 시 None)
         import os as _os
         _gemini_key = (_os.environ.get("JAVSTORY_GEMINI_API_KEY") or "").strip()
@@ -243,7 +250,7 @@ class MultiTierRouter:
         asyncio.run() 종료 직후 백그라운드 aclose가 루프 종료와 맞물리면
         Event loop is closed 가 날 수 있어 무시합니다.
         """
-        for cl in (self.or_client, self.ol_client, self.gemini_client):
+        for cl in (self.or_client, self.ol_client, self.lc_client, self.gemini_client):
             if cl is None:
                 continue
             try:
@@ -305,6 +312,17 @@ class MultiTierRouter:
             client = self.gemini_client
         elif provider == "ollama":
             client = self.ol_client
+        elif provider == "llamacpp":
+            from javstory.llm.llamacpp_backend import ensure_llamacpp_server_ready
+
+            resolved = await asyncio.to_thread(
+                ensure_llamacpp_server_ready,
+                model_cfg,
+                logger_func=self.logger,
+            )
+            if resolved:
+                model_cfg["model"] = resolved
+            client = self.lc_client
         else:
             client = self.or_client
 
@@ -347,6 +365,10 @@ class MultiTierRouter:
                 eb["num_ctx"] = int(_raw_ctx) if _raw_ctx.isdigit() else 2048
             
             kwargs["extra_body"] = eb
+        elif provider == "llamacpp":
+            xb = model_cfg.get("llamacpp_extra_body") or {}
+            if isinstance(xb, dict) and xb:
+                kwargs["extra_body"] = dict(xb)
         elif provider == "openrouter":
             oxb = model_cfg.get("openrouter_extra_body")
             if isinstance(oxb, dict) and oxb:

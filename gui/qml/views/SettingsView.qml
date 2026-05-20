@@ -234,6 +234,10 @@ Item {
                     width: parent.width
                     spacing: Theme.spacingSm
 
+                    readonly property bool llmIsOpenAI: SettingsModel.llmPlatform === "openai"
+                    readonly property bool llmIsOllama: SettingsModel.llmPlatform === "ollama"
+                    readonly property bool llmIsLlamacpp: SettingsModel.llmPlatform === "llamacpp"
+
                     Text {
                         text: "API 설정"
                         font.pixelSize: Theme.fontSubtitle
@@ -241,8 +245,54 @@ Item {
                         color: Theme.textPrimary
                     }
 
+                    Row {
+                        spacing: Theme.spacingSm
+                        width: parent.width
+                        Text {
+                            text: "LLM 플랫폼"
+                            font.pixelSize: Theme.fontBody
+                            color: Theme.textSecondary
+                            width: 160
+                            anchors.verticalCenter: parent.verticalCenter
+                        }
+                        ComboBox {
+                            id: llmPlatformCombo
+                            width: parent.width - 180
+                            model: [
+                                { label: "OpenAI (OpenRouter)", value: "openai" },
+                                { label: "Ollama", value: "ollama" },
+                                { label: "llama.cpp + TurboQuant", value: "llamacpp" }
+                            ]
+                            textRole: "label"
+                            currentIndex: {
+                                var p = SettingsModel.llmPlatform
+                                if (p === "ollama") return 1
+                                if (p === "llamacpp") return 2
+                                return 0
+                            }
+                            onActivated: function(idx) {
+                                if (idx >= 0 && idx < model.length)
+                                    SettingsModel.llmPlatform = model[idx].value
+                            }
+                            contentItem: Text {
+                                leftPadding: Theme.spacingSm
+                                text: llmPlatformCombo.displayText
+                                color: Theme.textPrimary
+                                font.pixelSize: Theme.fontBody
+                                verticalAlignment: Text.AlignVCenter
+                            }
+                            background: Rectangle {
+                                radius: Theme.radiusSm
+                                color: Theme.surfaceLight
+                                border.color: llmPlatformCombo.activeFocus ? Theme.accentNeon : Theme.glassBorder
+                                border.width: 1
+                            }
+                        }
+                    }
+
                     // OpenRouter API 키
                     Row {
+                        visible: parent.llmIsOpenAI
                         spacing: Theme.spacingSm
                         width: parent.width
                         Text {
@@ -272,6 +322,7 @@ Item {
 
                     // Gemini API 키
                     Row {
+                        visible: parent.llmIsOpenAI
                         spacing: Theme.spacingSm
                         width: parent.width
                         Text {
@@ -301,6 +352,7 @@ Item {
 
                     // Ollama URL
                     Row {
+                        visible: parent.llmIsOllama
                         spacing: Theme.spacingSm
                         width: parent.width
                         Text {
@@ -323,6 +375,366 @@ Item {
                                 color: Theme.surfaceLight
                                 border.color: ollamaField.activeFocus ? Theme.accentNeon : Theme.glassBorder
                                 border.width: 1
+                            }
+                        }
+                    }
+
+                    // llama.cpp + TurboQuant
+                    Column {
+                        visible: parent.llmIsLlamacpp
+                        width: parent.width
+                        spacing: Theme.spacingSm
+
+                        Text {
+                            text: "TurboQuant KV (-ctk / -ctv). llama-server가 OpenAI 호환 /v1 제공."
+                            font.pixelSize: Theme.fontCaption
+                            color: Theme.textMuted
+                            wrapMode: Text.Wrap
+                            width: parent.width
+                        }
+
+                        Text {
+                            width: parent.width
+                            font.pixelSize: Theme.fontCaption
+                            color: Theme.textMuted
+                            wrapMode: Text.Wrap
+                            text: "12GB VRAM · 32GB RAM: 컨텍스트 4096, 최대 출력 3072, 프롬프트 캐시 OFF. MoE(Qwen)만 n-cpu-moe 기본 24. OpenRouter 80초 청크 env는 로컬 미적용."
+                        }
+
+                        Row {
+                            spacing: Theme.spacingSm
+                            width: parent.width
+                            Text {
+                                text: "서버 URL"
+                                width: 160
+                                font.pixelSize: Theme.fontBody
+                                color: Theme.textSecondary
+                                anchors.verticalCenter: parent.verticalCenter
+                            }
+                            TextField {
+                                id: llamacppUrlField
+                                width: parent.width - 180
+                                text: SettingsModel.llamacppUrl
+                                onTextChanged: SettingsModel.llamacppUrl = text
+                                placeholderText: "http://127.0.0.1:8081"
+                                color: Theme.textPrimary
+                                font.pixelSize: Theme.fontBody
+                                background: Rectangle {
+                                    radius: Theme.radiusSm
+                                    color: Theme.surfaceLight
+                                    border.color: llamacppUrlField.activeFocus ? Theme.accentNeon : Theme.glassBorder
+                                    border.width: 1
+                                }
+                            }
+                        }
+
+                        Row {
+                            spacing: Theme.spacingSm
+                            width: parent.width
+                            Text {
+                                text: "llama-server 경로"
+                                width: 160
+                                font.pixelSize: Theme.fontBody
+                                color: Theme.textSecondary
+                                anchors.verticalCenter: parent.verticalCenter
+                            }
+                            TextField {
+                                id: llamacppBinField
+                                width: parent.width - 260
+                                text: SettingsModel.llamacppBin
+                                onTextChanged: SettingsModel.llamacppBin = text
+                                placeholderText: "llama-server.exe"
+                                color: Theme.textPrimary
+                                font.pixelSize: Theme.fontBody
+                                background: Rectangle {
+                                    radius: Theme.radiusSm
+                                    color: Theme.surfaceLight
+                                    border.color: llamacppBinField.activeFocus ? Theme.accentNeon : Theme.glassBorder
+                                    border.width: 1
+                                }
+                            }
+                            ActionButton {
+                                text: "찾기"
+                                height: 36
+                                onClicked: {
+                                    var p = SettingsModel.browseExecutableFile()
+                                    if (p) SettingsModel.llamacppBin = p
+                                }
+                            }
+                        }
+
+                        Row {
+                            spacing: Theme.spacingSm
+                            width: parent.width
+                            Text {
+                                text: "활성 모델"
+                                width: 160
+                                font.pixelSize: Theme.fontBody
+                                color: Theme.textSecondary
+                                anchors.verticalCenter: parent.verticalCenter
+                            }
+                            ComboBox {
+                                id: llamacppModelCombo
+                                width: parent.width - 180
+                                model: [
+                                    { label: "Qwen3.5-35B-A3B (MoE)", value: "qwen3.5-35b-a3b" },
+                                    { label: "Gemma-4-E4B", value: "gemma-4-e4b" }
+                                ]
+                                textRole: "label"
+                                currentIndex: SettingsModel.llamacppModel === "gemma-4-e4b" ? 1 : 0
+                                onActivated: function(idx) {
+                                    if (idx >= 0 && idx < model.length)
+                                        SettingsModel.llamacppModel = model[idx].value
+                                }
+                                contentItem: Text {
+                                    leftPadding: Theme.spacingSm
+                                    text: llamacppModelCombo.displayText
+                                    color: Theme.textPrimary
+                                    font.pixelSize: Theme.fontBody
+                                    verticalAlignment: Text.AlignVCenter
+                                }
+                                background: Rectangle {
+                                    radius: Theme.radiusSm
+                                    color: Theme.surfaceLight
+                                    border.color: Theme.glassBorder
+                                    border.width: 1
+                                }
+                            }
+                        }
+
+                        Row {
+                            spacing: Theme.spacingSm
+                            width: parent.width
+                            Text {
+                                text: "Qwen GGUF"
+                                width: 160
+                                font.pixelSize: Theme.fontBody
+                                color: Theme.textSecondary
+                                anchors.verticalCenter: parent.verticalCenter
+                            }
+                            TextField {
+                                id: llamacppQwenField
+                                width: parent.width - 260
+                                text: SettingsModel.llamacppQwenGguf
+                                onTextChanged: SettingsModel.llamacppQwenGguf = text
+                                placeholderText: "Qwen3.5-35B-A3B.gguf"
+                                color: Theme.textPrimary
+                                font.pixelSize: Theme.fontBody
+                                background: Rectangle {
+                                    radius: Theme.radiusSm
+                                    color: Theme.surfaceLight
+                                    border.color: llamacppQwenField.activeFocus ? Theme.accentNeon : Theme.glassBorder
+                                    border.width: 1
+                                }
+                            }
+                            ActionButton {
+                                text: "찾기"
+                                height: 36
+                                onClicked: {
+                                    var p = SettingsModel.browseGgufFile()
+                                    if (p) SettingsModel.llamacppQwenGguf = p
+                                }
+                            }
+                        }
+
+                        Row {
+                            spacing: Theme.spacingSm
+                            width: parent.width
+                            Text {
+                                text: "Gemma GGUF"
+                                width: 160
+                                font.pixelSize: Theme.fontBody
+                                color: Theme.textSecondary
+                                anchors.verticalCenter: parent.verticalCenter
+                            }
+                            TextField {
+                                id: llamacppGemmaField
+                                width: parent.width - 260
+                                text: SettingsModel.llamacppGemmaGguf
+                                onTextChanged: SettingsModel.llamacppGemmaGguf = text
+                                placeholderText: "Gemma-4-E4B.gguf"
+                                color: Theme.textPrimary
+                                font.pixelSize: Theme.fontBody
+                                background: Rectangle {
+                                    radius: Theme.radiusSm
+                                    color: Theme.surfaceLight
+                                    border.color: llamacppGemmaField.activeFocus ? Theme.accentNeon : Theme.glassBorder
+                                    border.width: 1
+                                }
+                            }
+                            ActionButton {
+                                text: "찾기"
+                                height: 36
+                                onClicked: {
+                                    var p = SettingsModel.browseGgufFile()
+                                    if (p) SettingsModel.llamacppGemmaGguf = p
+                                }
+                            }
+                        }
+
+                        Row {
+                            spacing: Theme.spacingSm
+                            width: parent.width
+                            Text {
+                                text: "cache-type-k"
+                                width: 160
+                                font.pixelSize: Theme.fontBody
+                                color: Theme.textSecondary
+                                anchors.verticalCenter: parent.verticalCenter
+                            }
+                            TextField {
+                                width: 120
+                                text: SettingsModel.llamacppCacheTypeK
+                                onTextChanged: SettingsModel.llamacppCacheTypeK = text
+                                placeholderText: "turbo3"
+                                color: Theme.textPrimary
+                                font.pixelSize: Theme.fontBody
+                                background: Rectangle {
+                                    radius: Theme.radiusSm
+                                    color: Theme.surfaceLight
+                                    border.color: Theme.glassBorder
+                                    border.width: 1
+                                }
+                            }
+                            Text {
+                                text: "cache-type-v"
+                                font.pixelSize: Theme.fontBody
+                                color: Theme.textSecondary
+                                anchors.verticalCenter: parent.verticalCenter
+                            }
+                            TextField {
+                                width: 120
+                                text: SettingsModel.llamacppCacheTypeV
+                                onTextChanged: SettingsModel.llamacppCacheTypeV = text
+                                placeholderText: "q8_0"
+                                color: Theme.textPrimary
+                                font.pixelSize: Theme.fontBody
+                                background: Rectangle {
+                                    radius: Theme.radiusSm
+                                    color: Theme.surfaceLight
+                                    border.color: Theme.glassBorder
+                                    border.width: 1
+                                }
+                            }
+                        }
+
+                        Row {
+                            spacing: Theme.spacingSm
+                            width: parent.width
+                            Text {
+                                text: "컨텍스트 (-c)"
+                                width: 160
+                                font.pixelSize: Theme.fontBody
+                                color: Theme.textSecondary
+                                anchors.verticalCenter: parent.verticalCenter
+                            }
+                            TextField {
+                                width: 120
+                                text: SettingsModel.llamacppCtx
+                                onTextChanged: SettingsModel.llamacppCtx = text
+                                placeholderText: "4096"
+                                color: Theme.textPrimary
+                                font.pixelSize: Theme.fontBody
+                                background: Rectangle {
+                                    radius: Theme.radiusSm
+                                    color: Theme.surfaceLight
+                                    border.color: Theme.glassBorder
+                                    border.width: 1
+                                }
+                            }
+                            Text {
+                                text: "최대 출력 토큰"
+                                font.pixelSize: Theme.fontBody
+                                color: Theme.textSecondary
+                                anchors.verticalCenter: parent.verticalCenter
+                            }
+                            TextField {
+                                width: 100
+                                text: SettingsModel.llamacppMaxTokens
+                                onTextChanged: SettingsModel.llamacppMaxTokens = text
+                                placeholderText: "3072"
+                                color: Theme.textPrimary
+                                font.pixelSize: Theme.fontBody
+                                background: Rectangle {
+                                    radius: Theme.radiusSm
+                                    color: Theme.surfaceLight
+                                    border.color: Theme.glassBorder
+                                    border.width: 1
+                                }
+                            }
+                        }
+
+                        Row {
+                            spacing: Theme.spacingSm
+                            width: parent.width
+                            Text {
+                                text: "MoE CPU 레이어 (--n-cpu-moe)"
+                                width: 160
+                                font.pixelSize: Theme.fontBody
+                                color: Theme.textSecondary
+                                anchors.verticalCenter: parent.verticalCenter
+                            }
+                            TextField {
+                                width: 80
+                                text: SettingsModel.llamacppNCpuMoe
+                                onTextChanged: SettingsModel.llamacppNCpuMoe = text
+                                placeholderText: "24"
+                                color: Theme.textPrimary
+                                font.pixelSize: Theme.fontBody
+                                background: Rectangle {
+                                    radius: Theme.radiusSm
+                                    color: Theme.surfaceLight
+                                    border.color: Theme.glassBorder
+                                    border.width: 1
+                                }
+                            }
+                            Text {
+                                text: "Qwen MoE만 · 0=끔"
+                                font.pixelSize: Theme.fontCaption
+                                color: Theme.textMuted
+                                anchors.verticalCenter: parent.verticalCenter
+                            }
+                        }
+
+                        Row {
+                            spacing: Theme.spacingSm
+                            Text {
+                                text: "프롬프트 캐시 (속도↑ RAM 최대 ~8GB)"
+                                font.pixelSize: Theme.fontBody
+                                color: Theme.textSecondary
+                                anchors.verticalCenter: parent.verticalCenter
+                            }
+                            Switch {
+                                checked: SettingsModel.llamacppPromptCache
+                                onCheckedChanged: SettingsModel.llamacppPromptCache = checked
+                            }
+                        }
+
+                        Row {
+                            spacing: Theme.spacingSm
+                            Text {
+                                text: "작업 후 llama-server 종료 (RAM 회복)"
+                                font.pixelSize: Theme.fontBody
+                                color: Theme.textSecondary
+                                anchors.verticalCenter: parent.verticalCenter
+                            }
+                            Switch {
+                                checked: SettingsModel.llamacppStopAfterJob
+                                onCheckedChanged: SettingsModel.llamacppStopAfterJob = checked
+                            }
+                        }
+
+                        Row {
+                            spacing: Theme.spacingSm
+                            Text {
+                                text: "시작 시 llama-server 자동 실행"
+                                font.pixelSize: Theme.fontBody
+                                color: Theme.textSecondary
+                                anchors.verticalCenter: parent.verticalCenter
+                            }
+                            Switch {
+                                checked: SettingsModel.llamacppAutoStart
+                                onCheckedChanged: SettingsModel.llamacppAutoStart = checked
                             }
                         }
                     }
@@ -546,8 +958,247 @@ Item {
                 autoSize: true
 
                 Column {
+                    id: translationKoSection
                     width: parent.width
                     spacing: Theme.spacingSm
+
+                    readonly property bool llmIsOpenAI: SettingsModel.llmPlatform === "openai"
+                    readonly property bool llmIsOllama: SettingsModel.llmPlatform === "ollama"
+                    readonly property bool llmIsLlamacpp: SettingsModel.llmPlatform === "llamacpp"
+                    readonly property int koComboWidth: 280
+
+                    readonly property var profileOptsOpenAI: [
+                        { label: "DeepSeek V3.2", value: "default" },
+                        { label: "GLM 5.1", value: "keeper" },
+                        { label: "DeepSeek V3 Chat", value: "deepseek_chat" },
+                        { label: "Gemini 3 Flash", value: "gemini_3_flash" },
+                        { label: "Gemini 3 Flash Lite", value: "gemini_3_flash_lite" },
+                        { label: "Gemini 2.5 Flash", value: "gemini_25_flash" },
+                        { label: "Gemini 2.5 Pro", value: "gemini_25_pro" },
+                        { label: "Gemini 2 Flash", value: "gemini_2_flash" },
+                        { label: "Gemini 2 Flash Lite", value: "gemini_2_flash_lite" }
+                    ]
+                    readonly property var profileOptsOllama: [
+                        { label: "Gemma4 E4B (Ollama)", value: "budget" },
+                        { label: "Qwen 3.5 9B (Ollama)", value: "qwen35" },
+                        { label: "Qwen 3 14B (Ollama)", value: "qwen3_14" },
+                        { label: "Gemma 3 12B (Ollama)", value: "gemma3_12" },
+                        { label: "Gemma 2 9B (Ollama)", value: "gemma2_9" },
+                        { label: "Qwen 2.5 7B (Ollama)", value: "qwen25_7" },
+                        { label: "JKV-12B (Ollama)", value: "jkv_12b" }
+                    ]
+                    readonly property var profileOptsLlamacpp: [
+                        { label: "Qwen3.5-35B-A3B (llama.cpp)", value: "qwen35", llamacpp: "qwen3.5-35b-a3b" },
+                        { label: "Gemma-4-E4B (llama.cpp)", value: "budget", llamacpp: "gemma-4-e4b" }
+                    ]
+
+                    readonly property var harvestOptsOpenAI: [
+                        { label: "DeepSeek V3.2 (OpenRouter)", value: "openrouter:deepseek/deepseek-v3.2" },
+                        { label: "Gemini 3 Flash", value: "gemini:gemini-3.0-flash" },
+                        { label: "Gemini 3 Flash Lite", value: "gemini:gemini-3.1-flash-lite" },
+                        { label: "Gemini 2.5 Flash", value: "gemini:gemini-2.5-flash" },
+                        { label: "Gemini 2.5 Pro", value: "gemini:gemini-2.5-pro" },
+                        { label: "Gemini 2 Flash", value: "gemini:gemini-2.0-flash" },
+                        { label: "Gemini 2 Flash Lite", value: "gemini:gemini-2.0-flash-lite" }
+                    ]
+                    readonly property var harvestOptsOllama: [
+                        { label: "Gemma4:E4B (Ollama)", value: "ollama:gemma4:e4b" },
+                        { label: "Qwen2.4:14B (Ollama)", value: "ollama:qwen2.4:14b" },
+                        { label: "Gemma 3:12B (Ollama)", value: "ollama:gemma3:12b" },
+                        { label: "Gemma 2:9B (Ollama)", value: "ollama:gemma2:9b" },
+                        { label: "Qwen 2.5:7B (Ollama)", value: "ollama:qwen2.5:7b" },
+                        { label: "JKV-12B (Ollama)", value: "ollama:ja-ko-vn-jav:latest" }
+                    ]
+                    readonly property var harvestOptsLlamacpp: [
+                        { label: "Qwen3.5-35B-A3B (llama.cpp)", value: "llamacpp:qwen3.5-35b-a3b" },
+                        { label: "Gemma-4-E4B (llama.cpp)", value: "llamacpp:gemma-4-e4b" }
+                    ]
+
+                    readonly property var correctionOptsOpenAI: [
+                        { label: "Qwen 3 235B (OpenRouter)", value: "qwen/qwen3-235b-a22b-2507" },
+                        { label: "DeepSeek V3.2 (OpenRouter)", value: "deepseek/deepseek-v3.2" },
+                        { label: "GLM 5.1 (OpenRouter)", value: "z-ai/glm-5.1" },
+                        { label: "Gemini 3 Flash", value: "gemini:gemini-3.0-flash" },
+                        { label: "Gemini 3 Flash Lite", value: "gemini:gemini-3.1-flash-lite" },
+                        { label: "Gemini 2.5 Flash", value: "gemini:gemini-2.5-flash" },
+                        { label: "Gemini 2.5 Pro", value: "gemini:gemini-2.5-pro" },
+                        { label: "Gemini 2 Flash", value: "gemini:gemini-2.0-flash" },
+                        { label: "Gemini 2 Flash Lite", value: "gemini:gemini-2.0-flash-lite" }
+                    ]
+                    readonly property var correctionOptsOllama: [
+                        { label: "Gemma4 E4B (Ollama)", value: "ollama:gemma4:e4b" },
+                        { label: "Qwen 3.5 9B (Ollama)", value: "ollama:qwen3.5:9b" },
+                        { label: "Qwen 3 14B (Ollama)", value: "ollama:qwen3:14b" },
+                        { label: "Gemma 3 12B (Ollama)", value: "ollama:gemma3:12b" },
+                        { label: "Gemma 2 9B (Ollama)", value: "ollama:gemma2:9b" },
+                        { label: "Qwen 2.5 7B (Ollama)", value: "ollama:qwen2.5:7b" },
+                        { label: "JKV-12B (Ollama)", value: "ollama:ja-ko-vn-jav:latest" }
+                    ]
+                    readonly property var correctionOptsLlamacpp: [
+                        { label: "Qwen3.5-35B-A3B Uncensored (HauhauCS)", value: "llamacpp:qwen3.5-35b-a3b-uncensored", llamacpp: "qwen3.5-35b-a3b-uncensored" },
+                        { label: "Gemma-4-E4B Uncensored (HauhauCS)", value: "llamacpp:gemma-4-e4b-uncensored", llamacpp: "gemma-4-e4b-uncensored" }
+                    ]
+
+                    property var activeCorrectionOpts: llmIsLlamacpp ? correctionOptsLlamacpp
+                        : (llmIsOllama ? correctionOptsOllama : correctionOptsOpenAI)
+
+                    property var activeProfileOpts: llmIsLlamacpp ? profileOptsLlamacpp
+                        : (llmIsOllama ? profileOptsOllama : profileOptsOpenAI)
+                    property var activeHarvestOpts: llmIsLlamacpp ? harvestOptsLlamacpp
+                        : (llmIsOllama ? harvestOptsOllama : harvestOptsOpenAI)
+
+                    property string rememberedPlatform: SettingsModel.llmPlatform
+                    property var rememberedProfiles: ({})
+                    property var rememberedHarvestModels: ({})
+                    property var rememberedCorrectionModels: ({})
+
+                    function _optsForPlatform(kind, platform) {
+                        if (kind === "profile")
+                            return platform === "llamacpp" ? profileOptsLlamacpp
+                                : (platform === "ollama" ? profileOptsOllama : profileOptsOpenAI)
+                        if (kind === "harvest")
+                            return platform === "llamacpp" ? harvestOptsLlamacpp
+                                : (platform === "ollama" ? harvestOptsOllama : harvestOptsOpenAI)
+                        return platform === "llamacpp" ? correctionOptsLlamacpp
+                            : (platform === "ollama" ? correctionOptsOllama : correctionOptsOpenAI)
+                    }
+
+                    function _indexForValue(opts, val) {
+                        if (!opts || !val)
+                            return -1
+                        for (var i = 0; i < opts.length; i++) {
+                            if (opts[i].value === val)
+                                return i
+                        }
+                        return -1
+                    }
+
+                    function _displayIndexForValue(opts, val) {
+                        var idx = _indexForValue(opts, val)
+                        return idx >= 0 ? idx : 0
+                    }
+
+                    function _validOrDefault(opts, val) {
+                        if (_indexForValue(opts, val) >= 0)
+                            return val
+                        return opts && opts.length > 0 ? opts[0].value : ""
+                    }
+
+                    function _rememberPlatformValues(platform) {
+                        if (!platform)
+                            return
+                        var pOpts = _optsForPlatform("profile", platform)
+                        var hOpts = _optsForPlatform("harvest", platform)
+                        var cOpts = _optsForPlatform("correction", platform)
+                        if (_indexForValue(pOpts, SettingsModel.translationProfile) >= 0)
+                            rememberedProfiles[platform] = SettingsModel.translationProfile
+                        if (_indexForValue(hOpts, SettingsModel.harvestTranslationModel) >= 0)
+                            rememberedHarvestModels[platform] = SettingsModel.harvestTranslationModel
+                        if (_indexForValue(cOpts, SettingsModel.correctionProfile) >= 0)
+                            rememberedCorrectionModels[platform] = SettingsModel.correctionProfile
+                    }
+
+                    function _restorePlatformValues(platform) {
+                        var pOpts = _optsForPlatform("profile", platform)
+                        var hOpts = _optsForPlatform("harvest", platform)
+                        var cOpts = _optsForPlatform("correction", platform)
+                        SettingsModel.translationProfile = _validOrDefault(
+                            pOpts,
+                            rememberedProfiles[platform] || SettingsModel.translationProfile
+                        )
+                        SettingsModel.harvestTranslationModel = _validOrDefault(
+                            hOpts,
+                            rememberedHarvestModels[platform] || SettingsModel.harvestTranslationModel
+                        )
+                        SettingsModel.correctionProfile = _validOrDefault(
+                            cOpts,
+                            rememberedCorrectionModels[platform] || SettingsModel.correctionProfile
+                        )
+                        _rememberPlatformValues(platform)
+                        syncCombosToModel()
+                    }
+
+                    function initPlatformMemory() {
+                        rememberedPlatform = SettingsModel.llmPlatform
+                        _rememberPlatformValues(rememberedPlatform)
+                    }
+
+                    function _applyProfileAt(idx) {
+                        var opts = activeProfileOpts
+                        if (!opts || idx < 0 || idx >= opts.length)
+                            return
+                        var o = opts[idx]
+                        SettingsModel.translationProfile = o.value
+                        rememberedProfiles[SettingsModel.llmPlatform] = o.value
+                        if (translationKoSection.llmIsLlamacpp && o.llamacpp)
+                            SettingsModel.llamacppModel = o.llamacpp
+                    }
+
+                    function _applyHarvestAt(idx) {
+                        var opts = activeHarvestOpts
+                        if (!opts || idx < 0 || idx >= opts.length)
+                            return
+                        var o = opts[idx]
+                        SettingsModel.harvestTranslationModel = o.value
+                        rememberedHarvestModels[SettingsModel.llmPlatform] = o.value
+                        if (translationKoSection.llmIsLlamacpp) {
+                            var tail = o.value.indexOf("llamacpp:") === 0 ? o.value.split(":").slice(1).join(":") : ""
+                            if (tail)
+                                SettingsModel.llamacppModel = tail
+                        }
+                    }
+
+                    function _applyCorrectionAt(idx) {
+                        var opts = activeCorrectionOpts
+                        if (!opts || idx < 0 || idx >= opts.length)
+                            return
+                        var o = opts[idx]
+                        SettingsModel.correctionProfile = o.value
+                        rememberedCorrectionModels[SettingsModel.llmPlatform] = o.value
+                        if (translationKoSection.llmIsLlamacpp && o.llamacpp)
+                            SettingsModel.llamacppModel = o.llamacpp
+                    }
+
+                    function syncCombosToModel() {
+                        var pi = _displayIndexForValue(activeProfileOpts, SettingsModel.translationProfile)
+                        profileCombo.currentIndex = pi
+
+                        var hi = _displayIndexForValue(activeHarvestOpts, SettingsModel.harvestTranslationModel)
+                        harvestTransCombo.currentIndex = hi
+
+                        var ci = _displayIndexForValue(activeCorrectionOpts, SettingsModel.correctionProfile)
+                        correctionCombo.currentIndex = ci
+                    }
+
+                    Component.onCompleted: {
+                        initPlatformMemory()
+                        syncCombosToModel()
+                    }
+
+                    Connections {
+                        target: SettingsModel
+                        function onLlmPlatformChanged() {
+                            translationKoSection.rememberedPlatform = SettingsModel.llmPlatform
+                            translationKoSection._rememberPlatformValues(SettingsModel.llmPlatform)
+                            translationKoSection.syncCombosToModel()
+                        }
+                        function onTranslationProfileChanged() {
+                            var pi = translationKoSection._displayIndexForValue(
+                                translationKoSection.activeProfileOpts,
+                                SettingsModel.translationProfile)
+                            profileCombo.currentIndex = pi
+                        }
+                        function onHarvestTranslationModelChanged() {
+                            harvestTransCombo.currentIndex = translationKoSection._displayIndexForValue(
+                                translationKoSection.activeHarvestOpts,
+                                SettingsModel.harvestTranslationModel)
+                        }
+                        function onCorrectionProfileChanged() {
+                            correctionCombo.currentIndex = translationKoSection._displayIndexForValue(
+                                translationKoSection.activeCorrectionOpts,
+                                SettingsModel.correctionProfile)
+                        }
+                    }
 
                     Text {
                         text: "한국어 번역"
@@ -556,8 +1207,19 @@ Item {
                         color: Theme.textPrimary
                     }
 
+                    Text {
+                        width: parent.width
+                        font.pixelSize: Theme.fontCaption
+                        color: Theme.textMuted
+                        wrapMode: Text.Wrap
+                        text: translationKoSection.llmIsOpenAI ? "OpenRouter / Gemini 클라우드 번역·교정"
+                            : (translationKoSection.llmIsOllama ? "Ollama 로컬 모델로 번역·자막 교정"
+                            : "llama.cpp HauhauCS Uncensored 모델로 자막 교정 (번역은 상단 프로필)")
+                    }
+
                     Row {
                         spacing: Theme.spacingSm
+                        width: parent.width
 
                         Text {
                             text: "번역 프로필"
@@ -569,68 +1231,16 @@ Item {
 
                         ComboBox {
                             id: profileCombo
-                            model: [
-                                "DeepSeek V3.2",
-                                "GLM 5.1",
-                                "DeepSeek V3 Chat",
-                                "Gemini 3 Flash",
-                                "Gemini 3 Flash Lite",
-                                "Gemini 2.5 Flash",
-                                "Gemini 2.5 Pro",
-                                "Gemini 2 Flash",
-                                "Gemini 2 Flash Lite",
-                                "Gemma4 E4B (Local)",
-                                "Qwen 3.5 9B (Local)",
-                                "Qwen 3 14B (Local)",
-                                "Gemma 3 12B (Local)",
-                                "Gemma 2 9B (Local)",
-                                "Qwen 2.5 7B (Local)",
-                                "JKV-12B (Local)"
-                            ]
-                            width: 200
-                            currentIndex: {
-                                var m = {
-                                    "default": 0,
-                                    "keeper": 1,
-                                    "deepseek_chat": 2,
-                                    "gemini_3_flash": 3,
-                                    "gemini_3_flash_lite": 4,
-                                    "gemini_25_flash": 5,
-                                    "gemini_25_pro": 6,
-                                    "gemini_2_flash": 7,
-                                    "gemini_2_flash_lite": 8,
-                                    "budget": 9,
-                                    "qwen35": 10,
-                                    "qwen3_14": 11,
-                                    "gemma3_12": 12,
-                                    "gemma2_9": 13,
-                                    "qwen25_7": 14,
-                                    "jkv_12b": 15
-                                };
-                                return m[SettingsModel.translationProfile] !== undefined ? m[SettingsModel.translationProfile] : 0;
-                            }
-                            onCurrentIndexChanged: {
-                                var profiles = [
-                                    "default",
-                                    "keeper",
-                                    "deepseek_chat",
-                                    "gemini_3_flash",
-                                    "gemini_3_flash_lite",
-                                    "gemini_25_flash",
-                                    "gemini_25_pro",
-                                    "gemini_2_flash",
-                                    "gemini_2_flash_lite",
-                                    "budget",
-                                    "qwen35",
-                                    "qwen3_14",
-                                    "gemma3_12",
-                                    "gemma2_9",
-                                    "qwen25_7",
-                                    "jkv_12b"
-                                ];
-                                SettingsModel.translationProfile = profiles[currentIndex];
+                            width: translationKoSection.koComboWidth
+                            implicitHeight: 36
+                            textRole: "label"
+                            model: translationKoSection.activeProfileOpts
+                            onActivated: function(idx) {
+                                translationKoSection._applyProfileAt(idx)
                             }
                             background: Rectangle {
+                                implicitWidth: profileCombo.width
+                                implicitHeight: profileCombo.implicitHeight
                                 radius: Theme.radiusSm
                                 color: Theme.surfaceLight
                                 border.color: Theme.glassBorder
@@ -642,13 +1252,14 @@ Item {
                                 color: Theme.textPrimary
                                 verticalAlignment: Text.AlignVCenter
                                 leftPadding: Theme.spacingSm
+                                elide: Text.ElideRight
                             }
                         }
                     }
 
-                    // ── 크롤링(수집) 다국어 번역 모델 ─────────────────
                     Row {
                         spacing: Theme.spacingSm
+                        width: parent.width
 
                         Text {
                             text: "크롤링 번역 모델"
@@ -660,60 +1271,16 @@ Item {
 
                         ComboBox {
                             id: harvestTransCombo
-                            model: [
-                                "DeepSeek V3.2 (OpenRouter)",
-                                "Gemini 3 Flash",
-                                "Gemini 3 Flash Lite",
-                                "Gemini 2.5 Flash",
-                                "Gemini 2.5 Pro",
-                                "Gemini 2 Flash",
-                                "Gemini 2 Flash Lite",
-                                "Gemma4:E4B (Local)",
-                                "Qwen2.4:14B (Local)",
-                                "Gemma 3:12B (Local)",
-                                "Gemma 2:9B (Local)",
-                                "Qwen 2.5:7B (Local)",
-                                "JKV-12B (Local)"
-                            ]
-                            width: 220
-                            currentIndex: {
-                                var v = (SettingsModel.harvestTranslationModel || "").toLowerCase()
-                                var m = {
-                                    "openrouter:deepseek/deepseek-v3.2": 0,
-                                    "gemini:gemini-3.0-flash": 1,
-                                    "gemini:gemini-3.1-flash-lite": 2,
-                                    "gemini:gemini-2.5-flash": 3,
-                                    "gemini:gemini-2.5-pro": 4,
-                                    "gemini:gemini-2.0-flash": 5,
-                                    "gemini:gemini-2.0-flash-lite": 6,
-                                    "ollama:gemma4:e4b": 7,
-                                    "ollama:qwen2.4:14b": 8,
-                                    "ollama:gemma3:12b": 9,
-                                    "ollama:gemma2:9b": 10,
-                                    "ollama:qwen2.5:7b": 11,
-                                    "ollama:ja-ko-vn-jav:latest": 12
-                                }
-                                return m[v] !== undefined ? m[v] : 0
-                            }
-                            onCurrentIndexChanged: {
-                                var vals = [
-                                    "openrouter:deepseek/deepseek-v3.2",
-                                    "gemini:gemini-3.0-flash",
-                                    "gemini:gemini-3.1-flash-lite",
-                                    "gemini:gemini-2.5-flash",
-                                    "gemini:gemini-2.5-pro",
-                                    "gemini:gemini-2.0-flash",
-                                    "gemini:gemini-2.0-flash-lite",
-                                    "ollama:gemma4:e4b",
-                                    "ollama:qwen2.4:14b",
-                                    "ollama:gemma3:12b",
-                                    "ollama:gemma2:9b",
-                                    "ollama:qwen2.5:7b",
-                                    "ollama:ja-ko-vn-jav:latest"
-                                ]
-                                SettingsModel.harvestTranslationModel = vals[currentIndex] || vals[0]
+                            width: translationKoSection.koComboWidth
+                            implicitHeight: 36
+                            textRole: "label"
+                            model: translationKoSection.activeHarvestOpts
+                            onActivated: function(idx) {
+                                translationKoSection._applyHarvestAt(idx)
                             }
                             background: Rectangle {
+                                implicitWidth: harvestTransCombo.width
+                                implicitHeight: harvestTransCombo.implicitHeight
                                 radius: Theme.radiusSm
                                 color: Theme.surfaceLight
                                 border.color: Theme.glassBorder
@@ -725,83 +1292,59 @@ Item {
                                 color: Theme.textPrimary
                                 verticalAlignment: Text.AlignVCenter
                                 leftPadding: Theme.spacingSm
+                                elide: Text.ElideRight
                             }
                         }
                     }
 
-                    // ── [추가] 정밀 교정 LLM ──
-                    Row {
+                    Column {
+                        width: parent.width
                         spacing: Theme.spacingSm
-                        Text {
-                            text: "정밀 교정 LLM"
-                            font.pixelSize: Theme.fontBody
-                            color: Theme.textSecondary
-                            width: 160
-                            anchors.verticalCenter: parent.verticalCenter
-                        }
-                        ComboBox {
-                            id: correctionCombo
-                            model: [
-                                "Qwen 3 235B (OpenRouter)",
-                                "DeepSeek V3.2 (OpenRouter)",
-                                "GLM 5.1 (OpenRouter)",
-                                "Gemini 3 Flash",
-                                "Gemini 3 Flash Lite",
-                                "Gemini 2.5 Flash",
-                                "Gemini 2.5 Pro",
-                                "Gemini 2 Flash",
-                                "Gemini 2 Flash Lite"
-                            ]
-                            width: 200
-                            enabled: !SettingsModel.correctionSkip
-                            currentIndex: {
-                                var m = {
-                                    "qwen/qwen3-235b-a22b-2507": 0,
-                                    "deepseek/deepseek-v3.2": 1,
-                                    "z-ai/glm-5.1": 2,
-                                    "gemini:gemini-3.0-flash": 3,
-                                    "gemini:gemini-3.1-flash-lite": 4,
-                                    "gemini:gemini-2.5-flash": 5,
-                                    "gemini:gemini-2.5-pro": 6,
-                                    "gemini:gemini-2.0-flash": 7,
-                                    "gemini:gemini-2.0-flash-lite": 8
-                                };
-                                return m[SettingsModel.correctionProfile] !== undefined ? m[SettingsModel.correctionProfile] : 0;
+
+                        Row {
+                            spacing: Theme.spacingSm
+                            width: parent.width
+                            Text {
+                                text: "정밀 교정 LLM"
+                                font.pixelSize: Theme.fontBody
+                                color: Theme.textSecondary
+                                width: 160
+                                anchors.verticalCenter: parent.verticalCenter
                             }
-                            onCurrentIndexChanged: {
-                                var models = [
-                                    "qwen/qwen3-235b-a22b-2507",
-                                    "deepseek/deepseek-v3.2",
-                                    "z-ai/glm-5.1",
-                                    "gemini:gemini-3.0-flash",
-                                    "gemini:gemini-3.1-flash-lite",
-                                    "gemini:gemini-2.5-flash",
-                                    "gemini:gemini-2.5-pro",
-                                    "gemini:gemini-2.0-flash",
-                                    "gemini:gemini-2.0-flash-lite"
-                                ];
-                                SettingsModel.correctionProfile = models[currentIndex];
-                            }
-                            background: Rectangle {
-                                radius: Theme.radiusSm
-                                color: Theme.surfaceLight
-                                border.color: Theme.glassBorder
-                                border.width: 1
-                                opacity: parent.enabled ? 1.0 : 0.5
-                            }
-                            contentItem: Text {
-                                text: correctionCombo.displayText
-                                font.pixelSize: Theme.fontCaption
-                                color: Theme.textPrimary
-                                verticalAlignment: Text.AlignVCenter
-                                leftPadding: Theme.spacingSm
-                                opacity: parent.enabled ? 1.0 : 0.5
+                            ComboBox {
+                                id: correctionCombo
+                                width: translationKoSection.koComboWidth
+                                implicitHeight: 36
+                                textRole: "label"
+                                model: translationKoSection.activeCorrectionOpts
+                                enabled: !SettingsModel.correctionSkip
+                                onActivated: function(idx) {
+                                    translationKoSection._applyCorrectionAt(idx)
+                                }
+                                background: Rectangle {
+                                    implicitWidth: correctionCombo.width
+                                    implicitHeight: correctionCombo.implicitHeight
+                                    radius: Theme.radiusSm
+                                    color: Theme.surfaceLight
+                                    border.color: Theme.glassBorder
+                                    border.width: 1
+                                    opacity: parent.enabled ? 1.0 : 0.5
+                                }
+                                contentItem: Text {
+                                    text: correctionCombo.displayText
+                                    font.pixelSize: Theme.fontCaption
+                                    color: Theme.textPrimary
+                                    verticalAlignment: Text.AlignVCenter
+                                    leftPadding: Theme.spacingSm
+                                    elide: Text.ElideRight
+                                    opacity: parent.enabled ? 1.0 : 0.5
+                                }
                             }
                         }
 
                         Row {
                             spacing: Theme.spacingXs
-                            anchors.verticalCenter: parent.verticalCenter
+                            Item { width: 160 + Theme.spacingSm; height: 1 }
                             Text {
                                 text: "교정 건너뛰기"
                                 font.pixelSize: Theme.fontCaption
@@ -812,7 +1355,7 @@ Item {
                                 id: correctionSkipSwitch
                                 checked: SettingsModel.correctionSkip
                                 onToggled: SettingsModel.correctionSkip = checked
-                                
+
                                 indicator: Rectangle {
                                     implicitWidth: 32
                                     implicitHeight: 16

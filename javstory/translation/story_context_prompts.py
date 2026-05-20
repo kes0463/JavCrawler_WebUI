@@ -21,6 +21,11 @@ You receive **only a product code** in the user message. **Never** analyze, requ
 
 3. **유효한 JSON 객체 하나만** 출력한다. 마크다운·코드펜스·주석·앞뒤 설명 금지.
 
+4. **출력 언어**
+   - `title_ja`, `actress`, `maker`, `release_date`, `product_code`는 공식 표기/원문을 유지한다.
+   - `key_tags`는 영어 태그를 허용한다.
+   - 그 외 설명 필드(`title_ko`, `mismatch_reason`, `synopsis_short`, `overall_summary`, `scene_label`, `scene_summary`, `tone`)는 **반드시 한국어로 작성**한다. 일본어 웹 자료를 찾았더라도 요약·묘사는 한국어로 번역/재서술한다.
+
 ### JSON 스키마 (필드명 정확히)
 - `schema_version`: 정수 `1` (고정)
 - `product_code`: 문자열 (요청과 동일)
@@ -52,6 +57,7 @@ def render_story_context_user_message(*, product_code: str) -> str:
         "씬별 time_range: DMM·javtiful·javfas·javarchive·njav·jav.guru·javmost·javtrailers·javquick·javmobile·missav 등 **서로 다른 도메인 2~3곳 이상 교차 검증**해 챕터·수록·리뷰 등 **대략 타임라인**을 맞춘 뒤 반영하고, "
         "출처 간 시각이 다르면 총 재생 시간 안에서 공식/카탈로그 우선·합리적 조정 후 `(추정)` 표기. "
         "없을 때만 전체 길이·씬 수로 추정 구간 `HH:MM:SS ~ HH:MM:SS (추정)` (시간 미상 금지). "
+        "title_ja/공식명/영어 key_tags를 제외한 synopsis_short·overall_summary·scene_label·scene_summary·tone은 반드시 한국어로 작성. "
         "scene_summary는 현장감·긴장·직설적 묘사를 강하게, tone/key_tags는 구체적으로.\n"
     )
 

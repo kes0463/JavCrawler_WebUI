@@ -60,6 +60,13 @@ def _ollama_chunk_params_by_model(model: str) -> tuple[float, float]:
 
 def _chunk_params_for_tier(tier: Dict[str, Any]) -> tuple[float, float]:
     model = (tier.get("model") or "").lower()
+    if tier.get("provider") == "llamacpp":
+        preset = (tier.get("llamacpp_preset") or model or "").lower()
+        if "gemma" in preset:
+            return 16.0, 4.0
+        if "qwen" in preset:
+            return 16.0, 4.5
+        return 16.0, 4.5
     if tier.get("provider") == "ollama":
         return _ollama_chunk_params_by_model(model)
     if tier.get("provider") == "gemini":
@@ -94,6 +101,18 @@ def _env_float(name: str, default: float) -> float:
 def _effective_chunk_durations(tier_p2: Dict[str, Any]) -> tuple[float, float]:
     """티어 기본값 + JAVSTORY_CORRECTION_CHUNK_* 환경변수로 덮어쓰기."""
     target_dur, overlap_dur = _chunk_params_for_tier(tier_p2)
+    if tier_p2.get("provider") == "llamacpp":
+        if os.environ.get("JAVSTORY_CORRECTION_LLAMACPP_CHUNK_TARGET_SEC"):
+            target_dur = max(
+                5.0,
+                _env_float("JAVSTORY_CORRECTION_LLAMACPP_CHUNK_TARGET_SEC", target_dur),
+            )
+        if os.environ.get("JAVSTORY_CORRECTION_LLAMACPP_CHUNK_OVERLAP_SEC"):
+            overlap_dur = max(
+                0.0,
+                _env_float("JAVSTORY_CORRECTION_LLAMACPP_CHUNK_OVERLAP_SEC", overlap_dur),
+            )
+        return target_dur, overlap_dur
     if os.environ.get("JAVSTORY_CORRECTION_CHUNK_TARGET_SEC"):
         target_dur = max(5.0, _env_float("JAVSTORY_CORRECTION_CHUNK_TARGET_SEC", target_dur))
     if os.environ.get("JAVSTORY_CORRECTION_CHUNK_OVERLAP_SEC"):
@@ -123,7 +142,7 @@ def _is_glm_tier(tier: Dict[str, Any]) -> bool:
 
 
 def _default_pass2_concurrency(tier: Dict[str, Any]) -> int:
-    if tier.get("provider") == "ollama":
+    if tier.get("provider") in ("ollama", "llamacpp"):
         return 1
     if tier.get("provider") == "gemini":
         try:
@@ -633,6 +652,7 @@ async def correct_ja_segments_async(
     from javstory.harvest.database import JAVMetadata, get_db_session_ctx
 
     log = logger_func or print
+    used_llamacpp = False
 
     if enable_pass3 is None:
         enable_pass3 = os.environ.get("JAVSTORY_CORRECTION_ENABLE_PASS3", "").lower() in (
@@ -661,6 +681,9 @@ async def correct_ja_segments_async(
     else:
         tier_p2 = pass2_tier or llm_tier or correction_llm_tier(2)
 
+    if tier_p2.get("provider") == "llamacpp":
+        used_llamacpp = True
+
     ollama_models_to_unload: List[str] = []
 
     def _ensure_ollama(tier: Dict[str, Any]) -> None:
@@ -671,8 +694,15 @@ async def correct_ja_segments_async(
         if tier.get("provider") == "ollama":
             await ollama_ensure_model(tier["model"], logger_func=log)
 
+    async def _maybe_ensure_llamacpp(tier: Dict[str, Any]) -> None:
+        if tier.get("provider") == "llamacpp":
+            from javstory.llm.llamacpp_backend import llamacpp_ensure_model
+
+            await llamacpp_ensure_model(tier, logger_func=log)
+
     await _maybe_ensure_ollama(tier_p1)
     await _maybe_ensure_ollama(tier_p2)
+    await _maybe_ensure_llamacpp(tier_p2)
     _ensure_ollama(tier_p1)
     _ensure_ollama(tier_p2)
 
@@ -705,6 +735,60 @@ async def correct_ja_segments_async(
     except Exception:
         pass
 
+    try:
+        return await _correct_ja_segments_body(
+            segments=segments,
+            product_code=product_code,
+            router=router,
+            tier_p1=tier_p1,
+            tier_p2=tier_p2,
+            tier_p3=tier_p3,
+            claude_polish=claude_polish,
+            enable_pass3=enable_pass3,
+            speaker_prefix_mode=speaker_prefix_mode,
+            logger_func=logger_func,
+            should_cancel=should_cancel,
+            log=log,
+            synopsis=synopsis,
+            title_ja=title_ja,
+            correction_mode=correction_mode,
+            ref_strong=ref_strong,
+            ref_weak=ref_weak,
+            ollama_models_to_unload=ollama_models_to_unload,
+            _maybe_ensure_ollama=_maybe_ensure_ollama,
+            _ensure_ollama=_ensure_ollama,
+        )
+    finally:
+        if used_llamacpp:
+            from javstory.llm.llamacpp_backend import cleanup_llamacpp_after_job
+
+            cancelled = bool(should_cancel and should_cancel())
+            cleanup_llamacpp_after_job(cancelled=cancelled, logger_func=log)
+
+
+async def _correct_ja_segments_body(
+    *,
+    segments: List[SimpleSegment],
+    product_code: str,
+    router: Any,
+    tier_p1: Dict[str, Any],
+    tier_p2: Dict[str, Any],
+    tier_p3: Dict[str, Any],
+    claude_polish: bool,
+    enable_pass3: bool,
+    speaker_prefix_mode: str,
+    logger_func: OptionalLogger,
+    should_cancel: CancelCheck,
+    log: Callable[..., Any],
+    synopsis: str,
+    title_ja: str,
+    correction_mode: str,
+    ref_strong: str,
+    ref_weak: str,
+    ollama_models_to_unload: List[str],
+    _maybe_ensure_ollama: Any,
+    _ensure_ollama: Any,
+) -> List[SimpleSegment]:
     context_json: Dict[str, Any] = {}
     use_story_cache = os.environ.get("JAVSTORY_CORRECTION_USE_STORY_CONTEXT_CACHE", "1").strip().lower() in (
         "1",
@@ -857,9 +941,31 @@ async def correct_ja_segments_async(
             "temperature": float(os.environ.get("JAVSTORY_GLM_TEMPERATURE", "0.3")),
             "max_tokens": max(1024, glm_max_tok),
         }
+    elif (not claude_polish) and tier_p2.get("provider") == "llamacpp":
+        from javstory.llm.llamacpp_backend import llamacpp_max_tokens_from_env
+
+        ref_strong_p2 = _truncate_chars(
+            ref_strong or "",
+            int(os.environ.get("JAVSTORY_LLAMACPP_REF_STRONG_MAXCHARS", "1800")),
+        )
+        ref_weak_p2 = _truncate_chars(
+            ref_weak or "",
+            int(os.environ.get("JAVSTORY_LLAMACPP_REF_WEAK_MAXCHARS", "800")),
+        )
+        ctx_str_p2 = _truncate_chars(
+            ctx_str_p2,
+            int(os.environ.get("JAVSTORY_LLAMACPP_CTX_JSON_MAXCHARS", "1400")),
+        )
+        tier_p2 = {
+            **tier_p2,
+            "temperature": float(os.environ.get("JAVSTORY_LLAMACPP_TEMPERATURE", "0.1")),
+            "max_tokens": llamacpp_max_tokens_from_env(correction=True),
+        }
 
     target_dur, overlap_dur = _effective_chunk_durations(tier_p2)
     p2_conc = _correction_concurrency("pass2", _default_pass2_concurrency(tier_p2))
+    if tier_p2.get("provider") == "llamacpp":
+        p2_conc = 1
     p2_label = "Pass 2 (Claude 단독, 플랜 Pass2 생략)" if claude_polish else "Pass 2"
     log(
         f"[CORRECTION] [{p2_label}] 시작 — {tier_p2.get('name')} / {tier_p2.get('model')} "
@@ -934,6 +1040,8 @@ async def correct_ja_segments_async(
             )
 
         await asyncio.gather(*[_pass3_one(i, c) for i, c in enumerate(chunks_data)])
+
+    from javstory.llm.engine import ollama_unload_model
 
     for model_name in dict.fromkeys(ollama_models_to_unload):
         await ollama_unload_model(model_name, logger_func=log)

@@ -17,6 +17,21 @@ class SettingsModel(QObject):
     apiKeyChanged = Signal()
     geminiApiKeyChanged = Signal()
     ollamaUrlChanged = Signal()
+    llmPlatformChanged = Signal()
+    llamacppUrlChanged = Signal()
+    llamacppBinChanged = Signal()
+    llamacppModelsDirChanged = Signal()
+    llamacppModelChanged = Signal()
+    llamacppQwenGgufChanged = Signal()
+    llamacppGemmaGgufChanged = Signal()
+    llamacppCacheTypeKChanged = Signal()
+    llamacppCacheTypeVChanged = Signal()
+    llamacppCtxChanged = Signal()
+    llamacppMaxTokensChanged = Signal()
+    llamacppStopAfterJobChanged = Signal()
+    llamacppPromptCacheChanged = Signal()
+    llamacppNCpuMoeChanged = Signal()
+    llamacppAutoStartChanged = Signal()
     mediaRootChanged = Signal()
     whisperModelChanged = Signal()
     translationProfileChanged = Signal()
@@ -48,6 +63,101 @@ class SettingsModel(QObject):
         print("[SettingsModel] Initialization complete.")
         # 테마 리스너는 안정화될 때까지 비활성화 유지 (필요 시 주석 제거)
         # self._start_theme_listener()
+
+    @staticmethod
+    def _platform_env_suffix(platform: str) -> str:
+        p = (platform or "openai").strip().lower()
+        if p == "llamacpp":
+            return "LLAMACPP"
+        if p == "ollama":
+            return "OLLAMA"
+        return "OPENAI"
+
+    @classmethod
+    def _platform_env_value(cls, base_key: str, platform: str, default: str) -> str:
+        suffix_key = f"{base_key}_{cls._platform_env_suffix(platform)}"
+        raw = (os.environ.get(suffix_key, "") or "").strip()
+        if raw:
+            return raw
+        return (os.environ.get(base_key, default) or default).strip()
+
+    @staticmethod
+    def _platform_translation_defaults(platform: str) -> tuple[str, str, str]:
+        p = (platform or "openai").strip().lower()
+        if p == "llamacpp":
+            return (
+                "qwen35",
+                "llamacpp:qwen3.5-35b-a3b",
+                "llamacpp:qwen3.5-35b-a3b-uncensored",
+            )
+        if p == "ollama":
+            return ("budget", "ollama:gemma4:e4b", "ollama:gemma4:e4b")
+        return (
+            "default",
+            "openrouter:deepseek/deepseek-v3.2",
+            "qwen/qwen3-235b-a22b-2507",
+        )
+
+    def _cache_platform_translation_values(self, platform: str) -> None:
+        suffix = self._platform_env_suffix(platform)
+        os.environ[f"JAVSTORY_TRANSLATION_PROFILE_{suffix}"] = str(
+            getattr(self, "_translation_profile", "") or ""
+        )
+        os.environ[f"JAVSTORY_HARVEST_TRANSLATION_MODEL_{suffix}"] = str(
+            getattr(self, "_harvest_translation_model", "") or ""
+        )
+        os.environ[f"JAVSTORY_CORRECTION_PASS2_MODEL_{suffix}"] = str(
+            getattr(self, "_correction_profile", "") or ""
+        )
+
+    def _restore_platform_translation_values(self, platform: str) -> None:
+        profile_default, harvest_default, correction_default = self._platform_translation_defaults(platform)
+        suffix = self._platform_env_suffix(platform)
+        profile = (
+            os.environ.get(f"JAVSTORY_TRANSLATION_PROFILE_{suffix}", "")
+            or profile_default
+        ).strip().lower()
+        harvest = (
+            os.environ.get(f"JAVSTORY_HARVEST_TRANSLATION_MODEL_{suffix}", "")
+            or harvest_default
+        ).strip() or harvest_default
+        correction = (
+            os.environ.get(f"JAVSTORY_CORRECTION_PASS2_MODEL_{suffix}", "")
+            or correction_default
+        ).strip() or correction_default
+
+        if profile != getattr(self, "_translation_profile", ""):
+            self._translation_profile = profile
+            self.translationProfileChanged.emit()
+        if harvest != getattr(self, "_harvest_translation_model", ""):
+            self._harvest_translation_model = harvest
+            self.harvestTranslationModelChanged.emit()
+        if correction != getattr(self, "_correction_profile", ""):
+            self._correction_profile = correction
+            self.correctionProfileChanged.emit()
+
+    def _normalize_loaded_translation_values(self) -> None:
+        """기존 공통 env가 현재 플랫폼 옵션과 안 맞을 때 시작값 보정."""
+        platform = str(getattr(self, "_llm_platform", "openai") or "openai")
+        if platform != "llamacpp":
+            return
+
+        combined = " ".join(
+            [
+                str(getattr(self, "_translation_profile", "") or ""),
+                str(getattr(self, "_harvest_translation_model", "") or ""),
+                str(getattr(self, "_correction_profile", "") or ""),
+                str(getattr(self, "_llamacpp_model", "") or ""),
+            ]
+        ).lower()
+        base = "gemma-4-e4b" if ("gemma" in combined or "budget" in combined) else "qwen3.5-35b-a3b"
+        if str(getattr(self, "_translation_profile", "") or "").lower() not in ("qwen35", "budget"):
+            self._translation_profile = "budget" if base.startswith("gemma") else "qwen35"
+        if not str(getattr(self, "_harvest_translation_model", "") or "").lower().startswith("llamacpp:"):
+            self._harvest_translation_model = f"llamacpp:{base}"
+        if not str(getattr(self, "_correction_profile", "") or "").lower().startswith("llamacpp:"):
+            self._correction_profile = f"llamacpp:{base}-uncensored"
+        self._llamacpp_model = base
 
     def _start_theme_listener(self):
         """시스템 테마 변화 감지 시작."""
@@ -83,13 +193,68 @@ class SettingsModel(QObject):
                 return int(default)
         
         # 1. API 및 미디어
+        from javstory.config.app_config import LLAMACPP_BASE_URL, llm_platform_from_env
+        from javstory.llm.llamacpp_backend import (
+            LLAMACPP_DEFAULT_CTX_MOE,
+            LLAMACPP_DEFAULT_MAX_TOKENS,
+            LLAMACPP_DEFAULT_N_CPU_MOE,
+            LLAMACPP_DEFAULT_PROMPT_CACHE_MIB,
+            LLAMACPP_SERVER_DEFAULT_PROMPT_CACHE_MIB,
+        )
+
+        self._llm_platform = llm_platform_from_env()
         self._ollama_url = os.environ.get("JAVSTORY_OLLAMA_URL", OLLAMA_BASE_URL)
+        self._llamacpp_url = os.environ.get("JAVSTORY_LLAMACPP_URL", LLAMACPP_BASE_URL)
+        self._llamacpp_bin = os.environ.get("JAVSTORY_LLAMACPP_BIN", "")
+        self._llamacpp_models_dir = os.environ.get("JAVSTORY_LLAMACPP_MODELS_DIR", "")
+        self._llamacpp_model = os.environ.get("JAVSTORY_LLAMACPP_MODEL", "qwen3.5-35b-a3b")
+        self._llamacpp_qwen_gguf = os.environ.get("JAVSTORY_LLAMACPP_QWEN35_GGUF", "")
+        self._llamacpp_gemma_gguf = os.environ.get("JAVSTORY_LLAMACPP_GEMMA4_GGUF", "")
+        self._llamacpp_cache_type_k = os.environ.get("JAVSTORY_LLAMACPP_CACHE_TYPE_K", "turbo3")
+        self._llamacpp_cache_type_v = os.environ.get("JAVSTORY_LLAMACPP_CACHE_TYPE_V", "q8_0")
+        self._llamacpp_auto_start = _env_bool("JAVSTORY_LLAMACPP_AUTO_START", True)
+        _ctx_raw = (os.environ.get("JAVSTORY_LLAMACPP_CTX", "") or "").strip()
+        self._llamacpp_ctx = _ctx_raw or str(LLAMACPP_DEFAULT_CTX_MOE)
+        _mt_raw = (
+            (os.environ.get("JAVSTORY_TRANSLATION_LLAMACPP_MAX_TOKENS", "") or "").strip()
+            or (os.environ.get("JAVSTORY_CORRECTION_LLAMACPP_MAX_TOKENS", "") or "").strip()
+        )
+        self._llamacpp_max_tokens = _mt_raw or str(LLAMACPP_DEFAULT_MAX_TOKENS)
+        self._llamacpp_stop_after_job = _env_bool("JAVSTORY_LLAMACPP_STOP_AFTER_JOB", False)
+        _pcm_raw = (os.environ.get("JAVSTORY_LLAMACPP_PROMPT_CACHE_MB", "") or "").strip()
+        if _pcm_raw:
+            try:
+                _pcm = int(_pcm_raw)
+            except ValueError:
+                _pcm = LLAMACPP_DEFAULT_PROMPT_CACHE_MIB
+        else:
+            _pcm = LLAMACPP_DEFAULT_PROMPT_CACHE_MIB
+        self._llamacpp_prompt_cache = _pcm > 0
+        self._llamacpp_prompt_cache_mib = (
+            LLAMACPP_SERVER_DEFAULT_PROMPT_CACHE_MIB if self._llamacpp_prompt_cache else 0
+        )
+        _ncm = (os.environ.get("JAVSTORY_LLAMACPP_N_CPU_MOE", "") or "").strip()
+        self._llamacpp_n_cpu_moe = _ncm or str(LLAMACPP_DEFAULT_N_CPU_MOE)
         self._media_root = os.environ.get("JAVSTORY_MEDIA_ROOT", str(E_MEDIA_ROOT))
         
         # 2. 모델 및 번역
         self._whisper_model = os.environ.get("JAVSTORY_WHISPER_MODEL", "large-v2")
-        self._translation_profile = os.environ.get("JAVSTORY_TRANSLATION_PROFILE", "default").lower()
-        self._harvest_translation_model = (os.environ.get("JAVSTORY_HARVEST_TRANSLATION_MODEL", "openrouter:deepseek/deepseek-v3.2") or "").strip() or "openrouter:deepseek/deepseek-v3.2"
+        profile_default, harvest_default, correction_default = self._platform_translation_defaults(
+            self._llm_platform
+        )
+        self._translation_profile = self._platform_env_value(
+            "JAVSTORY_TRANSLATION_PROFILE",
+            self._llm_platform,
+            profile_default,
+        ).lower()
+        self._harvest_translation_model = (
+            self._platform_env_value(
+                "JAVSTORY_HARVEST_TRANSLATION_MODEL",
+                self._llm_platform,
+                harvest_default,
+            )
+            or harvest_default
+        )
         # 전역 번역 노트(공통 규칙·표기 정책 등) — Gemini 프롬프트의 {{note}}에 합쳐 주입됨
         # 파일 저장(`data/notes/translation_note_global.txt`); .env 폴백 호환.
         try:
@@ -169,7 +334,12 @@ class SettingsModel(QObject):
         QTimer.singleShot(0, self._start_cuda_detection)
 
         # 4. 교정 (Correction) 모델
-        self._correction_profile = os.environ.get("JAVSTORY_CORRECTION_PASS2_MODEL", "qwen/qwen3-235b-a22b-2507")
+        self._correction_profile = self._platform_env_value(
+            "JAVSTORY_CORRECTION_PASS2_MODEL",
+            self._llm_platform,
+            correction_default,
+        )
+        self._normalize_loaded_translation_values()
         self._correction_skip = _env_bool("JAVSTORY_CORRECTION_SKIP", False)
         
         # 5. 외관 (테마)
@@ -204,6 +374,183 @@ class SettingsModel(QObject):
     def ollamaUrl(self, v):
         if v != self._ollama_url:
             self._ollama_url = v; self.ollamaUrlChanged.emit()
+
+    @Property(str, notify=llmPlatformChanged)
+    def llmPlatform(self) -> str:
+        return str(getattr(self, "_llm_platform", "openai") or "openai")
+
+    @llmPlatform.setter  # type: ignore[attr-defined]
+    def llmPlatform(self, v: str):
+        s = (v or "openai").strip().lower()
+        if s not in ("openai", "ollama", "llamacpp"):
+            s = "openai"
+        old = getattr(self, "_llm_platform", "openai")
+        if s != old:
+            self._cache_platform_translation_values(old)
+            self._llm_platform = s
+            self._restore_platform_translation_values(s)
+            self.llmPlatformChanged.emit()
+
+    @Property(str, notify=llamacppUrlChanged)
+    def llamacppUrl(self) -> str:
+        return str(getattr(self, "_llamacpp_url", "") or "")
+
+    @llamacppUrl.setter  # type: ignore[attr-defined]
+    def llamacppUrl(self, v: str):
+        s = str(v or "")
+        if s != getattr(self, "_llamacpp_url", ""):
+            self._llamacpp_url = s
+            self.llamacppUrlChanged.emit()
+
+    @Property(str, notify=llamacppBinChanged)
+    def llamacppBin(self) -> str:
+        return str(getattr(self, "_llamacpp_bin", "") or "")
+
+    @llamacppBin.setter  # type: ignore[attr-defined]
+    def llamacppBin(self, v: str):
+        s = str(v or "")
+        if s != getattr(self, "_llamacpp_bin", ""):
+            self._llamacpp_bin = s
+            self.llamacppBinChanged.emit()
+
+    @Property(str, notify=llamacppModelsDirChanged)
+    def llamacppModelsDir(self) -> str:
+        return str(getattr(self, "_llamacpp_models_dir", "") or "")
+
+    @llamacppModelsDir.setter  # type: ignore[attr-defined]
+    def llamacppModelsDir(self, v: str):
+        s = str(v or "")
+        if s != getattr(self, "_llamacpp_models_dir", ""):
+            self._llamacpp_models_dir = s
+            self.llamacppModelsDirChanged.emit()
+
+    @Property(str, notify=llamacppModelChanged)
+    def llamacppModel(self) -> str:
+        return str(getattr(self, "_llamacpp_model", "qwen3.5-35b-a3b") or "qwen3.5-35b-a3b")
+
+    @llamacppModel.setter  # type: ignore[attr-defined]
+    def llamacppModel(self, v: str):
+        s = (v or "qwen3.5-35b-a3b").strip().lower()
+        if s not in ("qwen3.5-35b-a3b", "gemma-4-e4b"):
+            s = "qwen3.5-35b-a3b"
+        if s != getattr(self, "_llamacpp_model", ""):
+            self._llamacpp_model = s
+            self.llamacppModelChanged.emit()
+
+    @Property(str, notify=llamacppQwenGgufChanged)
+    def llamacppQwenGguf(self) -> str:
+        return str(getattr(self, "_llamacpp_qwen_gguf", "") or "")
+
+    @llamacppQwenGguf.setter  # type: ignore[attr-defined]
+    def llamacppQwenGguf(self, v: str):
+        s = str(v or "")
+        if s != getattr(self, "_llamacpp_qwen_gguf", ""):
+            self._llamacpp_qwen_gguf = s
+            self.llamacppQwenGgufChanged.emit()
+
+    @Property(str, notify=llamacppGemmaGgufChanged)
+    def llamacppGemmaGguf(self) -> str:
+        return str(getattr(self, "_llamacpp_gemma_gguf", "") or "")
+
+    @llamacppGemmaGguf.setter  # type: ignore[attr-defined]
+    def llamacppGemmaGguf(self, v: str):
+        s = str(v or "")
+        if s != getattr(self, "_llamacpp_gemma_gguf", ""):
+            self._llamacpp_gemma_gguf = s
+            self.llamacppGemmaGgufChanged.emit()
+
+    @Property(str, notify=llamacppCacheTypeKChanged)
+    def llamacppCacheTypeK(self) -> str:
+        return str(getattr(self, "_llamacpp_cache_type_k", "turbo3") or "turbo3")
+
+    @llamacppCacheTypeK.setter  # type: ignore[attr-defined]
+    def llamacppCacheTypeK(self, v: str):
+        s = (v or "turbo3").strip() or "turbo3"
+        if s != getattr(self, "_llamacpp_cache_type_k", ""):
+            self._llamacpp_cache_type_k = s
+            self.llamacppCacheTypeKChanged.emit()
+
+    @Property(str, notify=llamacppCacheTypeVChanged)
+    def llamacppCacheTypeV(self) -> str:
+        return str(getattr(self, "_llamacpp_cache_type_v", "q8_0") or "q8_0")
+
+    @llamacppCacheTypeV.setter  # type: ignore[attr-defined]
+    def llamacppCacheTypeV(self, v: str):
+        s = (v or "q8_0").strip() or "q8_0"
+        if s != getattr(self, "_llamacpp_cache_type_v", ""):
+            self._llamacpp_cache_type_v = s
+            self.llamacppCacheTypeVChanged.emit()
+
+    @Property(bool, notify=llamacppAutoStartChanged)
+    def llamacppAutoStart(self) -> bool:
+        return bool(getattr(self, "_llamacpp_auto_start", True))
+
+    @llamacppAutoStart.setter  # type: ignore[attr-defined]
+    def llamacppAutoStart(self, v: bool):
+        b = bool(v)
+        if b != bool(getattr(self, "_llamacpp_auto_start", True)):
+            self._llamacpp_auto_start = b
+            self.llamacppAutoStartChanged.emit()
+
+    @Property(str, notify=llamacppCtxChanged)
+    def llamacppCtx(self) -> str:
+        return str(getattr(self, "_llamacpp_ctx", "4096") or "4096")
+
+    @llamacppCtx.setter  # type: ignore[attr-defined]
+    def llamacppCtx(self, v: str):
+        s = (v or "").strip() or "4096"
+        if s != getattr(self, "_llamacpp_ctx", ""):
+            self._llamacpp_ctx = s
+            self.llamacppCtxChanged.emit()
+
+    @Property(str, notify=llamacppMaxTokensChanged)
+    def llamacppMaxTokens(self) -> str:
+        return str(getattr(self, "_llamacpp_max_tokens", "3072") or "3072")
+
+    @llamacppMaxTokens.setter  # type: ignore[attr-defined]
+    def llamacppMaxTokens(self, v: str):
+        s = (v or "").strip() or "3072"
+        if s != getattr(self, "_llamacpp_max_tokens", ""):
+            self._llamacpp_max_tokens = s
+            self.llamacppMaxTokensChanged.emit()
+
+    @Property(bool, notify=llamacppStopAfterJobChanged)
+    def llamacppStopAfterJob(self) -> bool:
+        return bool(getattr(self, "_llamacpp_stop_after_job", False))
+
+    @llamacppStopAfterJob.setter  # type: ignore[attr-defined]
+    def llamacppStopAfterJob(self, v: bool):
+        b = bool(v)
+        if b != bool(getattr(self, "_llamacpp_stop_after_job", False)):
+            self._llamacpp_stop_after_job = b
+            self.llamacppStopAfterJobChanged.emit()
+
+    @Property(bool, notify=llamacppPromptCacheChanged)
+    def llamacppPromptCache(self) -> bool:
+        return bool(getattr(self, "_llamacpp_prompt_cache", False))
+
+    @llamacppPromptCache.setter  # type: ignore[attr-defined]
+    def llamacppPromptCache(self, v: bool):
+        b = bool(v)
+        if b != bool(getattr(self, "_llamacpp_prompt_cache", False)):
+            from javstory.llm.llamacpp_backend import LLAMACPP_SERVER_DEFAULT_PROMPT_CACHE_MIB
+
+            self._llamacpp_prompt_cache = b
+            self._llamacpp_prompt_cache_mib = (
+                LLAMACPP_SERVER_DEFAULT_PROMPT_CACHE_MIB if b else 0
+            )
+            self.llamacppPromptCacheChanged.emit()
+
+    @Property(str, notify=llamacppNCpuMoeChanged)
+    def llamacppNCpuMoe(self) -> str:
+        return str(getattr(self, "_llamacpp_n_cpu_moe", "24") or "24")
+
+    @llamacppNCpuMoe.setter  # type: ignore[attr-defined]
+    def llamacppNCpuMoe(self, v: str):
+        s = (v or "").strip()
+        if s != getattr(self, "_llamacpp_n_cpu_moe", ""):
+            self._llamacpp_n_cpu_moe = s
+            self.llamacppNCpuMoeChanged.emit()
 
     @Property(str, notify=mediaRootChanged)
     def mediaRoot(self): return self._media_root
@@ -670,6 +1017,85 @@ class SettingsModel(QObject):
 
             if self._ollama_url.strip():
                 set_env_runtime_value("JAVSTORY_OLLAMA_URL", self._ollama_url.strip())
+
+            platform = str(getattr(self, "_llm_platform", "openai") or "openai")
+            platform_suffix = self._platform_env_suffix(platform)
+            set_env_runtime_value("JAVSTORY_LLM_PLATFORM", platform)
+            if platform == "llamacpp":
+                set_env_runtime_value("JAVSTORY_TRANSLATION_PROVIDER", "llamacpp")
+            elif platform == "ollama":
+                set_env_runtime_value("JAVSTORY_TRANSLATION_PROVIDER", "ollama")
+            elif platform == "openai":
+                set_env_runtime_value("JAVSTORY_TRANSLATION_PROVIDER", "openrouter")
+
+            if getattr(self, "_llamacpp_url", "").strip():
+                set_env_runtime_value("JAVSTORY_LLAMACPP_URL", self._llamacpp_url.strip())
+            if getattr(self, "_llamacpp_bin", "").strip():
+                set_env_runtime_value("JAVSTORY_LLAMACPP_BIN", self._llamacpp_bin.strip())
+            if getattr(self, "_llamacpp_models_dir", "").strip():
+                set_env_runtime_value("JAVSTORY_LLAMACPP_MODELS_DIR", self._llamacpp_models_dir.strip())
+            set_env_runtime_value(
+                f"JAVSTORY_TRANSLATION_PROFILE_{platform_suffix}",
+                self._translation_profile,
+            )
+            set_env_runtime_value(
+                f"JAVSTORY_HARVEST_TRANSLATION_MODEL_{platform_suffix}",
+                str(getattr(self, "_harvest_translation_model", "")),
+            )
+            set_env_runtime_value(
+                f"JAVSTORY_CORRECTION_PASS2_MODEL_{platform_suffix}",
+                self._correction_profile,
+            )
+            if platform == "llamacpp":
+                from javstory.llm.llamacpp_backend import resolve_active_llamacpp_preset_id
+
+                set_env_runtime_value("JAVSTORY_TRANSLATION_PROFILE", self._translation_profile)
+                set_env_runtime_value(
+                    "JAVSTORY_HARVEST_TRANSLATION_MODEL",
+                    str(getattr(self, "_harvest_translation_model", "llamacpp:gemma-4-e4b")),
+                )
+                set_env_runtime_value("JAVSTORY_CORRECTION_PASS2_MODEL", self._correction_profile)
+                unified = resolve_active_llamacpp_preset_id(
+                    llamacpp_model=str(getattr(self, "_llamacpp_model", "") or ""),
+                    correction_pass2=self._correction_profile,
+                    harvest_translation=str(getattr(self, "_harvest_translation_model", "") or ""),
+                    translation_profile=self._translation_profile,
+                )
+                set_env_runtime_value("JAVSTORY_LLAMACPP_MODEL", unified)
+                self._llamacpp_model = unified
+            else:
+                set_env_runtime_value("JAVSTORY_LLAMACPP_MODEL", str(getattr(self, "_llamacpp_model", "qwen3.5-35b-a3b")))
+            if getattr(self, "_llamacpp_qwen_gguf", "").strip():
+                set_env_runtime_value("JAVSTORY_LLAMACPP_QWEN35_GGUF", self._llamacpp_qwen_gguf.strip())
+            if getattr(self, "_llamacpp_gemma_gguf", "").strip():
+                set_env_runtime_value("JAVSTORY_LLAMACPP_GEMMA4_GGUF", self._llamacpp_gemma_gguf.strip())
+            set_env_runtime_value("JAVSTORY_LLAMACPP_CACHE_TYPE_K", str(getattr(self, "_llamacpp_cache_type_k", "turbo3")))
+            set_env_runtime_value("JAVSTORY_LLAMACPP_CACHE_TYPE_V", str(getattr(self, "_llamacpp_cache_type_v", "q8_0")))
+            set_env_runtime_value(
+                "JAVSTORY_LLAMACPP_AUTO_START",
+                "1" if bool(getattr(self, "_llamacpp_auto_start", True)) else "0",
+            )
+            ctx_s = str(getattr(self, "_llamacpp_ctx", "4096") or "4096").strip()
+            if ctx_s:
+                set_env_runtime_value("JAVSTORY_LLAMACPP_CTX", ctx_s)
+            mt_s = str(getattr(self, "_llamacpp_max_tokens", "3072") or "3072").strip()
+            if mt_s:
+                set_env_runtime_value("JAVSTORY_TRANSLATION_LLAMACPP_MAX_TOKENS", mt_s)
+                set_env_runtime_value("JAVSTORY_CORRECTION_LLAMACPP_MAX_TOKENS", mt_s)
+            set_env_runtime_value(
+                "JAVSTORY_LLAMACPP_STOP_AFTER_JOB",
+                "1" if bool(getattr(self, "_llamacpp_stop_after_job", False)) else "0",
+            )
+            pcm = int(getattr(self, "_llamacpp_prompt_cache_mib", 0) or 0)
+            if bool(getattr(self, "_llamacpp_prompt_cache", False)) and pcm <= 0:
+                from javstory.llm.llamacpp_backend import LLAMACPP_SERVER_DEFAULT_PROMPT_CACHE_MIB
+
+                pcm = LLAMACPP_SERVER_DEFAULT_PROMPT_CACHE_MIB
+            set_env_runtime_value("JAVSTORY_LLAMACPP_PROMPT_CACHE_MB", str(pcm))
+            ncm = str(getattr(self, "_llamacpp_n_cpu_moe", "") or "").strip()
+            if ncm:
+                set_env_runtime_value("JAVSTORY_LLAMACPP_N_CPU_MOE", ncm)
+
             self.toastMessage.emit("API 키 저장 완료", "success")
         except Exception as e:
             self.toastMessage.emit(f"API 키 저장 실패: {e}", "error")
@@ -684,9 +1110,34 @@ class SettingsModel(QObject):
     @Slot()
     def saveOptions(self):
         from javstory.config.secrets_manager import set_env_runtime_value
+        platform = str(getattr(self, "_llm_platform", "openai") or "openai")
+        platform_suffix = self._platform_env_suffix(platform)
         set_env_runtime_value("JAVSTORY_WHISPER_MODEL", self._whisper_model)
         set_env_runtime_value("JAVSTORY_TRANSLATION_PROFILE", self._translation_profile)
         set_env_runtime_value("JAVSTORY_HARVEST_TRANSLATION_MODEL", str(getattr(self, "_harvest_translation_model", "openrouter:deepseek/deepseek-v3.2")))
+        set_env_runtime_value(
+            f"JAVSTORY_TRANSLATION_PROFILE_{platform_suffix}",
+            self._translation_profile,
+        )
+        set_env_runtime_value(
+            f"JAVSTORY_HARVEST_TRANSLATION_MODEL_{platform_suffix}",
+            str(getattr(self, "_harvest_translation_model", "openrouter:deepseek/deepseek-v3.2")),
+        )
+        set_env_runtime_value(
+            f"JAVSTORY_CORRECTION_PASS2_MODEL_{platform_suffix}",
+            self._correction_profile,
+        )
+        if platform == "llamacpp":
+            from javstory.llm.llamacpp_backend import resolve_active_llamacpp_preset_id
+
+            unified = resolve_active_llamacpp_preset_id(
+                llamacpp_model=str(getattr(self, "_llamacpp_model", "") or ""),
+                correction_pass2=self._correction_profile,
+                harvest_translation=str(getattr(self, "_harvest_translation_model", "") or ""),
+                translation_profile=self._translation_profile,
+            )
+            set_env_runtime_value("JAVSTORY_LLAMACPP_MODEL", unified)
+            self._llamacpp_model = unified
         try:
             from javstory.translation.translation_notes import save_global_note
             save_global_note(str(getattr(self, "_translation_note_global", "") or ""))
@@ -850,4 +1301,29 @@ class SettingsModel(QObject):
         """QML에서 호출: 네이티브 파일 선택 대화상자."""
         from PySide6.QtWidgets import QFileDialog
         f, _ = QFileDialog.getOpenFileName(None, "파일 선택", "", "Videos (*.mp4 *.mkv *.avi *.wmv)")
+        return f or ""
+
+    @Slot(result=str)
+    def browseGgufFile(self) -> str:
+        """GGUF / llama-server 실행 파일 선택."""
+        from PySide6.QtWidgets import QFileDialog
+
+        f, _ = QFileDialog.getOpenFileName(
+            None,
+            "GGUF 또는 실행 파일 선택",
+            "",
+            "GGUF (*.gguf);;Executables (*.exe);;All (*.*)",
+        )
+        return f or ""
+
+    @Slot(result=str)
+    def browseExecutableFile(self) -> str:
+        from PySide6.QtWidgets import QFileDialog
+
+        f, _ = QFileDialog.getOpenFileName(
+            None,
+            "실행 파일 선택",
+            "",
+            "Executables (*.exe);;All (*.*)",
+        )
         return f or ""
