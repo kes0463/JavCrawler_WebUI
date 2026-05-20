@@ -35,7 +35,7 @@ Base = declarative_base()
 # - SQLite `PRAGMA user_version`에 저장한다.
 # - 테이블/컬럼 마이그레이션 로직을 변경하면 이 값을 올려서 1회 재실행되게 한다.
 # - v9+ 스키마는 Alembic only — `upgrade_alembic_head()` (init_db 이후 호출)
-_APP_DB_SCHEMA_VERSION = 8
+_APP_DB_SCHEMA_VERSION = 11
 _ALEMBIC_HEAD_REVISION = "0001_stamp_v8"
 _SCHEMA_USER_VERSION_ALEMBIC = 9
 
@@ -208,6 +208,8 @@ class WatchHistory(Base):
     rating = Column(Integer, default=0)           # 사용자 별점 (0~5)
     liked = Column(Boolean, default=False)        # 좋아요 여부
     disliked = Column(Boolean, default=False)     # 싫어요 여부
+    watch_later = Column(Boolean, default=False)  # 나중에 볼 큐 포함 여부
+    watch_later_added_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=datetime.datetime.now)
     updated_at = Column(DateTime, default=datetime.datetime.now, onupdate=datetime.datetime.now)
 
@@ -543,6 +545,7 @@ def init_db():
     _migrate_v6_actress_translation_note()
     _migrate_v7_favorite_score_history()
     _migrate_v8_watch_history_part_positions()
+    _migrate_v11_watch_later_columns()
     _ensure_indexes_and_optimize()
     try:
         with sqlite3.connect(DB_PATH) as conn:
@@ -872,6 +875,27 @@ def _migrate_v8_watch_history_part_positions():
         print(f"[DB Migration v8] 실패: {e}")
 
 
+def _migrate_v11_watch_later_columns():
+    """v11: watch_history에 나중에 볼 큐 상태 추가."""
+    import sqlite3
+
+    try:
+        with sqlite3.connect(DB_PATH) as conn:
+            cursor = conn.cursor()
+            cols = [row[1] for row in cursor.execute("PRAGMA table_info(watch_history)")]
+            migrations = [
+                ("watch_later", "ALTER TABLE watch_history ADD COLUMN watch_later INTEGER DEFAULT 0"),
+                ("watch_later_added_at", "ALTER TABLE watch_history ADD COLUMN watch_later_added_at DATETIME"),
+            ]
+            for col, stmt in migrations:
+                if col not in cols:
+                    cursor.execute(stmt)
+                    print(f"[DB Migration v11] watch_history.{col} 컬럼 추가 완료")
+            conn.commit()
+    except Exception as e:
+        print(f"[DB Migration v11] 실패: {e}")
+
+
 def _migrate_v6_actress_translation_note():
     """v6: actresses.translation_note — 배우 단위 번역 노트(페르소나/말투/표기 가이드)"""
     import sqlite3
@@ -907,6 +931,7 @@ def _ensure_indexes_and_optimize() -> None:
         # 인기도 정렬
         "CREATE INDEX IF NOT EXISTS idx_jav_favorite_score ON jav_metadata(favorite_score);",
         "CREATE INDEX IF NOT EXISTS idx_fav_hist_pc_time ON favorite_score_history(product_code, observed_at);",
+        "CREATE INDEX IF NOT EXISTS idx_watch_history_watch_later ON watch_history(watch_later, watch_later_added_at);",
     ]
     try:
         with sqlite3.connect(DB_PATH) as conn:

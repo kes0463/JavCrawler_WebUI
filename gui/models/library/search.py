@@ -139,14 +139,25 @@ def build_watch_feedback_by_base() -> dict[str, dict]:
                 base = raw
             rating = int(wh.rating or 0)
             liked = bool(wh.liked)
+            watch_later = bool(getattr(wh, "watch_later", False))
             ua = getattr(wh, "updated_at", None) or mn
+            wla = getattr(wh, "watch_later_added_at", None) or mn
 
             rec = out.get(base)
             if not rec:
-                out[base] = {"rating": rating, "liked": liked, "updated_at": ua}
+                out[base] = {
+                    "rating": rating,
+                    "liked": liked,
+                    "watch_later": watch_later,
+                    "watch_later_added_at": wla,
+                    "updated_at": ua,
+                }
             else:
                 rec["rating"] = max(int(rec.get("rating") or 0), rating)
                 rec["liked"] = bool(rec.get("liked")) or liked
+                rec["watch_later"] = bool(rec.get("watch_later")) or watch_later
+                if wla > (rec.get("watch_later_added_at") or mn):
+                    rec["watch_later_added_at"] = wla
                 if ua > (rec.get("updated_at") or mn):
                     rec["updated_at"] = ua
 
@@ -159,6 +170,14 @@ def build_watch_feedback_by_base() -> dict[str, dict]:
                     rec["feedback_iso"] = ""
             else:
                 rec["feedback_iso"] = ""
+            wla = rec.get("watch_later_added_at") or mn
+            if wla and wla != mn:
+                try:
+                    rec["watch_later_added_iso"] = wla.replace(microsecond=0).isoformat(sep=" ")
+                except Exception:
+                    rec["watch_later_added_iso"] = ""
+            else:
+                rec["watch_later_added_iso"] = ""
     except Exception:
         return {}
     return out

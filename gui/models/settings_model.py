@@ -1207,33 +1207,16 @@ class SettingsModel(QObject):
         if not model:
             model = "nomic-embed-text"
 
-        self.toastMessage.emit(
-            f"임베딩 {'강제 재생성' if force else '생성'} 시작: {pc} (model={model})",
-            "info",
-        )
+        try:
+            from gui.models.embedding_queue_model import EmbeddingQueueController
 
-        def _job():
-            try:
-                import asyncio
-                from javstory.library.embeddings.pipeline import build_and_store_embeddings_for_product
-
-                path = asyncio.run(
-                    build_and_store_embeddings_for_product(
-                        pc,
-                        model=model,
-                        include_subtitles=True,
-                        force=bool(force),
-                        logger_func=None,
-                    )
-                )
-                if path:
-                    self.toastMessage.emit(f"임베딩 완료: {pc}", "success")
-                else:
-                    self.toastMessage.emit(f"임베딩 스킵/실패: {pc}", "warning")
-            except Exception as e:
-                self.toastMessage.emit(f"임베딩 실패: {pc} ({e})", "error")
-
-        threading.Thread(target=_job, daemon=True).start()
+            q = EmbeddingQueueController.instance()
+            if not q:
+                self.toastMessage.emit("임베딩 큐 모델을 찾을 수 없습니다.", "error")
+                return
+            q.enqueue(pc, model, bool(force))
+        except Exception as e:
+            self.toastMessage.emit(f"임베딩 큐 등록 실패: {pc} ({e})", "error")
 
     @Slot(str)
     def findSimilarEmbeddings(self, productCode: str):

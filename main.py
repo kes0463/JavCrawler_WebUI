@@ -51,6 +51,9 @@ if __name__ == "__main__":
         app = QApplication(sys.argv)
         app.setApplicationName("JAVSTORY Pro")
         app.setOrganizationName("JAVSTORY")
+        from javstory.llm.llamacpp_backend import register_llamacpp_app_shutdown
+
+        register_llamacpp_app_shutdown(app)
 
         print("[System] QML 엔진 및 모델 초기화 시작...")
         from gui.app import create_engine

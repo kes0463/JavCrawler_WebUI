@@ -76,6 +76,8 @@ class LibraryDetailService:
             "last_position": 0,
             "user_rating": 0,
             "user_liked": False,
+            "watch_later": False,
+            "watch_later_added_iso": "",
             "favorite_score": int(getattr(s, "favorite_score", 0) or 0),
             "favorite_site_delta": 0,
             "favorite_site_delta_days": 0,
@@ -241,9 +243,14 @@ class LibraryDetailService:
         try:
             from gui.watch_resume import last_position_ms_for_video
             from javstory.harvest.database import WatchHistory, get_db_session_ctx
+            from javstory.utils.product_code import strip_split_suffixes
 
             with get_db_session_ctx() as sess:
                 wh = sess.query(WatchHistory).filter_by(product_code=s.product_code).first()
+                if not wh:
+                    base = strip_split_suffixes((s.product_code or "").strip().upper()) or s.product_code
+                    if base and base != s.product_code:
+                        wh = sess.query(WatchHistory).filter_by(product_code=base).first()
                 if not wh:
                     return
                 data["watch_count"] = int(wh.session_count or 0)
@@ -255,6 +262,13 @@ class LibraryDetailService:
                 )
                 data["user_rating"] = int(wh.rating or 0)
                 data["user_liked"] = bool(wh.liked)
+                data["watch_later"] = bool(getattr(wh, "watch_later", False))
+                added_at = getattr(wh, "watch_later_added_at", None)
+                if added_at:
+                    try:
+                        data["watch_later_added_iso"] = added_at.replace(microsecond=0).isoformat(sep=" ")
+                    except Exception:
+                        data["watch_later_added_iso"] = ""
         except Exception:
             pass
 

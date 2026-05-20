@@ -298,6 +298,11 @@ ApplicationWindow {
     }
 
     Connections {
+        target: EmbeddingQueue
+        function onToastMessage(msg, level) { window.showToast(msg, level); }
+    }
+
+    Connections {
         target: HarvestModel
         function onToastMessage(msg, level) { window.showToast(msg, level); }
     }

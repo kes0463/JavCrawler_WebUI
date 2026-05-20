@@ -180,7 +180,52 @@ Item {
                 }
             }
 
-            // 2. 번역 큐 (기본 펼침: 수집 워커가 메인 스레드가 아닌 곳에서 enqueue 해도
+            // 2. 임베딩 생성 큐
+            QueueAccordionCard {
+                id: embeddingCard
+                title: "임베딩 생성 큐"
+                expanded: false
+                badgeStatus: (EmbeddingQueue.runningCount > 0 || EmbeddingQueue.pendingCount > 0) ? "running" : "none"
+                badgeLabel: EmbeddingQueue.runningCount + " 실행 / " + Math.max(0, EmbeddingQueue.pendingCount - EmbeddingQueue.runningCount) + " 대기"
+                emptyText: "대기 중인 임베딩 작업이 없습니다."
+                model: EmbeddingQueue.queue
+
+                ActionButton {
+                    implicitWidth: Theme.queueHeaderButtonMinWidth
+                    Layout.preferredWidth: Theme.queueHeaderButtonMinWidth
+                    fixedWidthMode: true
+                    fixedWidth: Theme.queueHeaderButtonMinWidth
+                    text: "이어서 하기"
+                    primary: false
+                    height: 32
+                    enabled: EmbeddingQueue.pendingCount > 0
+                    onClicked: EmbeddingQueue.resume()
+                }
+                ActionButton {
+                    implicitWidth: Theme.queueHeaderButtonMinWidth
+                    Layout.preferredWidth: Theme.queueHeaderButtonMinWidth
+                    fixedWidthMode: true
+                    fixedWidth: Theme.queueHeaderButtonMinWidth
+                    text: "완료 제거"
+                    primary: false
+                    height: 32
+                    onClicked: EmbeddingQueue.clearFinished()
+                }
+
+                delegate: QueueItemRow {
+                    width: ListView.view.width
+                    codeText: model.productCode || ""
+                    titleText: (model.status === "running" ? "⏳ [임베딩 중] " : (model.status === "queued" ? "대기 · " : "")) + (model.videoName || "")
+                    progressValue: ((model.progress || 0) / 100)
+                    progressIndeterminate: (model.status === "running") && (!model.progress || model.progress < 10)
+                    progressText: model.message || model.modelName || ""
+                    highlightCode: true
+                    showDelete: true
+                    onDeleteClicked: EmbeddingQueue.removeJob(model.jobId)
+                }
+            }
+
+            // 3. 번역 큐 (기본 펼침: 수집 워커가 메인 스레드가 아닌 곳에서 enqueue 해도
             //   리스트는 메인에서만 갱신 — 펼쳤을 때 뷰포트를 넉넉히)
             QueueAccordionCard {
                 id: translationCard

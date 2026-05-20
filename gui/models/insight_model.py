@@ -49,6 +49,8 @@ class InsightModel(QObject):
     watchHeatmapChanged = Signal()
     personaCardChanged = Signal()
     personaRegeneratingChanged = Signal()
+    personaChatMessagesChanged = Signal()
+    personaChatRunningChanged = Signal()
     pipelineReportChanged = Signal()
     weeklyDigestChanged = Signal()
     allDataChanged = Signal()
@@ -59,6 +61,9 @@ class InsightModel(QObject):
     _batchDone    = Signal(object)
     _personaReady = Signal(str)
     _personaError = Signal(str)
+    _personaChatReady = Signal(object)
+    _personaChatError = Signal(str)
+    _personaChatFinished = Signal()
 
     _PHASE_CORE = "core"
     _PHASE_TRENDS = "trends"
@@ -82,12 +87,15 @@ class InsightModel(QObject):
         self._actor_collections = "{}"
         self._watch_heatmap = "{}"
         self._persona_card = "{}"
+        self._persona_chat_history: list[dict[str, str]] = self._load_persona_chat_history()
+        self._persona_chat_messages = json.dumps(self._persona_chat_history, ensure_ascii=False)
         self._pipeline_report = "{}"
         self._weekly_digest = "{}"
         self._batch_running  = False
         self._batch_progress = 0
         self._refresh_running = False
         self._persona_regenerating = False
+        self._persona_chat_running = False
         self._phase_loaded: set[str] = set()
         self._pending_full_refresh = False
         self._pending_phases: list[str] = []
@@ -97,6 +105,9 @@ class InsightModel(QObject):
         self._batchDone.connect(self._on_batch_done)
         self._personaReady.connect(self._apply_persona)
         self._personaError.connect(lambda msg: self.logMessage.emit(msg))
+        self._personaChatReady.connect(self._apply_persona_chat_message)
+        self._personaChatError.connect(self._apply_persona_chat_error)
+        self._personaChatFinished.connect(self._finish_persona_chat)
 
         QTimer.singleShot(2000, self._start_initial_load)
 
@@ -181,6 +192,14 @@ class InsightModel(QObject):
     @Property(bool, notify=personaRegeneratingChanged)
     def isPersonaRegenerating(self):
         return self._persona_regenerating
+
+    @Property(str, notify=personaChatMessagesChanged)
+    def personaChatMessages(self):
+        return self._persona_chat_messages
+
+    @Property(bool, notify=personaChatRunningChanged)
+    def isPersonaChatRunning(self):
+        return self._persona_chat_running
 
     # ── 데이터 수집 (백그라운드) ───────────────────────────────────────────
 
@@ -330,6 +349,47 @@ class InsightModel(QObject):
             self._run_phases([self._PHASE_COLLECTION], full=False)
 
     @Slot()
+    def clearPersonaChat(self) -> None:
+        self._persona_chat_history = []
+        try:
+            from javstory.persona.persona_memory import PersonaChatMemory
+
+            PersonaChatMemory().clear_recent_messages()
+        except Exception:
+            pass
+        self._sync_persona_chat_messages()
+
+    @Slot(str)
+    def sendPersonaChatMessage(self, message: str) -> None:
+        text = (message or "").strip()
+        if not text or self._persona_chat_running:
+            return
+
+        history = list(self._persona_chat_history)
+        self._append_persona_chat_message("user", text)
+        self._persona_chat_running = True
+        self.personaChatRunningChanged.emit()
+
+        def _worker():
+            try:
+                from javstory.persona.persona_chat import PersonaChatService
+
+                service = PersonaChatService()
+                response = service.chat(text, history=history)
+                content = (
+                    ((response.get("choices") or [{}])[0].get("message") or {}).get("content")
+                    if isinstance(response, dict)
+                    else ""
+                )
+                self._personaChatReady.emit({"role": "assistant", "content": content or ""})
+            except Exception as e:
+                self._personaChatError.emit(str(e))
+            finally:
+                self._personaChatFinished.emit()
+
+        threading.Thread(target=_worker, daemon=True, name="insight-persona-chat").start()
+
+    @Slot()
     def regeneratePersona(self):
         """페르소나만 강제 재생성 (Grok/캐노니컬/자막 샘플링 + Ollama)."""
         if self._persona_regenerating:
@@ -356,6 +416,45 @@ class InsightModel(QObject):
             self._persona_card = persona_json
             self.personaCardChanged.emit()
             self.allDataChanged.emit()
+
+    @staticmethod
+    def _load_persona_chat_history() -> list[dict[str, str]]:
+        try:
+            from javstory.persona.persona_memory import PersonaChatMemory
+
+            return PersonaChatMemory().load_recent_messages()
+        except Exception:
+            return []
+
+    def _sync_persona_chat_messages(self) -> None:
+        self._persona_chat_messages = json.dumps(self._persona_chat_history, ensure_ascii=False)
+        self.personaChatMessagesChanged.emit()
+
+    def _append_persona_chat_message(self, role: str, content: str, *, status: str = "ok") -> None:
+        text = (content or "").strip()
+        if not text:
+            return
+        self._persona_chat_history.append({"role": role, "content": text, "status": status})
+        self._persona_chat_history = self._persona_chat_history[-40:]
+        self._sync_persona_chat_messages()
+
+    def _apply_persona_chat_message(self, payload: object) -> None:
+        if not isinstance(payload, dict):
+            return
+        self._append_persona_chat_message(
+            str(payload.get("role") or "assistant"),
+            str(payload.get("content") or ""),
+            status=str(payload.get("status") or "ok"),
+        )
+
+    def _apply_persona_chat_error(self, msg: str) -> None:
+        self._append_persona_chat_message("assistant", msg, status="error")
+        self.logMessage.emit(f"[InsightModel] 페르소나 챗 실패: {msg}")
+
+    def _finish_persona_chat(self) -> None:
+        if self._persona_chat_running:
+            self._persona_chat_running = False
+            self.personaChatRunningChanged.emit()
 
     def _on_refresh_ready(self, payload: object) -> None:
         if not isinstance(payload, dict):

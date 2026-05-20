@@ -24,6 +24,7 @@ Rectangle {
     property bool showFavoriteDelta: false
     property int userRating: 0
     property bool userLiked: false
+    property bool watchLater: false
     property bool selectionMode: false
     property bool selected: false
 
@@ -272,6 +273,12 @@ Rectangle {
                             font.pixelSize: 13
                             height: parent.height
                             verticalAlignment: Text.AlignVCenter
+                        }
+
+                        StatusBadge {
+                            visible: root.watchLater && !root.selectionMode
+                            status: "queued"
+                            label: "나중"
                         }
 
                         Text {

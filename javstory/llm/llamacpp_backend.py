@@ -26,6 +26,7 @@ import subprocess
 import sys
 import threading
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
@@ -37,6 +38,11 @@ _lock = threading.Lock()
 _server_proc: subprocess.Popen | None = None
 _active_preset_id: Optional[str] = None
 _log_path: Optional[Path] = None
+_last_activity_at: float = time.time()
+_active_requests: int = 0
+_idle_thread: threading.Thread | None = None
+_idle_stop_event = threading.Event()
+_idle_shutdown_logged = False
 
 LoggerFunc = Callable[[str], Any]
 
@@ -73,6 +79,14 @@ def llamacpp_max_tokens_from_env(
 
 def llamacpp_stop_after_job_enabled() -> bool:
     return _env_bool("JAVSTORY_LLAMACPP_STOP_AFTER_JOB", False)
+
+
+def llamacpp_idle_shutdown_enabled() -> bool:
+    return _env_bool("JAVSTORY_LLAMACPP_IDLE_SHUTDOWN", True)
+
+
+def llamacpp_idle_timeout_sec_from_env() -> int:
+    return max(30, _env_int("JAVSTORY_LLAMACPP_IDLE_TIMEOUT_SEC", 300))
 
 
 def llamacpp_n_cpu_moe_for_spawn(*, preset_moe: bool) -> int | None:
@@ -122,6 +136,35 @@ def _env_int(key: str, default: int) -> int:
         return int((os.environ.get(key, str(default)) or "").strip())
     except ValueError:
         return default
+
+
+def touch_llamacpp_activity() -> None:
+    global _last_activity_at
+    with _lock:
+        _last_activity_at = time.time()
+
+
+def begin_llamacpp_request() -> None:
+    global _active_requests, _last_activity_at
+    with _lock:
+        _active_requests += 1
+        _last_activity_at = time.time()
+
+
+def end_llamacpp_request() -> None:
+    global _active_requests, _last_activity_at
+    with _lock:
+        _active_requests = max(0, _active_requests - 1)
+        _last_activity_at = time.time()
+
+
+@contextmanager
+def llamacpp_request_scope():
+    begin_llamacpp_request()
+    try:
+        yield
+    finally:
+        end_llamacpp_request()
 
 
 def llamacpp_base_url() -> str:
@@ -427,13 +470,47 @@ def _server_health_ok(base_url: str, timeout: float = 2.0) -> bool:
     return False
 
 
+def _ensure_idle_monitor_started(*, logger_func: LoggerFunc | None = None) -> None:
+    global _idle_thread, _idle_shutdown_logged
+    if not llamacpp_idle_shutdown_enabled():
+        return
+    with _lock:
+        if _idle_thread is not None and _idle_thread.is_alive():
+            return
+        _idle_stop_event.clear()
+        _idle_shutdown_logged = False
+
+    log = logger_func or print
+
+    def _monitor() -> None:
+        global _idle_shutdown_logged
+        while not _idle_stop_event.wait(5.0):
+            timeout = llamacpp_idle_timeout_sec_from_env()
+            with _lock:
+                proc = _server_proc
+                active = int(_active_requests or 0)
+                idle_for = time.time() - float(_last_activity_at or 0.0)
+            if proc is None or proc.poll() is not None:
+                continue
+            if active > 0 or idle_for < timeout:
+                continue
+            if not _idle_shutdown_logged:
+                log(f"[llama.cpp] {timeout}초 이상 미사용 — llama-server 자동 종료")
+                _idle_shutdown_logged = True
+            stop_llamacpp_server(logger_func=log)
+
+    _idle_thread = threading.Thread(target=_monitor, daemon=True, name="llamacpp-idle-monitor")
+    _idle_thread.start()
+
+
 def stop_llamacpp_server(*, logger_func: LoggerFunc | None = None) -> None:
-    global _server_proc, _active_preset_id
+    global _server_proc, _active_preset_id, _active_requests
     log = logger_func or print
     with _lock:
         proc = _server_proc
         _server_proc = None
         _active_preset_id = None
+        _active_requests = 0
     if proc is None:
         return
     try:
@@ -445,6 +522,16 @@ def stop_llamacpp_server(*, logger_func: LoggerFunc | None = None) -> None:
         log("[llama.cpp] llama-server 강제 종료")
     except Exception as e:
         log(f"[llama.cpp] 종료 중 오류(무시): {e}")
+
+
+def register_llamacpp_app_shutdown(app: Any, *, logger_func: LoggerFunc | None = None) -> None:
+    """Qt 앱 종료 시 llama-server를 명시적으로 정리한다."""
+    try:
+        app.aboutToQuit.connect(
+            lambda: stop_llamacpp_server(logger_func=logger_func or print)
+        )
+    except Exception:
+        pass
 
 
 def _tail_server_log(max_lines: int = 24) -> str:
@@ -531,9 +618,11 @@ def ensure_llamacpp_server_ready(
     cfg = LlamaCppServerConfig.from_env(preset)
     base = llamacpp_base_url()
 
-    global _server_proc, _active_preset_id
+    global _server_proc, _active_preset_id, _last_activity_at
     log = logger_func or print
 
+    proc_to_stop: subprocess.Popen | None = None
+    ready_alias: str | None = None
     with _lock:
         if _server_proc is not None and _server_proc.poll() is not None:
             _server_proc = None
@@ -544,10 +633,28 @@ def ensure_llamacpp_server_ready(
             and _active_preset_id == preset.id
             and _server_health_ok(base)
         ):
-            return preset.serve_alias or preset.id
+            _last_activity_at = time.time()
+            ready_alias = preset.serve_alias or preset.id
 
-        if _server_proc is not None:
-            stop_llamacpp_server(logger_func=log)
+        elif _server_proc is not None:
+            proc_to_stop = _server_proc
+            _server_proc = None
+            _active_preset_id = None
+
+    if ready_alias:
+        _ensure_idle_monitor_started(logger_func=log)
+        return ready_alias
+
+    if proc_to_stop is not None:
+        try:
+            proc_to_stop.terminate()
+            proc_to_stop.wait(timeout=15)
+            log("[llama.cpp] llama-server 종료")
+        except subprocess.TimeoutExpired:
+            proc_to_stop.kill()
+            log("[llama.cpp] llama-server 강제 종료")
+        except Exception as e:
+            log(f"[llama.cpp] 종료 중 오류(무시): {e}")
 
     argv = build_server_argv(gguf, cfg, preset)
     proc = _spawn_server(argv, logger_func=log)
@@ -566,6 +673,8 @@ def ensure_llamacpp_server_ready(
             with _lock:
                 _server_proc = proc
                 _active_preset_id = preset.id
+                _last_activity_at = time.time()
+            _ensure_idle_monitor_started(logger_func=log)
             log(f"[llama.cpp] 준비 완료 — {preset.label} @ {base}/v1")
             return preset.serve_alias or preset.id
         time.sleep(0.5)

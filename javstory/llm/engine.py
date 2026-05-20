@@ -383,7 +383,16 @@ class MultiTierRouter:
             kwargs.pop("response_format", None)
 
         try:
-            response = await client.chat.completions.create(**kwargs)
+            if provider == "llamacpp":
+                from javstory.llm.llamacpp_backend import begin_llamacpp_request, end_llamacpp_request
+
+                begin_llamacpp_request()
+                try:
+                    response = await client.chat.completions.create(**kwargs)
+                finally:
+                    end_llamacpp_request()
+            else:
+                response = await client.chat.completions.create(**kwargs)
         except TypeError as e:
             err_l = str(e).lower()
             if "extra_headers" in kwargs and (
@@ -391,11 +400,29 @@ class MultiTierRouter:
             ):
                 kwargs.pop("extra_headers", None)
                 self.logger(f"  [Router] extra_headers 미지원 — 헤더 없이 재시도: {e}")
-                response = await client.chat.completions.create(**kwargs)
+                if provider == "llamacpp":
+                    from javstory.llm.llamacpp_backend import begin_llamacpp_request, end_llamacpp_request
+
+                    begin_llamacpp_request()
+                    try:
+                        response = await client.chat.completions.create(**kwargs)
+                    finally:
+                        end_llamacpp_request()
+                else:
+                    response = await client.chat.completions.create(**kwargs)
             elif "extra_body" in kwargs and ("extra_body" in err_l or "unexpected keyword" in err_l):
                 kwargs.pop("extra_body", None)
                 self.logger(f"  [Router] extra_body 미지원 — think 옵션 없이 재시도: {e}")
-                response = await client.chat.completions.create(**kwargs)
+                if provider == "llamacpp":
+                    from javstory.llm.llamacpp_backend import begin_llamacpp_request, end_llamacpp_request
+
+                    begin_llamacpp_request()
+                    try:
+                        response = await client.chat.completions.create(**kwargs)
+                    finally:
+                        end_llamacpp_request()
+                else:
+                    response = await client.chat.completions.create(**kwargs)
             else:
                 raise
         except Exception as e:

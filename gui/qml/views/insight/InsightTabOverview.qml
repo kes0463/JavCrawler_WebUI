@@ -14,6 +14,8 @@ ColumnLayout {
     property var tasteData: ({})
     property var persona: ({})
     property var personaCoverageLabel: function() { return "" }
+    property real viewportHeight: 0
+    readonly property int profileCardHeight: 260
 
     property bool digestExpanded: false
     readonly property var digestLines: tab.weeklyDigest.lines || []
@@ -96,12 +98,16 @@ ColumnLayout {
 
     RowLayout {
         Layout.fillWidth: true
+        Layout.fillHeight: false
+        Layout.preferredHeight: tab.profileCardHeight
         Layout.bottomMargin: Theme.spacingLg
         spacing: Theme.spacingMd
 
         TasteProfileCard {
             Layout.fillWidth: true
             Layout.preferredWidth: 1
+            Layout.fillHeight: false
+            Layout.preferredHeight: tab.profileCardHeight
             Layout.alignment: Qt.AlignTop
             profile: tab.tasteData
         }
@@ -109,7 +115,8 @@ ColumnLayout {
         PersonaCard {
             Layout.fillWidth: true
             Layout.preferredWidth: 1
-            Layout.fillHeight: true
+            Layout.fillHeight: false
+            Layout.preferredHeight: tab.profileCardHeight
             Layout.alignment: Qt.AlignTop
             title: tab.persona.title || "나의 취향 페르소나"
             personaType: tab.persona.persona_type || ""
@@ -130,6 +137,20 @@ ColumnLayout {
             regenerating: InsightModel.isPersonaRegenerating
             onRegenerateRequested: InsightModel.regeneratePersona()
         }
+    }
+
+    PersonaChatWidget {
+        Layout.fillWidth: true
+        Layout.fillHeight: true
+        Layout.minimumHeight: 260
+        Layout.preferredHeight: 360
+        Layout.bottomMargin: Theme.spacingLg
+        messagesJson: InsightModel.personaChatMessages
+        running: InsightModel.isPersonaChatRunning
+        onSendRequested: function(message) {
+            InsightModel.sendPersonaChatMessage(message)
+        }
+        onClearRequested: InsightModel.clearPersonaChat()
     }
 
     Item { Layout.preferredHeight: Theme.spacingLg }

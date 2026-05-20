@@ -181,6 +181,8 @@ class LibrarySortFilter:
                     "favorite_delta": favorite_delta,
                     "user_rating": int(wm.get("rating") or 0),
                     "user_liked": bool(wm.get("liked")),
+                    "watch_later": bool(wm.get("watch_later")),
+                    "watch_later_added_iso": str(wm.get("watch_later_added_iso") or ""),
                     "user_feedback_iso": str(wm.get("feedback_iso") or ""),
                     "has_story_context": any(
                         bool(getattr(x, "has_story_context", False)) for x in lst
@@ -198,6 +200,8 @@ class LibrarySortFilter:
             merged_items = [it for it in merged_items if bool(it.get("user_liked"))]
         if fm == 7:
             merged_items = [it for it in merged_items if bool(it.get("has_story_context"))]
+        if fm == 8:
+            merged_items = [it for it in merged_items if bool(it.get("watch_later"))]
 
         cls._sort_merged_items(merged_items, mode)
         return merged_items
@@ -263,4 +267,13 @@ class LibrarySortFilter:
                     -int(it.get("user_rating") or 0),
                     it.get("product_code", ""),
                 ),
+            )
+        elif mode == 14:
+            merged_items.sort(
+                key=lambda it: (
+                    bool(it.get("watch_later")),
+                    str(it.get("watch_later_added_iso") or ""),
+                    it.get("product_code", ""),
+                ),
+                reverse=True,
             )

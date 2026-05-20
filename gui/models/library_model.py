@@ -117,6 +117,8 @@ class WorkListModel(QAbstractListModel):
     FavoriteDeltaRole = Qt.ItemDataRole.UserRole + 18
     UserRatingRole = Qt.ItemDataRole.UserRole + 19
     UserLikedRole = Qt.ItemDataRole.UserRole + 20
+    WatchLaterRole = Qt.ItemDataRole.UserRole + 21
+    WatchLaterAddedAtRole = Qt.ItemDataRole.UserRole + 22
 
     _ROLE_MAP = {
         ProductCodeRole: "product_code",
@@ -139,6 +141,8 @@ class WorkListModel(QAbstractListModel):
         FavoriteDeltaRole: "favorite_delta",
         UserRatingRole: "user_rating",
         UserLikedRole: "user_liked",
+        WatchLaterRole: "watch_later",
+        WatchLaterAddedAtRole: "watch_later_added_iso",
     }
 
     def __init__(self, parent=None):
@@ -167,6 +171,8 @@ class WorkListModel(QAbstractListModel):
             self.FavoriteDeltaRole: b"favoriteDelta",
             self.UserRatingRole: b"userRating",
             self.UserLikedRole: b"userLiked",
+            self.WatchLaterRole: b"watchLater",
+            self.WatchLaterAddedAtRole: b"watchLaterAddedAt",
         }
 
     def rowCount(self, parent=QModelIndex()):
@@ -300,6 +306,14 @@ class LibraryDetailObject(QObject):
     @Property(bool, notify=changed)
     def userLiked(self) -> bool:
         return bool(self._get("user_liked", False))
+
+    @Property(bool, notify=changed)
+    def watchLater(self) -> bool:
+        return bool(self._get("watch_later", False))
+
+    @Property(str, notify=changed)
+    def watchLaterAddedAt(self) -> str:
+        return str(self._get("watch_later_added_iso", "") or "")
 
     @Property(bool, notify=changed)
     def hasFavoriteSiteDelta(self) -> bool:
@@ -1339,6 +1353,48 @@ class LibraryModel(QObject):
                 self._rebuild()
         except Exception as e:
             _ = e
+
+    @Slot(str, result=bool)
+    def toggleWatchLater(self, product_code: str) -> bool:
+        pc_raw = (product_code or "").strip().upper()
+        if not pc_raw:
+            self.toastMessage.emit("품번이 없습니다.", "warning")
+            return False
+        try:
+            from javstory.harvest.database import WatchHistory, get_db_session_ctx
+            from javstory.utils.product_code import strip_split_suffixes
+
+            pc = strip_split_suffixes(pc_raw) or pc_raw
+            now = datetime.datetime.now()
+            with get_db_session_ctx() as session:
+                history = session.query(WatchHistory).filter_by(product_code=pc).first()
+                if not history:
+                    history = WatchHistory(product_code=pc, created_at=now)
+                    session.add(history)
+
+                new_value = not bool(getattr(history, "watch_later", False))
+                history.watch_later = new_value
+                history.watch_later_added_at = now if new_value else None
+                history.updated_at = now
+                session.commit()
+
+            current_pc = (self._detail.productCode or "").strip().upper()
+            try:
+                current_base = strip_split_suffixes(current_pc) or current_pc
+            except Exception:
+                current_base = current_pc
+            if current_pc and current_base == pc:
+                self.loadDetail(current_pc)
+
+            self._rebuild()
+            self.toastMessage.emit(
+                f"{pc}: 나중에 볼에 추가했습니다." if new_value else f"{pc}: 나중에 볼에서 해제했습니다.",
+                "success",
+            )
+            return True
+        except Exception as e:
+            self.toastMessage.emit(f"나중에 볼 변경 실패: {e}", "error")
+            return False
 
     def _set_detail_editing(self, v: bool) -> None:
         if bool(v) != self._detail_editing:
@@ -2468,40 +2524,16 @@ class LibraryModel(QObject):
             return
 
         model = (os.environ.get("JAVSTORY_EMBEDDINGS_OLLAMA_MODEL", "") or "").strip() or "nomic-embed-text"
-        self.toastMessage.emit(f"[임베딩] {len(pcs)}개 생성 시작 (model={model})", "info")
+        try:
+            from gui.models.embedding_queue_model import EmbeddingQueueController
 
-        def _job():
-            ok = 0
-            skipped = 0
-            fail = 0
-            try:
-                import asyncio
-                from javstory.library.embeddings.pipeline import build_and_store_embeddings_for_product
-
-                for pc in pcs:
-                    try:
-                        path = asyncio.run(
-                            build_and_store_embeddings_for_product(
-                                pc,
-                                model=model,
-                                include_subtitles=True,
-                                force=bool(force),
-                                logger_func=None,
-                            )
-                        )
-                        if path:
-                            ok += 1
-                        else:
-                            skipped += 1
-                    except Exception:
-                        fail += 1
-            finally:
-                self.toastMessage.emit(
-                    f"[임베딩] 완료: 생성 {ok} / 스킵 {skipped} / 실패 {fail} (model={model})",
-                    "success" if fail == 0 else "warning",
-                )
-
-        threading.Thread(target=_job, daemon=True).start()
+            q = EmbeddingQueueController.instance()
+            if not q:
+                self.toastMessage.emit("임베딩 큐 모델을 찾을 수 없습니다.", "error")
+                return
+            q.enqueueMany(pcs, model, bool(force))
+        except Exception as e:
+            self.toastMessage.emit(f"[임베딩] 큐 등록 실패: {e}", "error")
 
     @Slot(result="QVariantList")
     def availableReleaseMonths(self):

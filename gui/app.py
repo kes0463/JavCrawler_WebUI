@@ -344,6 +344,7 @@ def create_engine(app) -> QQmlApplicationEngine:
     from gui.models.preview_queue_model import PreviewQueueController
     from gui.models.montage_queue_model import MontageQueueController
     from gui.models.mosaic_queue_model import MosaicQueueController
+    from gui.models.embedding_queue_model import EmbeddingQueueController
     from gui.models.settings_model import SettingsModel
     from gui.models.folder_explorer_model import FolderExplorerModel
     from gui.models.translation_queue_model import TranslationQueueController
@@ -369,6 +370,8 @@ def create_engine(app) -> QQmlApplicationEngine:
     montage_queue = MontageQueueController(parent=app)
     print("[UI] Initializing MosaicQueueController...")
     mosaic_queue = MosaicQueueController(parent=app)
+    print("[UI] Initializing EmbeddingQueueController...")
+    embedding_queue = EmbeddingQueueController(parent=app)
     print("[UI] Initializing SettingsModel...")
     settings = SettingsModel(parent=app)
     print("[UI] Initializing FolderExplorerModel...")
@@ -394,6 +397,7 @@ def create_engine(app) -> QQmlApplicationEngine:
     ctx.setContextProperty("PreviewQueue", preview_queue)
     ctx.setContextProperty("MontageQueue", montage_queue)
     ctx.setContextProperty("MosaicQueue", mosaic_queue)
+    ctx.setContextProperty("EmbeddingQueue", embedding_queue)
     ctx.setContextProperty("SettingsModel", settings)
     ctx.setContextProperty("FolderExplorerModel", folder_explorer)
     ctx.setContextProperty("TranslationQueue", translation_queue)
@@ -448,6 +452,12 @@ def create_engine(app) -> QQmlApplicationEngine:
     except Exception:
         pass
 
+    # 임베딩 큐 로그를 실행 터미널에 출력
+    try:
+        embedding_queue.logMessage.connect(lambda msg: print(msg, flush=True))
+    except Exception:
+        pass
+
     # 모자이크 제거 큐 로그를 실행 터미널에 출력
     try:
         _mosaic_renderer = _MosaicConsoleRenderer()
@@ -492,6 +502,7 @@ def create_engine(app) -> QQmlApplicationEngine:
             preview_queue,
             montage_queue,
             mosaic_queue,
+            embedding_queue,
         ):
             try:
                 fn = getattr(obj, "flushQueueState", None)

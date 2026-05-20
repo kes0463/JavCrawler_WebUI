@@ -300,9 +300,9 @@ Item {
 
                 active: root.tabOverviewEver
 
-                width: parent.width
+                Layout.fillWidth: true
 
-                height: parent.height
+                Layout.fillHeight: true
 
                 sourceComponent: overviewTab
 
@@ -314,9 +314,9 @@ Item {
 
                 active: root.tabTrendsEver
 
-                width: parent.width
+                Layout.fillWidth: true
 
-                height: parent.height
+                Layout.fillHeight: true
 
                 sourceComponent: trendsTab
 
@@ -328,9 +328,9 @@ Item {
 
                 active: root.tabRecommendEver
 
-                width: parent.width
+                Layout.fillWidth: true
 
-                height: parent.height
+                Layout.fillHeight: true
 
                 sourceComponent: recommendTab
 
@@ -342,9 +342,9 @@ Item {
 
                 active: root.tabCollectionEver
 
-                width: parent.width
+                Layout.fillWidth: true
 
-                height: parent.height
+                Layout.fillHeight: true
 
                 sourceComponent: collectionTab
 
@@ -361,6 +361,8 @@ Item {
         id: overviewTab
 
         AppScrollView {
+
+            id: overviewScroll
 
             clip: true
 
@@ -388,6 +390,8 @@ Item {
 
                     width: parent.width
 
+                    height: Math.max(implicitHeight, overviewScroll.availableHeight - Theme.spacingMd - Theme.spacingLg)
+
                     weeklyDigest: root.weeklyDigest
 
                     stats: root.stats
@@ -397,6 +401,8 @@ Item {
                     persona: root.persona
 
                     personaCoverageLabel: root.personaCoverageLabel
+
+                    viewportHeight: overviewScroll.availableHeight
 
                 }
 

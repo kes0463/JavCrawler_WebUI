@@ -663,6 +663,20 @@ Item {
                                 leftPadding: 4
                             }
                         }
+                        MenuItem {
+                            id: mi8
+                            text: "나중에 볼"
+                            onTriggered: LibraryModel.filterMode = 8
+                            font.pixelSize: 13
+                            highlighted: LibraryModel.filterMode === 8
+                            contentItem: Text {
+                                text: mi8.text
+                                font: mi8.font
+                                color: mi8.highlighted ? Theme.accentNeon : Theme.textPrimary
+                                verticalAlignment: Text.AlignVCenter
+                                leftPadding: 4
+                            }
+                        }
                     }
 
                     onFocusChanged: function() {
@@ -1113,7 +1127,8 @@ Item {
                         "좋아요 ↑",
                         "♥ 기간증가 순",
                         "♥ 기간감소 순",
-                        "별점순"
+                        "별점순",
+                        "나중에 볼 추가순"
                     ]
                     currentIndex: LibraryModel.sortMode
                     onCurrentIndexChanged: LibraryModel.sortMode = currentIndex
@@ -1399,6 +1414,7 @@ Item {
                             showFavoriteDelta: LibraryModel.favoriteDeltaDays !== 0
                             userRating: model.userRating !== undefined ? model.userRating : 0
                             userLiked: model.userLiked !== undefined ? model.userLiked : false
+                            watchLater: model.watchLater !== undefined ? model.watchLater : false
                             selectionMode: root.selectMode
                             selected: root._isSelected(model.productCode)
 

@@ -1520,6 +1520,17 @@ Item {
                     }
                 }
 
+                ActionButton {
+                    text: LibraryModel.detail.watchLater ? "나중에 볼 해제" : "나중에 볼"
+                    primary: LibraryModel.detail.watchLater
+                    visible: !LibraryModel.detailEditing
+                    onClicked: {
+                        var pc = (LibraryModel.detail.productCode || "").trim()
+                        if (pc !== "")
+                            LibraryModel.toggleWatchLater(pc)
+                    }
+                }
+
                 Popup {
                     id: deleteDialog
                     modal: true
