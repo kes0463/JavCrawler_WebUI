@@ -472,14 +472,22 @@ def _effective_translation_provider(translation_provider: str | None) -> str:
         return "llamacpp"
     if platform == "ollama":
         return "ollama"
+    prof = _translation_profile()
+    if prof in _GEMINI_PROFILE_MAP:
+        return "gemini"
+    if prof in (
+        "budget",
+        "qwen35",
+        "qwen3_14",
+        "gemma3_12",
+        "gemma2_9",
+        "qwen25_7",
+        "jkv_12b",
+    ):
+        return "ollama"
     env_p = os.environ.get("JAVSTORY_TRANSLATION_PROVIDER", "").strip().lower()
     if env_p in ("openrouter", "ollama", "gemini", "llamacpp"):
         return env_p
-    prof = _translation_profile()
-    if prof in ("budget", "qwen35", "qwen3_14", "gemma3_12", "jkv_12b"):
-        return "ollama"
-    if prof in _GEMINI_PROFILE_MAP:
-        return "gemini"
     return "openrouter"
 
 

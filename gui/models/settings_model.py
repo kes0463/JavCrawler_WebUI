@@ -136,6 +136,17 @@ class SettingsModel(QObject):
             self._correction_profile = correction
             self.correctionProfileChanged.emit()
 
+    def _translation_provider_for_profile(self, platform: str | None = None) -> str:
+        p = (platform or getattr(self, "_llm_platform", "openai") or "openai").strip().lower()
+        if p == "llamacpp":
+            return "llamacpp"
+        if p == "ollama":
+            return "ollama"
+        prof = str(getattr(self, "_translation_profile", "") or "").strip().lower()
+        if prof.startswith("gemini_") or prof.startswith("gemini"):
+            return "gemini"
+        return "openrouter"
+
     def _normalize_loaded_translation_values(self) -> None:
         """기존 공통 env가 현재 플랫폼 옵션과 안 맞을 때 시작값 보정."""
         platform = str(getattr(self, "_llm_platform", "openai") or "openai")
@@ -1021,12 +1032,10 @@ class SettingsModel(QObject):
             platform = str(getattr(self, "_llm_platform", "openai") or "openai")
             platform_suffix = self._platform_env_suffix(platform)
             set_env_runtime_value("JAVSTORY_LLM_PLATFORM", platform)
-            if platform == "llamacpp":
-                set_env_runtime_value("JAVSTORY_TRANSLATION_PROVIDER", "llamacpp")
-            elif platform == "ollama":
-                set_env_runtime_value("JAVSTORY_TRANSLATION_PROVIDER", "ollama")
-            elif platform == "openai":
-                set_env_runtime_value("JAVSTORY_TRANSLATION_PROVIDER", "openrouter")
+            set_env_runtime_value(
+                "JAVSTORY_TRANSLATION_PROVIDER",
+                self._translation_provider_for_profile(platform),
+            )
 
             if getattr(self, "_llamacpp_url", "").strip():
                 set_env_runtime_value("JAVSTORY_LLAMACPP_URL", self._llamacpp_url.strip())
@@ -1114,6 +1123,10 @@ class SettingsModel(QObject):
         platform_suffix = self._platform_env_suffix(platform)
         set_env_runtime_value("JAVSTORY_WHISPER_MODEL", self._whisper_model)
         set_env_runtime_value("JAVSTORY_TRANSLATION_PROFILE", self._translation_profile)
+        set_env_runtime_value(
+            "JAVSTORY_TRANSLATION_PROVIDER",
+            self._translation_provider_for_profile(platform),
+        )
         set_env_runtime_value("JAVSTORY_HARVEST_TRANSLATION_MODEL", str(getattr(self, "_harvest_translation_model", "openrouter:deepseek/deepseek-v3.2")))
         set_env_runtime_value(
             f"JAVSTORY_TRANSLATION_PROFILE_{platform_suffix}",

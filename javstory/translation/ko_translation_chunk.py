@@ -22,9 +22,12 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import os
 import re
 import time
+from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
 from javstory.translation.correction_chunk import (
@@ -39,6 +42,8 @@ from javstory.transcription.stt_types import STTCancelled, SimpleSegment
 
 CancelCheck = Optional[Callable[[], bool]]
 OptionalLogger = Optional[Callable[[str], None]]
+_CACHE_SCHEMA_VERSION = 1
+_CACHE_PROMPT_VERSION = "ko_translation_chunk_cache_v1"
 
 # ── 번역 프롬프트 상수·함수 (구 background_prompts.py에서 인라인) ──
 
@@ -128,6 +133,111 @@ def render_glm_translation_chunk_user(
 
 def _env_truthy(name: str) -> bool:
     return os.environ.get(name, "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _translation_chunk_cache_enabled() -> bool:
+    raw = os.environ.get("JAVSTORY_TRANSLATION_CHUNK_CACHE", "1").strip().lower()
+    return raw not in ("0", "false", "no", "off")
+
+
+def _translation_chunk_cache_dir() -> Path:
+    from javstory.config.app_config import DATA_ROOT
+
+    path = DATA_ROOT / "cache" / "subtitle_translation_chunks"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _safe_cache_part(value: str) -> str:
+    text = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(value or "").strip())
+    return text[:80] or "unknown"
+
+
+def _translation_chunk_cache_path(product_code: str, fingerprint: Dict[str, Any]) -> Path | None:
+    if not _translation_chunk_cache_enabled():
+        return None
+    try:
+        raw = json.dumps(fingerprint, ensure_ascii=False, sort_keys=True, default=str)
+        digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:24]
+        pc = _safe_cache_part((product_code or "").strip().upper())
+        return _translation_chunk_cache_dir() / f"{pc}_{digest}.json"
+    except Exception:
+        return None
+
+
+def _cached_items_from_segments(tgt_segs: List[SimpleSegment]) -> List[Dict[str, Any]]:
+    return [
+        {
+            "index": i,
+            "start": round(float(s.start), 3),
+            "end": round(float(s.end), 3),
+            "text": str(s.text or ""),
+        }
+        for i, s in enumerate(tgt_segs)
+    ]
+
+
+def _apply_cached_translation(
+    tgt_segs: List[SimpleSegment],
+    cache_path: Path | None,
+    *,
+    log: Callable[[str], None],
+    chunk_idx: int,
+    total_chunks: int,
+) -> bool:
+    if cache_path is None or not cache_path.is_file():
+        return False
+    try:
+        payload = json.loads(cache_path.read_text(encoding="utf-8"))
+        if int(payload.get("schema_version") or 0) != _CACHE_SCHEMA_VERSION:
+            return False
+        items = payload.get("items")
+        if not isinstance(items, list) or not items:
+            return False
+        raw = json.dumps(items, ensure_ascii=False)
+        if _apply_json_chunk(tgt_segs, raw, log=log, log_prefix="[KO-TRANSLATE CACHE]"):
+            log(
+                f"[KO-TRANSLATE] 현재 {chunk_idx + 1} / {total_chunks} — 캐시 사용 "
+                f"({cache_path.name})"
+            )
+            return True
+    except Exception as e:
+        log(f"[KO-TRANSLATE] 캐시 로드 실패: {cache_path.name} ({e})")
+    return False
+
+
+def _store_translation_chunk_cache(
+    cache_path: Path | None,
+    *,
+    product_code: str,
+    tier: Dict[str, Any],
+    chunk_idx: int,
+    total_chunks: int,
+    tgt_segs: List[SimpleSegment],
+    fingerprint: Dict[str, Any],
+    log: Callable[[str], None],
+) -> None:
+    if cache_path is None:
+        return
+    try:
+        payload = {
+            "schema_version": _CACHE_SCHEMA_VERSION,
+            "product_code": product_code,
+            "chunk_idx": chunk_idx,
+            "total_chunks": total_chunks,
+            "provider": tier.get("provider") or "",
+            "model": tier.get("model") or "",
+            "fingerprint_sha256": hashlib.sha256(
+                json.dumps(fingerprint, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")
+            ).hexdigest(),
+            "items": _cached_items_from_segments(tgt_segs),
+            "created_at": int(time.time()),
+        }
+        tmp = cache_path.with_suffix(cache_path.suffix + ".tmp")
+        tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=0), encoding="utf-8")
+        os.replace(tmp, cache_path)
+    except Exception as e:
+        log(f"[KO-TRANSLATE] 캐시 저장 실패: {cache_path.name} ({e})")
 
 
 def _looks_like_model_refusal(text: str) -> bool:
@@ -575,10 +685,48 @@ async def translate_ja_segments_to_ko_async(
             if not tgt_segs:
                 return
 
+            chunk_json = _chunk_json_for_segments(tgt_segs)
+            anchor_sec = (tgt_segs[0].start + tgt_segs[-1].end) / 2.0 if tgt_segs else 0.0
+            scene_id, scene_tone = resolve_grok_scene_for_chunk(
+                anchor_sec,
+                grok_data,
+                video_end_sec=video_end_sec,
+            )
+            compact_hints = _use_compact_translation_hints(idx)
+            cache_fingerprint = {
+                "schema": _CACHE_SCHEMA_VERSION,
+                "prompt_version": _CACHE_PROMPT_VERSION,
+                "product_code": product_code,
+                "provider": tier.get("provider") or "",
+                "model": tier.get("model") or "",
+                "temperature": tier.get("temperature"),
+                "max_tokens": tier.get("max_tokens"),
+                "target_dur": round(float(target_dur), 3),
+                "overlap_dur": round(float(overlap_dur), 3),
+                "chunk_idx": idx,
+                "chunk_json": chunk_json,
+                "background": background_json_str,
+                "extra_hints": extra_hints,
+                "combined_user_note": combined_user_note,
+                "scene_id": scene_id,
+                "scene_tone": scene_tone,
+                "compact_hints": compact_hints,
+            }
+            cache_path = _translation_chunk_cache_path(product_code, cache_fingerprint)
+            if _apply_cached_translation(
+                tgt_segs,
+                cache_path,
+                log=log,
+                chunk_idx=idx,
+                total_chunks=total_chunks,
+            ):
+                return
+
             # ── Gemini HTML 번역 경로 ─────────────────────────────────
             if str(tier.get("provider") or "").lower() == "gemini":
                 from javstory.translation import gemini_prompts
 
+                applied_ok = False
                 # 사용자 작성 노트(전역+배우+작품) → 스토리 힌트와 함께 합쳐 {{note}}로 주입
                 merged_hints = "\n\n".join(
                     [s for s in (extra_hints, combined_user_note) if s and s.strip()]
@@ -612,7 +760,8 @@ async def translate_ja_segments_to_ko_async(
                         f"[KO-TRANSLATE] 현재 {idx + 1} / {total_chunks} — Gemini 응답:\n"
                         f"{pr[:12000]}{'…' if len(pr) > 12000 else ''}"
                     )
-                if not gemini_prompts.parse_html_translation_response(res or "", tgt_segs):
+                applied_ok = gemini_prompts.parse_html_translation_response(res or "", tgt_segs)
+                if not applied_ok:
                     log(
                         f"[KO-TRANSLATE] 현재 {idx + 1} / {total_chunks} — Gemini HTML 파싱 실패 — 재시도"
                     )
@@ -629,7 +778,8 @@ async def translate_ja_segments_to_ko_async(
                     res2 = await route_with_backoff(
                         router, retry_msgs, tier, log=_translation_retry_log(log)
                     )
-                    if not gemini_prompts.parse_html_translation_response(res2 or "", tgt_segs):
+                    applied_ok = gemini_prompts.parse_html_translation_response(res2 or "", tgt_segs)
+                    if not applied_ok:
                         log(
                             f"[KO-TRANSLATE] 현재 {idx + 1} / {total_chunks} "
                             "— Gemini HTML 최종 실패 — 해당 구간 일본어 유지"
@@ -641,17 +791,20 @@ async def translate_ja_segments_to_ko_async(
                             s.text = apply_glossary_to_text(s.text or "", glossary_pairs)
                         except Exception:
                             pass
+                if applied_ok:
+                    _store_translation_chunk_cache(
+                        cache_path,
+                        product_code=product_code,
+                        tier=tier,
+                        chunk_idx=idx,
+                        total_chunks=total_chunks,
+                        tgt_segs=tgt_segs,
+                        fingerprint=cache_fingerprint,
+                        log=log,
+                    )
                 log(f"[KO-TRANSLATE] 현재 {idx + 1} / {total_chunks} — 완료")
                 return
             # ── 기존 JSON 번역 경로 ───────────────────────────────────
-
-            chunk_json = _chunk_json_for_segments(tgt_segs)
-            anchor_sec = (tgt_segs[0].start + tgt_segs[-1].end) / 2.0 if tgt_segs else 0.0
-            scene_id, scene_tone = resolve_grok_scene_for_chunk(
-                anchor_sec,
-                grok_data,
-                video_end_sec=video_end_sec,
-            )
             user_p = render_glm_translation_chunk_user(
                 background_json_str,
                 chunk_json,
@@ -659,7 +812,7 @@ async def translate_ja_segments_to_ko_async(
                 scene_id,
                 scene_tone,
                 extra_hints,
-                compact_translation_hints=_use_compact_translation_hints(idx),
+                compact_translation_hints=compact_hints,
             )
             messages: List[dict[str, str]] = [
                 {"role": "system", "content": system_prompt_translation_chunk(tier)},
@@ -694,13 +847,14 @@ async def translate_ja_segments_to_ko_async(
                         f"[KO-TRANSLATE] 현재 {idx + 1} / {total_chunks} — 응답 뒤 {cap//2}자:\n{pr[-(cap // 2) :]}"
                     )
             lp = "[KO-TRANSLATE]"
-            if not _apply_json_chunk(
+            applied_ok = _apply_json_chunk(
                 tgt_segs,
                 processed,
                 log=log,
                 log_prefix=lp,
                 postprocess_text=collapse_repeated_vocal_sounds,
-            ):
+            )
+            if not applied_ok:
                 log(f"[KO-TRANSLATE] 현재 {idx + 1} / {total_chunks} — JSON 적용 실패 — 재시도")
                 use_neutral_ollama_qwen = (
                     str(tier.get("provider") or "").lower() in ("ollama", "llamacpp")
@@ -749,13 +903,14 @@ async def translate_ja_segments_to_ko_async(
                         f"[KO-TRANSLATE] 현재 {idx + 1} / {total_chunks} — 재시도 응답 본문:\n"
                         f"{p2[:12000]}{'…' if len(p2) > 12000 else ''}"
                     )
-                if not _apply_json_chunk(
+                applied_ok = _apply_json_chunk(
                     tgt_segs,
                     processed2,
                     log=log,
                     log_prefix=lp,
                     postprocess_text=collapse_repeated_vocal_sounds,
-                ):
+                )
+                if not applied_ok:
                     log(f"[KO-TRANSLATE] 현재 {idx + 1} / {total_chunks} — JSON 적용 실패 — 2차 재시도")
                     retry2 = base_for_retry + [
                         {"role": "user", "content": _retry_translation_user_content(tier, attempt=1)},
@@ -779,13 +934,14 @@ async def translate_ja_segments_to_ko_async(
                             f"[KO-TRANSLATE] 현재 {idx + 1} / {total_chunks} — 2차 재시도 응답 본문:\n"
                             f"{p3[:12000]}{'…' if len(p3) > 12000 else ''}"
                         )
-                    if not _apply_json_chunk(
+                    applied_ok = _apply_json_chunk(
                         tgt_segs,
                         processed3,
                         log=log,
                         log_prefix=lp,
                         postprocess_text=collapse_repeated_vocal_sounds,
-                    ):
+                    )
+                    if not applied_ok:
                         log(
                             f"[KO-TRANSLATE] 현재 {idx + 1} / {total_chunks} — 최종 실패 — 해당 구간 일본어 유지"
                         )
@@ -796,6 +952,17 @@ async def translate_ja_segments_to_ko_async(
                         s.text = apply_glossary_to_text(s.text or "", glossary_pairs)
                     except Exception:
                         pass
+            if applied_ok:
+                _store_translation_chunk_cache(
+                    cache_path,
+                    product_code=product_code,
+                    tier=tier,
+                    chunk_idx=idx,
+                    total_chunks=total_chunks,
+                    tgt_segs=tgt_segs,
+                    fingerprint=cache_fingerprint,
+                    log=log,
+                )
             log(f"[KO-TRANSLATE] 현재 {idx + 1} / {total_chunks} — 완료")
 
     try:

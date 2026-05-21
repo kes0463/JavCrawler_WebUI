@@ -26,6 +26,20 @@ from gui.utils.queue_persistence import clear_queue_state, load_queue_state, sav
 PERSIST_NAME = "embedding"
 
 
+def _env_or_dotenv_value(key: str) -> str:
+    raw = (os.environ.get(key, "") or "").strip()
+    if raw:
+        return raw
+    try:
+        from dotenv import dotenv_values
+        from javstory.config.app_config import ENV_FILE_PATH
+
+        value = dotenv_values(ENV_FILE_PATH).get(key)
+        return str(value or "").strip()
+    except Exception:
+        return ""
+
+
 @dataclass
 class _Job:
     job_id: str
@@ -213,12 +227,12 @@ class EmbeddingQueueController(QObject):
         EmbeddingQueueController._instance = self
         self._model = EmbeddingQueueListModel(self)
         self._running: Dict[str, EmbeddingWorker] = {}
-        raw = (os.environ.get("JAVSTORY_EMBEDDING_QUEUE_CONCURRENCY", "") or "").strip()
+        raw = _env_or_dotenv_value("JAVSTORY_EMBEDDING_QUEUE_CONCURRENCY")
         try:
             n = int(raw) if raw else 1
         except ValueError:
             n = 1
-        self._max_parallel = max(1, min(3, n))
+        self._max_parallel = max(1, n)
         self._persist_timer = QTimer(self)
         self._persist_timer.setSingleShot(True)
         self._persist_timer.setInterval(350)
@@ -374,7 +388,6 @@ class EmbeddingQueueController(QObject):
             if it.status != "queued":
                 continue
             self._start_job(it)
-            break
 
     def _start_job(self, job: _Job) -> None:
         self._model._update_by_id(job.job_id, status="running", progress=0, message="시작 중")

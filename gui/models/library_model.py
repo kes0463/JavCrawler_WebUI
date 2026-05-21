@@ -32,6 +32,30 @@ from PySide6.QtCore import QThread
 from dataclasses import asdict
 
 
+def _tokenize_search_expr(value: str) -> list[str]:
+    """Split search expression while keeping quoted genre names together."""
+    out: list[str] = []
+    buf: list[str] = []
+    in_quote = False
+    for ch in str(value or ""):
+        if ch == '"':
+            in_quote = not in_quote
+            continue
+        if ch.isspace() and not in_quote:
+            if buf:
+                out.append("".join(buf))
+                buf = []
+            continue
+        buf.append(ch)
+    if buf:
+        out.append("".join(buf))
+    return out
+
+
+def _norm_token(value: str) -> str:
+    return str(value or "").strip().strip('"').lower()
+
+
 def _extract_dialogue_lines(srt_text: str, *, max_lines: int = 80) -> str:
     """SRT 본문에서 시간코드/번호를 제거하고 텍스트 라인만 추출."""
     if not srt_text:
