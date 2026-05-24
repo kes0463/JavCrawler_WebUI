@@ -89,7 +89,13 @@ class EroticPersonaEngine:
 
         return data
 
-    def build_chat_context(self, user_message: str, *, product_code: str | None = None) -> Dict[str, Any]:
+    def build_chat_context(
+        self,
+        user_message: str,
+        *,
+        product_code: str | None = None,
+        seed_product_codes: List[str] | None = None,
+    ) -> Dict[str, Any]:
         mentioned = extract_product_codes(user_message)
         explicit_pc = normalize_product_code(product_code)
         if explicit_pc and explicit_pc not in mentioned:
@@ -102,13 +108,33 @@ class EroticPersonaEngine:
         library_search = PersonaLibrarySearch(limit=self.search_limit).search(
             user_message,
             product_codes=mentioned,
+            fallback_seed_codes=seed_product_codes,
         )
+        persona_summary = str(persona.get("summary") or "").strip()
+        sensual_summary = str(persona.get("sensual_summary") or "").strip()
+        sensual_focus = sensual_summary or persona_summary
 
         return {
+            "sensual_recommendation_focus": {
+                "summary": sensual_focus,
+                "turn_ons": persona.get("turn_ons") or [],
+                "instruction": (
+                    "작품 추천에서는 sensual_summary와 turn_ons를 최우선으로 보고, "
+                    "최근 강하게 반응한 작품과 장면 결이 비슷한 후보를 앞세운다."
+                ),
+            },
             "persona": {
                 "type": persona.get("persona_type", ""),
-                "summary": persona.get("summary", ""),
-                "sensual_summary": persona.get("sensual_summary", ""),
+                "summary": persona_summary,
+                "sensual_summary": sensual_summary,
+                "sensual_focus": {
+                    "priority": "high" if sensual_summary else "fallback",
+                    "summary": sensual_focus,
+                    "instruction": (
+                        "답변에서는 일반 요약보다 이 관능 취향 요약을 우선 근거로 삼고, "
+                        "사용자가 어떤 분위기와 관계성에 강하게 반응하는지 선명하게 짚는다."
+                    ),
+                },
                 "turn_ons": persona.get("turn_ons") or [],
                 "avoidances": persona.get("avoidances") or [],
                 "affinities": persona.get("affinities") or [],

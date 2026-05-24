@@ -339,10 +339,21 @@ def _matches_grok(grok: Dict[str, Any], terms: Iterable[str]) -> bool:
 class PersonaLibrarySearch:
     limit: int = 8
 
-    def search(self, query: str, *, product_codes: List[str] | None = None) -> Dict[str, Any]:
+    def search(
+        self,
+        query: str,
+        *,
+        product_codes: List[str] | None = None,
+        fallback_seed_codes: List[str] | None = None,
+    ) -> Dict[str, Any]:
         terms = split_query_terms(query)
         strict_title_terms = extract_strict_title_terms(query)
         codes = list(product_codes or extract_product_codes(query, limit=5))
+        fallback_codes = [
+            normalize_product_code(code)
+            for code in list(fallback_seed_codes or [])
+            if normalize_product_code(code)
+        ]
         source_policy = detect_source_policy(
             query,
             product_codes=codes,
@@ -464,6 +475,14 @@ class PersonaLibrarySearch:
         if source_policy.get("use_embedding") and codes and not strict_title_terms:
             self._search_embedding_similar(codes[0], results)
 
+        if not strict_title_terms and len(results) < self.limit:
+            for seed_code in fallback_codes:
+                if seed_code in codes:
+                    continue
+                self._search_embedding_similar(seed_code, results, top_k=max(10, self.limit))
+                if len(results) >= self.limit:
+                    break
+
         results.sort(key=lambda x: (float(x.get("score") or 0), int(x.get("favorite_score") or 0)), reverse=True)
         return {
             "query": query,
@@ -472,6 +491,7 @@ class PersonaLibrarySearch:
             "strict_title_contains": bool(strict_title_terms),
             "source_policy": source_policy,
             "product_codes": codes,
+            "fallback_seed_codes": fallback_codes,
             "results": results[: self.limit],
         }
 
@@ -503,7 +523,13 @@ class PersonaLibrarySearch:
                 item["grok"] = grok
                 _merge_result(results, item)
 
-    def _search_embedding_similar(self, product_code: str, results: List[Dict[str, Any]]) -> None:
+    def _search_embedding_similar(
+        self,
+        product_code: str,
+        results: List[Dict[str, Any]],
+        *,
+        top_k: int | None = None,
+    ) -> None:
         try:
             from javstory.library.embeddings.pipeline import (
                 embeddings_enabled_from_env,
@@ -517,7 +543,7 @@ class PersonaLibrarySearch:
             return
 
         model = embeddings_ollama_model_from_env()
-        similar = find_similar_products(product_code, model=model, top_k=self.limit)
+        similar = find_similar_products(product_code, model=model, top_k=top_k or self.limit)
         if not similar:
             return
 

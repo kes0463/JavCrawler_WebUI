@@ -34,6 +34,8 @@ _PREFERENCE_HINTS = (
     "좋",
     "취향",
     "끌",
+    "꼴",
+    "미쳤",
     "비슷",
     "추천",
     "선호",
@@ -50,6 +52,35 @@ _STYLE_HINTS = (
     "부드럽",
     "분석",
     "추천 위주",
+)
+_STRONG_REACTION_HINTS = (
+    "개꼴",
+    "꼴려",
+    "꼴림",
+    "미쳤",
+    "미친",
+    "미쳣",
+    "도랐",
+    "돌았",
+    "지린",
+    "오진",
+    "쩐다",
+    "레전드",
+    "강하게 꽂",
+)
+_NEGATIVE_FEEDBACK_HINTS = (
+    "별로",
+    "싫",
+    "안 맞",
+    "취향 아님",
+    "취향아님",
+    "노잼",
+    "그닥",
+    "아쉽",
+    "빼줘",
+    "제외",
+    "추천하지마",
+    "추천하지 마",
 )
 _REASONING_LEAK_HINTS = (
     "here's a thinking process",
@@ -107,6 +138,8 @@ def _empty_payload() -> Dict[str, Any]:
         "recent_messages": [],
         "product_mentions": {},
         "preference_notes": [],
+        "strong_reaction_notes": [],
+        "negative_feedback_notes": [],
         "correction_notes": [],
         "style_notes": [],
     }
@@ -124,6 +157,11 @@ def _append_unique(notes: List[Dict[str, Any]], note: Dict[str, Any], *, max_ite
 def _has_any(text: str, hints: Sequence[str]) -> bool:
     lowered = text.lower()
     return any(hint.lower() in lowered for hint in hints)
+
+
+def _matched_hints(text: str, hints: Sequence[str]) -> List[str]:
+    lowered = text.lower()
+    return [hint for hint in hints if hint.lower() in lowered]
 
 
 def _looks_like_reasoning_leak(text: str) -> bool:
@@ -154,7 +192,13 @@ class PersonaChatMemory:
         payload["recent_messages"] = [
             msg for msg in payload.get("recent_messages") or [] if isinstance(msg, dict)
         ][-self.max_recent_messages :]
-        for key in ("preference_notes", "correction_notes", "style_notes"):
+        for key in (
+            "preference_notes",
+            "strong_reaction_notes",
+            "negative_feedback_notes",
+            "correction_notes",
+            "style_notes",
+        ):
             payload[key] = [item for item in payload.get(key) or [] if isinstance(item, dict)][-self.max_notes :]
         if not isinstance(payload.get("product_mentions"), dict):
             payload["product_mentions"] = {}
@@ -208,11 +252,24 @@ class PersonaChatMemory:
             if code not in query_codes and isinstance(item, dict)
         ]
         remaining.sort(key=lambda item: (int(item.get("count") or 0), str(item.get("last_seen_at") or "")), reverse=True)
+        strong_reactions = [item for item in payload.get("strong_reaction_notes") or [] if isinstance(item, dict)]
+        if query_codes:
+            query_code_set = set(query_codes)
+            related_reactions = [
+                item
+                for item in strong_reactions
+                if query_code_set.intersection(set(item.get("product_codes") or []))
+            ]
+            other_reactions = [item for item in strong_reactions if item not in related_reactions]
+            strong_reactions = related_reactions + other_reactions
+        strong_reactions = strong_reactions[:max_items] if query_codes else strong_reactions[-max_items:]
 
         return {
             "turn_count": int(payload.get("turn_count") or 0),
             "related_products": (related_products + remaining)[:max_items],
             "preference_notes": (payload.get("preference_notes") or [])[-max_items:],
+            "strong_reaction_notes": strong_reactions,
+            "negative_feedback_notes": (payload.get("negative_feedback_notes") or [])[-max_items:],
             "correction_notes": (payload.get("correction_notes") or [])[-max_items:],
             "style_notes": (payload.get("style_notes") or [])[-max_items:],
         }
@@ -260,13 +317,39 @@ class PersonaChatMemory:
         payload["product_mentions"] = product_mentions
 
         preference_notes = list(payload.get("preference_notes") or [])
+        strong_reaction_notes = list(payload.get("strong_reaction_notes") or [])
+        negative_feedback_notes = list(payload.get("negative_feedback_notes") or [])
         correction_notes = list(payload.get("correction_notes") or [])
         style_notes = list(payload.get("style_notes") or [])
+        reaction_hits = _matched_hints(user_text, _STRONG_REACTION_HINTS)
+        negative_hits = _matched_hints(user_text, _NEGATIVE_FEEDBACK_HINTS)
 
-        if user_codes or _has_any(user_text, _PREFERENCE_HINTS):
+        if user_codes or reaction_hits or _has_any(user_text, _PREFERENCE_HINTS):
             _append_unique(
                 preference_notes,
                 {"text": f"사용자 취향 단서: {_clip_inline(user_text, 220)}", "created_at": now},
+                max_items=self.max_notes,
+            )
+        if reaction_hits:
+            _append_unique(
+                strong_reaction_notes,
+                {
+                    "text": f"사용자 강렬 반응: {_clip_inline(user_text, 220)}",
+                    "triggers": reaction_hits[:5],
+                    "product_codes": user_codes[:5],
+                    "created_at": now,
+                },
+                max_items=self.max_notes,
+            )
+        if negative_hits:
+            _append_unique(
+                negative_feedback_notes,
+                {
+                    "text": f"사용자 부정 피드백: {_clip_inline(user_text, 220)}",
+                    "triggers": negative_hits[:5],
+                    "product_codes": user_codes[:5],
+                    "created_at": now,
+                },
                 max_items=self.max_notes,
             )
         if _has_any(user_text, _CORRECTION_HINTS):
@@ -283,6 +366,8 @@ class PersonaChatMemory:
             )
 
         payload["preference_notes"] = preference_notes[-self.max_notes :]
+        payload["strong_reaction_notes"] = strong_reaction_notes[-self.max_notes :]
+        payload["negative_feedback_notes"] = negative_feedback_notes[-self.max_notes :]
         payload["correction_notes"] = correction_notes[-self.max_notes :]
         payload["style_notes"] = style_notes[-self.max_notes :]
         self.save(payload)
