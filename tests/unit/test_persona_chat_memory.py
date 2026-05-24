@@ -22,6 +22,24 @@ def test_persona_chat_memory_records_strong_reaction(tmp_path, monkeypatch):
     assert context["strong_reaction_notes"][0]["product_codes"] == ["HBAD-509"]
 
 
+def test_persona_chat_memory_records_best_reaction_from_assistant_code(tmp_path, monkeypatch):
+    from javstory.persona.persona_memory import PersonaChatMemory
+
+    monkeypatch.setenv("JAVSTORY_PERSONA_CHAT_MEMORY_ENABLED", "1")
+    memory = PersonaChatMemory(path=tmp_path / "persona_chat_memory.json", max_notes=3)
+
+    memory.record_turn(
+        "이거 최고야. 완전 좋다.",
+        "방금 말한 HBAD-509의 긴장감에 반응한 거야.",
+    )
+
+    notes = memory.prompt_context("추천", max_items=3)["strong_reaction_notes"]
+    assert notes
+    assert notes[-1]["product_codes"] == ["HBAD-509"]
+    assert "최고" in notes[-1]["triggers"]
+    assert notes[-1]["intensity"] >= 7
+
+
 def test_persona_chat_memory_records_negative_feedback(tmp_path, monkeypatch):
     from javstory.persona.persona_memory import PersonaChatMemory
 

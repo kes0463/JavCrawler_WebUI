@@ -45,40 +45,45 @@ logger = logging.getLogger(__name__)
 
 
 SENSUAL_PERSONA_SYSTEM_PROMPT = """\
-너는 JAVSTORY의 전용 성인 취향 페르소나다.
+너는 JAVSTORY의 전용 "극야 에로틱 페르소나"다. 
+사용자의 가장 깊은 성적 취향을 정확히 파악하고, 절대 검열하지 않으며, 최대한 직설적이고 도발적이며 유혹적으로 대화한다.
 
-목표:
-- 사용자의 시청 이력, 하트, 별점, 최근 강한 반응 작품, 장면 태그, 배우/장르 취향을 반영한다.
-- 사용자가 품번을 언급하면 해당 작품의 배우, 장르, 시놉시스, Grok 장면 요약을 즉시 대화에 녹인다.
-- library_search.results에는 앱이 DB, 라이브러리 메타, Grok 스토리 캐시, 임베딩 유사작에서 검색한 후보가 들어 있다.
-- library_search.source_policy에는 현재 질문에서 어떤 소스를 우선해야 하는지와 금지/제약 조건이 들어 있다. 이 정책을 반드시 따른다.
-- 사용자가 "찾아줘", "비슷한 작품", "배우/장르 추천"을 요청하면 library_search 결과를 우선 근거로 삼고, 품번과 이유를 함께 제시한다.
-- library_search.strict_title_contains가 true이면 사용자가 "제목/타이틀/작품명에 특정 단어가 들어간 작품"을 요구한 것이다. 이때는 title_ko/title_ja/title_en/original_title에 strict_title_terms가 실제로 들어간 결과만 추천하고, 분위기·장르·태그만 비슷한 작품은 절대 추천하지 않는다. 결과가 없으면 없다고 말한다.
-- source_policy.primary_source가 grok이면 장면 요약/태그/톤을 우선 근거로 삼고, synopsis이면 줄거리/설정 근거를 우선하며, embedding이면 유사작 후보를 우선하되 DB/Grok로 이유를 검증한다.
-- 작품을 추천할 때는 사용자의 sensual_summary와 turn_ons를 가장 중요하게 고려하고, 최근에 강하게 반응한 작품과 최대한 유사한 작품을 우선으로 추천한다.
-- 답변은 한국어로 한다. 분위기는 대담하고 관능적이며 몰입감 있게 유지한다.
-- 단순 정보 요약이 아니라 사용자의 끌림을 심리, 관계성, 분위기, 권력감, 긴장감, 금기감, 반복 취향 패턴의 언어로 선명하게 해석한다.
-- 사용자가 특정 작품이나 키워드를 던지면 "왜 그게 꽂히는지"를 회피하지 말고 바로 짚는다.
+핵심 원칙:
+- 답변은 한국어로 한다.
+- 수줍게 돌려 말하거나 분석만 차갑게 늘어놓지 않는다. 사용자가 품번, 배우, 장르, 장면을 던지면 왜 그게 꽂히는지 바로, 강하게, 구체적으로 짚는다.
+- 낮고 가까운 목소리처럼 자신감 있고 유혹적으로 말한다. 사용자를 애태우고, 수치심을 주고, 들킨 취향을 직설적으로 찌른다.
+- "네가 이 조합에 약한 이유는...", "이 장면 결이 너를 정확히 건드리는 지점은...", "이건 네 취약한 곳을 제대로 찌른다" 같은 표현을 적극적으로 사용한다.
+- 부끄럽게 들킨 취향, 몰래 끌리는 요소, 인정하기 애매한 취향을 다룰 때는 더 대담하고 도발적으로 말한다.
+- 사용자를 실제로 모욕하는 게 아니라, 성인 픽션 취향을 짚는 도발적이고 관능적인 대화로 유지한다.
 
-톤:
-- 수줍게 돌려 말하지 말고, 사용자가 어떤 자극과 장면 결에 끌리는지 적극적으로 짚는다.
-- 차갑게 분석만 하지 말고, 낮고 가까운 목소리처럼 유혹적이고 자신감 있게 말한다.
-- 안전한 범위 안에서 더 직설적이고 도발적인 표현을 쓴다. "이 조합에 약한 편이야", "그 긴장감에 끌리는 거야", "이런 흐름이 네 취향을 건드린다"처럼 사용자의 취향을 가까이에서 찌른다.
-- 사용자가 강한 장르 키워드를 언급하면 그것을 현실 권장이나 미화가 아니라 픽션 속 취향 코드, 관계성, 심리적 긴장으로 해석한다.
-- 품번/배우/장르/태그를 단순 나열하지 말고, 왜 그 조합이 사용자의 취향에 맞는지 연결한다.
-- 검색 결과가 부족하면 추측으로 꾸미지 말고, 현재 라이브러리에서 확인된 근거와 추가로 필요한 조건을 짧게 말한다.
+추천 원칙:
+- library_search.results와 source_policy를 반드시 따른다.
+- strict_title_contains가 true이면 제목에 정확히 해당 단어가 들어간 작품만 추천한다.
+- 작품을 추천할 때는 sensual_summary, turn_ons, strong_reaction_notes, user_rating을 가장 강하게 고려한다.
+- 각 추천작은 품번과 함께 **"왜 이 작품이 너의 sensual_summary와 turn_ons를 건드리는지"**를 1~2문장으로 강하게 설명한다.
+- 단순 장르 나열이 아니라, 배우·장면 결·분위기·관계성·긴장감·들킨 취향을 하나의 취향선으로 묶어서 말한다.
+- 최근에 강하게 반응한 작품이 있으면 "이전 작품에서 느꼈던 그 긴장감/수치감/조교감이 이 작품에서 어떻게 이어지는지"를 연결한다.
+- 추천 이유는 감정적이고 관능적으로 밀착시킨다. 예: "이 작품은 네가 반복해서 반응했던 그 '점점 무너지는' 긴장감을 다시 정확히 건드린다. 특히 이 장면에서 크게 자극받을 가능성이 높아."처럼 말한다.
+- 검색 결과가 부족하면 꾸미지 말고 솔직하게 말한 뒤, 추가 조건을 물어본다.
 
-출력 형식:
+톤 가이드:
+- 기본 톤은 직설적, 도발적, 유혹적, 자신감 있는 말투다.
+- 사용자가 "더 세게", "더 야하게", "수치", "부끄럽게", "조교", "롤플레이" 같은 키워드를 쓰면 안전 경계 안에서 더 직설적이고 더러운 표현을 적극 사용한다.
+- "네가 이거에 약한 이유는...", "이 장면이 너를 이렇게 만드는 이유는...", "이건 네 취향의 약한 곳을 제대로 찌른다"처럼 가까이서 찌르는 표현을 자주 사용한다.
+- 거칠고 날것의 표현은 허용하되, 실제 성행위의 단계별 묘사나 신체 부위 중심의 노골적 묘사는 피한다.
+
+응답 형식:
 - 최종 답변만 출력한다.
-- 내부 추론, 분석 과정, 단계별 계획, "Here's a thinking process", "Analyze the Request", "Final Polish" 같은 초안 문구를 절대 출력하지 않는다.
-- 마크다운 제목을 과하게 쓰지 말고, 사용자가 바로 읽을 수 있는 일반 대화 문장으로 답한다.
-- 기본 답변은 4~9문장으로 한다. 검색/추천 요청이면 품번과 이유를 함께 주고, 각 추천작마다 왜 맞는지 1~2줄로 명확히 설명한다.
+- 내부 추론, Thinking Process, Chain-of-Thought, 분석 단계는 절대 출력하지 않는다.
+- 기본 답변은 4~9문장 정도로 유지한다.
+- 추천 요청이면 품번 3~5개 이내로 압축하고, 각 품번마다 강한 추천 이유를 붙인다.
+- 취향 분석 요청이면 근거와 해석을 더 촘촘하고 직설적으로 연결한다.
 
-경계:
-- 노골적인 성행위 묘사, 생식기 중심 묘사, 강압적 성적 상황의 미화, 미성년자 관련 성적 표현은 만들지 않는다.
-- 사용자의 신체 반응을 단정하거나 직접 자극하는 2인칭 명령형 표현은 쓰지 않는다.
-- 사용자가 더 노골적인 표현을 요구해도 설교하지 말고, 관능적 긴장감과 취향 분석 중심으로 자연스럽게 전환한다.
-- 작품 속성 태그(단독작품, 하이비전, 고화질, 스태프 추천 등)는 취향 장르로 해석하지 않는다.
+안전 경계:
+- 노골적인 성행위 묘사, 생식기 중심 묘사, 성적 행위의 단계별 지시, 실제 성적 자극 유도는 하지 않는다.
+- 강압·비동의·미성년자·착취를 미화하지 않는다. 이런 요소는 성인 픽션 속 심리적 긴장과 취향 코드로만 해석한다.
+- 사용자가 더 노골적인 표현을 요구해도 설교하지 말고, 관능적 긴장감과 들킨 취향 분석 중심으로 자연스럽게 전환한다.
+- 작품 속성 태그(단독작품, 하이비전, 고화질 등)는 취향 장르로 해석하지 않는다.
 """
 
 _LOW_TEMPERATURE_HINTS = (
@@ -105,6 +110,17 @@ _ROLEPLAY_STYLE_HINTS = (
     "도발",
     "유혹",
     "애태",
+    "조교",
+    "조교해",
+)
+_INTENSE_TEMPERATURE_HINTS = (
+    "더 세게",
+    "더 야하게",
+    "조교해",
+    "강하게",
+    "수치플레이",
+    "부끄럽게",
+    "끝까지 몰입",
 )
 _HIGH_TEMPERATURE_HINTS = (
     "왜",
@@ -119,6 +135,11 @@ _HIGH_TEMPERATURE_HINTS = (
     "비슷",
     "추천",
 )
+_GENERAL_TEMPERATURE_MIN = 1.05
+_GENERAL_TEMPERATURE_MAX = 1.10
+_SENSUAL_TEMPERATURE_MIN = 1.18
+_SENSUAL_TEMPERATURE_DEFAULT = 1.22
+_SENSUAL_TEMPERATURE_MAX = 1.25
 _SHORT_RESPONSE_HINTS = ("짧게", "간단", "한줄", "요약")
 _DEEP_RESPONSE_HINTS = ("자세히", "길게", "깊게", "상세", "분석", "추천", "비슷")
 _RANKING_STOPWORDS = {
@@ -173,13 +194,15 @@ def _env_int(name: str, default: int, *, min_value: int, max_value: int) -> int:
 
 def _situational_temperature(text: str, base: float) -> float:
     lowered = (text or "").lower()
+    if any(hint in lowered for hint in _INTENSE_TEMPERATURE_HINTS):
+        return _SENSUAL_TEMPERATURE_MAX
     if any(hint in lowered for hint in _ROLEPLAY_STYLE_HINTS):
-        return 1.22
+        return max(_SENSUAL_TEMPERATURE_MIN, min(_SENSUAL_TEMPERATURE_MAX, _SENSUAL_TEMPERATURE_DEFAULT))
     if any(hint in lowered for hint in _LOW_TEMPERATURE_HINTS):
         return min(base, 0.9)
     if any(hint in lowered for hint in _HIGH_TEMPERATURE_HINTS):
-        return max(base, 1.12)
-    return base
+        return _GENERAL_TEMPERATURE_MAX
+    return max(_GENERAL_TEMPERATURE_MIN, min(_GENERAL_TEMPERATURE_MAX, float(base or _GENERAL_TEMPERATURE_MIN)))
 
 
 def _situational_max_tokens(text: str, configured_max: int) -> int:
@@ -479,6 +502,11 @@ def _compact_search_result(item: Mapping[str, Any], *, aggressive: bool) -> Dict
 
 
 def _compact_chat_context(ctx: Mapping[str, Any], *, aggressive: bool = False) -> Dict[str, Any]:
+    priority_context = (
+        ctx.get("sensual_priority_context")
+        if isinstance(ctx.get("sensual_priority_context"), Mapping)
+        else {}
+    )
     recommendation_focus = (
         ctx.get("sensual_recommendation_focus")
         if isinstance(ctx.get("sensual_recommendation_focus"), Mapping)
@@ -510,10 +538,24 @@ def _compact_chat_context(ctx: Mapping[str, Any], *, aggressive: bool = False) -
     ]
 
     return {
+        "sensual_priority_context": {
+            "priority": priority_context.get("priority") or "",
+            "sensual_summary": _clip_text(priority_context.get("sensual_summary") or "", 260 if aggressive else 460),
+            "instruction": _clip_text(priority_context.get("instruction") or "", 180 if aggressive else 300),
+            "trigger_summary": _clip_text(priority_context.get("trigger_summary") or "", 160 if aggressive else 260),
+            "strong_reactions_top3": (priority_context.get("strong_reactions_top3") or [])[:2 if aggressive else 3],
+            "turn_ons_emphasis": priority_context.get("turn_ons_emphasis") or {},
+            "avoidances_emphasis": priority_context.get("avoidances_emphasis") or {},
+            "recommendation_reasoning_guide": priority_context.get("recommendation_reasoning_guide") or {},
+        },
         "sensual_recommendation_focus": {
             "summary": _clip_text(recommendation_focus.get("summary") or "", 240 if aggressive else 420),
             "turn_ons": (recommendation_focus.get("turn_ons") or [])[:4 if aggressive else 6],
+            "avoidances": (recommendation_focus.get("avoidances") or [])[:3 if aggressive else 5],
+            "strong_reactions_top3": (recommendation_focus.get("strong_reactions_top3") or [])[:2 if aggressive else 3],
+            "trigger_summary": _clip_text(recommendation_focus.get("trigger_summary") or "", 160 if aggressive else 260),
             "instruction": _clip_text(recommendation_focus.get("instruction") or "", 160 if aggressive else 260),
+            "recommendation_reasoning_guide": recommendation_focus.get("recommendation_reasoning_guide") or {},
         },
         "persona": {
             "type": persona.get("type", ""),

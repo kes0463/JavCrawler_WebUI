@@ -27,6 +27,7 @@ from javstory.persona.library_search import (
     row_to_search_result,
     split_query_terms,
 )
+from javstory.persona.persona_memory import PersonaChatMemory
 from javstory.search.library_search import HybridLibrarySearch
 
 CONTEXT_SIMILARITY_THRESHOLD = 0.6
@@ -75,6 +76,62 @@ def _context_value_to_text(value: Any) -> str:
     if isinstance(value, str):
         return value.strip()
     return json.dumps(value, ensure_ascii=False, default=str)
+
+
+def _top_strong_reactions(limit: int = 3) -> List[Dict[str, Any]]:
+    try:
+        memory = PersonaChatMemory().prompt_context("", max_items=max(3, limit * 2))
+    except Exception:
+        return []
+    notes = [item for item in memory.get("strong_reaction_notes") or [] if isinstance(item, dict)]
+    notes.sort(
+        key=lambda item: (
+            float(item.get("intensity") or 0),
+            str(item.get("created_at") or ""),
+        ),
+        reverse=True,
+    )
+    return notes[:limit]
+
+
+def _strong_reaction_seed_codes(strong_reactions: List[Dict[str, Any]], limit: int = 3) -> List[str]:
+    out: List[str] = []
+    for note in strong_reactions:
+        for code in note.get("product_codes") or []:
+            pc = normalize_product_code(str(code or ""))
+            if pc and pc not in out:
+                out.append(pc)
+            if len(out) >= limit:
+                return out
+    return out
+
+
+def _strong_reaction_query_hint(strong_reactions: List[Dict[str, Any]]) -> str:
+    parts: List[str] = []
+    for note in strong_reactions:
+        text = str(note.get("text") or "").strip()
+        triggers = ", ".join(str(v) for v in note.get("triggers") or [] if str(v).strip())
+        codes = ", ".join(str(v) for v in note.get("product_codes") or [] if str(v).strip())
+        chunk = " ".join(v for v in [codes, triggers, text] if v)
+        if chunk:
+            parts.append(chunk)
+    return " / ".join(parts[:3])
+
+
+def _summarize_sensual_triggers(turn_ons: List[Any], strong_reactions: List[Dict[str, Any]]) -> str:
+    triggers: List[str] = []
+    for item in turn_ons:
+        text = str(item or "").strip()
+        if text and text not in triggers:
+            triggers.append(text)
+    for note in strong_reactions:
+        for trigger in note.get("triggers") or []:
+            text = str(trigger or "").strip()
+            if text and text not in triggers:
+                triggers.append(text)
+    if not triggers:
+        return "아직 특정 자극 축은 충분히 확정되지 않았지만, 현재 질문과 라이브러리 근거를 우선한다."
+    return "이 사용자는 특히 " + ", ".join(triggers[:8]) + " 계열의 자극에 크게 반응한다."
 
 
 def build_focused_context(user_message: str, full_persona_data: dict) -> str:
@@ -270,31 +327,81 @@ class EroticPersonaEngine:
         context = self.context_snapshot() if not self.cache_only else {}
         products = [self.product_snapshot(pc) for pc in mentioned[:3]]
         products = [p for p in products if p]
+        strong_reactions = _top_strong_reactions(3)
+        strong_seed_codes = _strong_reaction_seed_codes(strong_reactions, 3)
+        combined_seed_codes = list(dict.fromkeys(list(seed_product_codes or []) + strong_seed_codes))
+        hybrid_query = user_message
+        if strong_reactions and not extract_strict_title_terms(user_message):
+            hint = _strong_reaction_query_hint(strong_reactions)
+            if hint:
+                hybrid_query = f"{user_message}\n최근 강한 반응 작품과 자극 축: {hint}"
+
         # LEGACY: 아래 코드는 HybridLibrarySearch로 대체됨
         # library_search = PersonaLibrarySearch(limit=self.search_limit).search(
         #     user_message,
         #     product_codes=mentioned,
         #     fallback_seed_codes=seed_product_codes,
         # )
-        hybrid_results = HybridLibrarySearch(top_k=20).search_with_fusion(user_message)
+        hybrid_results = HybridLibrarySearch(top_k=20).search_with_fusion(hybrid_query)
         library_search = _adapt_hybrid_search_results(
             user_message,
             hybrid_results,
             product_codes=mentioned,
-            fallback_seed_codes=seed_product_codes,
+            fallback_seed_codes=combined_seed_codes,
         )
+
         persona_summary = str(persona.get("summary") or "").strip()
         sensual_summary = str(persona.get("sensual_summary") or "").strip()
         sensual_focus = sensual_summary or persona_summary
+        turn_ons = list(persona.get("turn_ons") or [])
+        avoidances = list(persona.get("avoidances") or [])
+        affinities = list(persona.get("affinities") or [])
+        trigger_summary = _summarize_sensual_triggers(turn_ons, strong_reactions)
+        recommendation_reasoning_guide = {
+            "must_explain": [
+                "추천 후보의 장면 결, 배우/캐릭터 인상, 분위기, 관계성, 플레이 스타일 중 무엇이 맞는지 밝힌다.",
+                "sensual_summary와 turn_ons 중 어떤 항목과 맞물리는지 직접 연결한다.",
+                "최근 강한 반응 작품이 있으면 그 작품의 자극 축과 이어지는 이유를 설명한다.",
+                "가능하면 '이 작품을 보면 특히 어떤 지점에서 크게 자극받을 가능성이 높은지'를 한 문장으로 짚는다.",
+            ],
+            "strong_reaction_bridge": strong_reactions,
+            "example_tone": (
+                "이 작품은 네가 강하게 반응했던 긴장감과 들킨 취향의 결을 다시 건드린다. "
+                "특히 장면 분위기와 배우의 인상이 turn_ons와 맞물려서 크게 자극받을 가능성이 높다."
+            ),
+        }
 
         return {
+            "sensual_priority_context": {
+                "priority": "highest",
+                "sensual_summary": sensual_focus,
+                "instruction": (
+                    "이 블록을 가장 중요하게 고려해. 추천, 취향 해석, 대화 톤은 모두 "
+                    "sensual_summary와 turn_ons를 최우선 근거로 삼는다."
+                ),
+                "strong_reactions_top3": strong_reactions,
+                "trigger_summary": trigger_summary,
+                "turn_ons_emphasis": {
+                    "items": turn_ons,
+                    "instruction": "사용자가 적극적으로 끌리는 자극 축이다. 추천 이유에서 선명하게 연결한다.",
+                },
+                "avoidances_emphasis": {
+                    "items": avoidances,
+                    "instruction": "추천에서 피하거나 조심스럽게 다뤄야 하는 요소다. 유사 후보라도 이 요소와 충돌하면 감점한다.",
+                },
+                "recommendation_reasoning_guide": recommendation_reasoning_guide,
+            },
             "sensual_recommendation_focus": {
                 "summary": sensual_focus,
-                "turn_ons": persona.get("turn_ons") or [],
+                "turn_ons": turn_ons,
+                "avoidances": avoidances,
+                "strong_reactions_top3": strong_reactions,
+                "trigger_summary": trigger_summary,
                 "instruction": (
                     "작품 추천에서는 sensual_summary와 turn_ons를 최우선으로 보고, "
                     "최근 강하게 반응한 작품과 장면 결이 비슷한 후보를 앞세운다."
                 ),
+                "recommendation_reasoning_guide": recommendation_reasoning_guide,
             },
             "persona": {
                 "type": persona.get("persona_type", ""),
@@ -308,9 +415,9 @@ class EroticPersonaEngine:
                         "사용자가 어떤 분위기와 관계성에 강하게 반응하는지 선명하게 짚는다."
                     ),
                 },
-                "turn_ons": persona.get("turn_ons") or [],
-                "avoidances": persona.get("avoidances") or [],
-                "affinities": persona.get("affinities") or [],
+                "turn_ons": turn_ons,
+                "avoidances": avoidances,
+                "affinities": affinities,
                 "evidence": persona.get("evidence") or [],
                 "source": persona.get("source", ""),
             },

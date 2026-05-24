@@ -5,8 +5,11 @@ def test_persona_chat_dynamic_temperature_and_tokens():
     from javstory.persona.persona_chat import _situational_max_tokens, _situational_temperature
 
     assert _situational_temperature("오늘은 일반 대화로 말해줘", 1.05) == 1.05
-    assert _situational_temperature("더 야하게 롤플레이 톤으로 분석해줘", 1.05) == 1.22
+    assert _situational_temperature("그냥 잡담하자", 1.16) == 1.1
+    assert _situational_temperature("롤플레이 톤으로 분석해줘", 1.05) == 1.22
+    assert _situational_temperature("더 야하게 조교해", 1.05) == 1.25
     assert _situational_temperature("품번 정보 찾아줘", 1.05) == 0.9
+    assert _situational_temperature("왜 이 취향에 끌리는지 분석해줘", 1.05) == 1.1
 
     assert _situational_max_tokens("짧게 요약해줘", 2000) == 800
     assert _situational_max_tokens("더 세게 자세히 분석해줘", 2000) == 2000

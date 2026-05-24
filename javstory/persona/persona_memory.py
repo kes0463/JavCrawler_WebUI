@@ -69,6 +69,11 @@ _STRONG_REACTION_HINTS = (
     "지린",
     "오진",
     "쩐다",
+    "최고",
+    "최고야",
+    "개좋",
+    "존좋",
+    "완전 좋",
     "레전드",
     "강하게 꽂",
 )
@@ -334,13 +339,16 @@ class PersonaChatMemory:
                 {"text": f"사용자 취향 단서: {_clip_inline(user_text, 220)}", "created_at": now},
                 max_items=self.max_notes,
             )
+        strong_reaction_codes = [code for code in user_codes + assistant_codes if code]
+        strong_reaction_codes = list(dict.fromkeys(strong_reaction_codes))
         if reaction_hits:
             _append_unique(
                 strong_reaction_notes,
                 {
                     "text": f"사용자 강렬 반응: {_clip_inline(user_text, 220)}",
                     "triggers": reaction_hits[:5],
-                    "product_codes": user_codes[:5],
+                    "product_codes": strong_reaction_codes[:5],
+                    "intensity": min(10, 5 + len(reaction_hits) + (2 if strong_reaction_codes else 0)),
                     "created_at": now,
                 },
                 max_items=self.max_notes,

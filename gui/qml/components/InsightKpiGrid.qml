@@ -30,7 +30,7 @@ Item {
             GlassCard {
                 autoSize: false
                 Layout.fillWidth: true
-                Layout.preferredHeight: 90
+                Layout.preferredHeight: 78
 
                 ColumnLayout {
                     anchors.centerIn: parent

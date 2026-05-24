@@ -7,7 +7,7 @@ import "../.."
 ColumnLayout {
     id: tab
     width: parent ? parent.width : 0
-    spacing: Theme.spacingLg
+    spacing: Theme.spacingMd
 
     property var weeklyDigest: ({})
     property var stats: ({})
@@ -15,32 +15,36 @@ ColumnLayout {
     property var persona: ({})
     property var personaCoverageLabel: function() { return "" }
     property real viewportHeight: 0
-    readonly property int profileCardHeight: 260
+    readonly property int profileCardHeight: 500
 
     property bool digestExpanded: false
     readonly property var digestLines: tab.weeklyDigest.lines || []
     readonly property bool digestHasData: !!(tab.weeklyDigest && tab.weeklyDigest.has_data)
-    readonly property bool digestShowMore: tab.digestHasData && tab.digestLines.length > 3
+    readonly property bool digestShowMore: tab.digestHasData && tab.digestLines.length > 1
     readonly property var digestVisibleLines: {
+        if (!tab.digestHasData)
+            return []
         if (!tab.digestShowMore || tab.digestExpanded)
             return tab.digestLines
-        return tab.digestLines.slice(0, 3)
+        return tab.digestLines.slice(0, 1)
     }
 
     // ── 주간 리포트 ─────────────────────────────────────────────
     GlassCard {
         Layout.fillWidth: true
-        Layout.bottomMargin: Theme.spacingLg
+        Layout.bottomMargin: Theme.spacingSm
         autoSize: false
         border.color: Qt.rgba(0, 229/255, 255/255, 0.35)
         Layout.preferredHeight: {
             if (!tab.digestHasData)
-                return 72
+                return 64
+            if (!tab.digestExpanded)
+                return 92
             var n = tab.digestVisibleLines.length
             var h = 56 + n * 22
             if (tab.digestShowMore)
                 h += 28
-            return Math.max(72, h)
+            return Math.max(92, h)
         }
 
         ColumnLayout {
@@ -76,7 +80,7 @@ ColumnLayout {
                 Text {
                     anchors.right: parent.right
                     anchors.verticalCenter: parent.verticalCenter
-                    text: tab.digestExpanded ? "접기" : "더 보기"
+                    text: tab.digestExpanded ? "접기" : "펼치기"
                     font.pixelSize: Theme.fontCaption
                     color: Theme.accentNeon
                     font.underline: true
@@ -92,7 +96,7 @@ ColumnLayout {
 
     InsightKpiGrid {
         Layout.fillWidth: true
-        Layout.bottomMargin: Theme.spacingLg
+        Layout.bottomMargin: Theme.spacingMd
         stats: tab.stats
     }
 
@@ -100,7 +104,7 @@ ColumnLayout {
         Layout.fillWidth: true
         Layout.fillHeight: false
         Layout.preferredHeight: tab.profileCardHeight
-        Layout.bottomMargin: Theme.spacingLg
+        Layout.bottomMargin: Theme.spacingMd
         spacing: Theme.spacingMd
 
         TasteProfileCard {
