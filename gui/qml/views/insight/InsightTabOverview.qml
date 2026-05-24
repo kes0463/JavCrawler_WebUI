@@ -139,20 +139,5 @@ ColumnLayout {
         }
     }
 
-    PersonaChatWidget {
-        Layout.fillWidth: true
-        Layout.fillHeight: true
-        Layout.minimumHeight: 260
-        Layout.preferredHeight: 360
-        Layout.bottomMargin: Theme.spacingLg
-        messagesJson: InsightModel.personaChatMessages
-        running: InsightModel.isPersonaChatRunning
-        streamTarget: InsightModel
-        onSendRequested: function(message) {
-            InsightModel.sendPersonaChatMessage(message, true)
-        }
-        onClearRequested: InsightModel.clearPersonaChat()
-    }
-
     Item { Layout.preferredHeight: Theme.spacingLg }
 }

@@ -360,6 +360,10 @@ ApplicationWindow {
                 asynchronous: true
             }
             Loader {
+                source: "views/PersonaChatView.qml"
+                asynchronous: true
+            }
+            Loader {
                 source: "views/SettingsView.qml"
                 asynchronous: true
             }

@@ -76,6 +76,7 @@ Rectangle {
                 ListElement { label: "모자이크";     icon: "🧩" }
                 ListElement { label: "라이브러리";   icon: "📚" }
                 ListElement { label: "인사이트";     icon: "📊" }
+                ListElement { label: "페르소나 챗";  icon: "💬" }
             }
 
             delegate: Rectangle {
@@ -235,14 +236,14 @@ Rectangle {
         Rectangle {
             width: root.width
             height: 48
-            color: root.currentIndex === 6 ? Theme.navActive : "transparent"
+            color: root.currentIndex === 7 ? Theme.navActive : "transparent"
 
             Behavior on color { ColorAnimation { duration: Theme.animFast } }
 
             // hover 그라디언트 오버레이
             Rectangle {
                 anchors.fill: parent
-                visible: root.currentIndex !== 6
+                visible: root.currentIndex !== 7
                 opacity: settingsMouse.containsMouse ? 1 : 0
                 Behavior on opacity { NumberAnimation { duration: Theme.animFast } }
                 gradient: Gradient {
@@ -257,8 +258,8 @@ Rectangle {
                 anchors.left: parent.left
                 anchors.verticalCenter: parent.verticalCenter
                 width: 3; radius: 2; color: Theme.accentNeon
-                height: root.currentIndex === 6 ? 22 : 8
-                opacity: root.currentIndex === 6 ? 1 : 0
+                height: root.currentIndex === 7 ? 22 : 8
+                opacity: root.currentIndex === 7 ? 1 : 0
                 Behavior on height  { NumberAnimation { duration: Theme.animNormal; easing.type: Easing.OutBack } }
                 Behavior on opacity { NumberAnimation { duration: Theme.animFast } }
             }
@@ -279,8 +280,8 @@ Rectangle {
                     visible: !root.collapsed
                     text: "설정"
                     font.pixelSize: Theme.fontBody
-                    font.weight: root.currentIndex === 6 ? Font.DemiBold : Font.Normal
-                    color: root.currentIndex === 6 ? Theme.textPrimary : Theme.textSecondary
+                    font.weight: root.currentIndex === 7 ? Font.DemiBold : Font.Normal
+                    color: root.currentIndex === 7 ? Theme.textPrimary : Theme.textSecondary
                     anchors.verticalCenter: parent.verticalCenter
                     Behavior on color { ColorAnimation { duration: Theme.animFast } }
                 }
@@ -292,8 +293,8 @@ Rectangle {
                 hoverEnabled: true
                 cursorShape: Qt.PointingHandCursor
                 onClicked: {
-                    root.currentIndex = 6;
-                    root.navigate(6);
+                    root.currentIndex = 7;
+                    root.navigate(7);
                 }
             }
         }
