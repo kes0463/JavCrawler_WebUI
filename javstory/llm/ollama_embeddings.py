@@ -7,11 +7,13 @@ Ollama embeddings helper.
 
 from __future__ import annotations
 
+import hashlib
 from typing import Any, Dict, List
 
 import httpx
 
 from javstory.config.app_config import OLLAMA_BASE_URL
+from javstory.utils.cache_manager import cache_manager
 
 
 async def ollama_embed_text(
@@ -33,6 +35,11 @@ async def ollama_embed_text(
     if not m:
         raise ValueError("ollama_embed_text: model is empty")
 
+    text_hash = hashlib.md5(t.encode()).hexdigest()
+    embedding = cache_manager.get_embedding(text_hash)
+    if embedding is not None:
+        return [float(x) for x in embedding.tolist()]
+
     url = f"{base_url.rstrip('/')}/api/embeddings"
     payload: Dict[str, Any] = {"model": m, "prompt": t}
 
@@ -45,9 +52,11 @@ async def ollama_embed_text(
     if not isinstance(emb, list) or not emb:
         raise ValueError("ollama_embed_text: embedding missing in response")
     try:
-        return [float(x) for x in emb]
+        vector = [float(x) for x in emb]
     except Exception as e:
         raise ValueError(f"ollama_embed_text: embedding is not numeric: {e}")
+    cache_manager.set_embedding(text_hash, vector)
+    return vector
 
 
 async def ollama_embed_texts(

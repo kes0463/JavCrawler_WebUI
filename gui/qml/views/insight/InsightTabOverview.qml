@@ -147,8 +147,9 @@ ColumnLayout {
         Layout.bottomMargin: Theme.spacingLg
         messagesJson: InsightModel.personaChatMessages
         running: InsightModel.isPersonaChatRunning
+        streamTarget: InsightModel
         onSendRequested: function(message) {
-            InsightModel.sendPersonaChatMessage(message)
+            InsightModel.sendPersonaChatMessage(message, true)
         }
         onClearRequested: InsightModel.clearPersonaChat()
     }

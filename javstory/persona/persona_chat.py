@@ -19,6 +19,7 @@ without knowing which local backend produced the text.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import time
@@ -33,10 +34,14 @@ from javstory.llm.llamacpp_backend import (
     llamacpp_openai_base_url,
     llamacpp_request_scope,
 )
-from javstory.persona.erotic_persona_engine import EroticPersonaEngine
-from javstory.persona.persona_memory import PersonaChatMemory
+from javstory.config.app_config import DATA_ROOT
+from javstory.persona.erotic_persona_engine import EroticPersonaEngine, build_focused_context
+from javstory.persona.persona_memory import EnhancedPersonaMemory, PersonaChatMemory
+from javstory.persona.prompts.prompt_loader import get_prompt
 
 DEFAULT_PERSONA_CHAT_MODEL = "gemma-4-e4b-uncensored"
+ENHANCED_PERSONA_MEMORY_PATH = DATA_ROOT / "cache" / "persona_chat_enhanced_memory.json"
+logger = logging.getLogger(__name__)
 
 
 SENSUAL_PERSONA_SYSTEM_PROMPT = """\
@@ -305,9 +310,35 @@ def _score_recommendation_item(
         score += 8.0
         reasons.append("임베딩 유사도 근거")
 
+    user_rating = int(item.get("user_rating") or 0)
+    user_liked = bool(item.get("user_liked"))
+    user_disliked = bool(item.get("user_disliked"))
+    user_completed = bool(item.get("user_is_completed"))
+    completion_ratio = float(item.get("user_completion_ratio") or 0.0)
+    if user_disliked or (0 < user_rating <= 2):
+        score *= 0.45
+        reasons.append("사용자 싫어요/낮은 별점 이력이라 감점")
+    else:
+        if user_liked:
+            score += 10.0
+            reasons.append("사용자 좋아요 이력")
+        if user_rating >= 4:
+            score += min(12.0, user_rating * 2.4)
+            reasons.append(f"사용자 별점 {user_rating}점")
+        elif user_rating == 3:
+            score += 3.0
+            reasons.append("사용자 별점 3점")
+        if user_completed or completion_ratio >= 0.85:
+            score += 6.0
+            reasons.append("완주/높은 시청 완료율")
+        elif completion_ratio >= 0.5:
+            score += 2.0
+            reasons.append("중간 이상 시청 이력")
+
     favorite_score = int(item.get("favorite_score") or 0)
     if favorite_score > 0:
         score += min(6.0, favorite_score / 20.0)
+        reasons.append("사이트 하트 점수")
 
     if pc in negative_codes:
         score *= 0.35
@@ -430,6 +461,12 @@ def _compact_search_result(item: Mapping[str, Any], *, aggressive: bool) -> Dict
         "synopsis": _clip_text(item.get("synopsis") or "", synopsis_limit),
         "source": item.get("source") or "",
         "score": item.get("score") or 0,
+        "favorite_score": item.get("favorite_score") or 0,
+        "user_rating": item.get("user_rating") or 0,
+        "user_liked": bool(item.get("user_liked")),
+        "user_disliked": bool(item.get("user_disliked")),
+        "user_is_completed": bool(item.get("user_is_completed")),
+        "user_completion_ratio": item.get("user_completion_ratio") or 0,
         "persona_match_score": item.get("persona_match_score") or 0,
         "ranking_reasons": (item.get("ranking_reasons") or [])[:3 if aggressive else 5],
         "matched_persona_terms": (item.get("matched_persona_terms") or [])[:4 if aggressive else 6],
@@ -650,9 +687,12 @@ class PersonaChatService:
 
     engine: EroticPersonaEngine = field(default_factory=EroticPersonaEngine)
     memory_store: PersonaChatMemory = field(default_factory=PersonaChatMemory)
+    enhanced_memory_store: EnhancedPersonaMemory = field(default_factory=EnhancedPersonaMemory)
     base_url: str | None = None
     model: str | None = None
     api_key: str | None = None
+    prompt_version: str = "v1"
+    system_prompt: str = field(init=False)
     temperature: float = field(
         default_factory=lambda: _env_float(
             "JAVSTORY_PERSONA_CHAT_TEMPERATURE",
@@ -670,6 +710,22 @@ class PersonaChatService:
         )
     )
     timeout_sec: float = 180.0
+
+    def __post_init__(self) -> None:
+        # Before: the system prompt was used directly from SENSUAL_PERSONA_SYSTEM_PROMPT.
+        # After: the same legacy prompt body is rendered through the versioned prompt loader.
+        prompt_cls = get_prompt(self.prompt_version)
+        self.system_prompt = prompt_cls().render(
+            persona_name="JAVSTORY Persona Chat",
+            focused_user_context=SENSUAL_PERSONA_SYSTEM_PROMPT,
+            retrieved_memories=(
+                "장기 대화 메모리와 검색 컨텍스트는 build_messages()에서 별도 system message로 제공된다."
+            ),
+        )
+        try:
+            self.enhanced_memory_store.load_from_json(str(ENHANCED_PERSONA_MEMORY_PATH))
+        except Exception as e:
+            print(f"[PersonaChatService] enhanced memory load failed: {e}")
 
     def _resolve_backend(self) -> tuple[str, str, str]:
         configured_base = (self.base_url or os.environ.get("JAVSTORY_PERSONA_CHAT_BASE_URL") or "").strip()
@@ -703,19 +759,24 @@ class PersonaChatService:
             seed_product_codes=_recommendation_seed_codes(memory_context),
         )
         context = _apply_personalized_ranking(context, memory_context)
+        compact_context = _compact_chat_context(context, aggressive=compact)
         context_json = json.dumps(
-            _compact_chat_context(context, aggressive=compact),
+            compact_context,
             ensure_ascii=False,
             default=str,
         )
+        focused_context = build_focused_context(user_message, compact_context)
+        logger.debug(f"컨텍스트 압축: {len(context_json)} → {len(focused_context)} chars")
         style_instruction = _response_style_instruction(user_message)
         messages: List[Dict[str, str]] = [
-            {"role": "system", "content": SENSUAL_PERSONA_SYSTEM_PROMPT},
+            # Before: {"role": "system", "content": SENSUAL_PERSONA_SYSTEM_PROMPT}
+            # After:  {"role": "system", "content": self.system_prompt}
+            {"role": "system", "content": self.system_prompt},
             {
                 "role": "system",
                 "content": (
-                    "현재 사용자 취향 컨텍스트 JSON이다. 이 데이터에 근거해 답하라.\n"
-                    + context_json
+                    "현재 사용자 취향 컨텍스트다. 이 데이터에 근거해 답하라.\n"
+                    + focused_context
                 ),
             },
             {
@@ -903,6 +964,11 @@ class PersonaChatService:
                 self.memory_store.record_turn(text, content)
             except Exception:
                 pass
+            try:
+                self.enhanced_memory_store.add_turn(text, content)
+                self.enhanced_memory_store.save_to_json(str(ENHANCED_PERSONA_MEMORY_PATH))
+            except Exception as e:
+                print(f"[PersonaChatService] enhanced memory turn save failed: {e}")
             usage = raw.get("usage") if isinstance(raw.get("usage"), dict) else {}
             finish = "stop"
             try:
@@ -923,6 +989,19 @@ class PersonaChatService:
             finish_reason="empty",
             usage=raw.get("usage") if isinstance(raw.get("usage"), dict) else {},
         )
+
+    def close_session(self) -> None:
+        """Compress the active enhanced-memory session, then clear working memory."""
+        try:
+            self.enhanced_memory_store.load_from_json(str(ENHANCED_PERSONA_MEMORY_PATH))
+            if len(self.enhanced_memory_store.working_memory) < 3:
+                return
+            turns = list(self.enhanced_memory_store.working_memory)
+            self.enhanced_memory_store.compress_session_to_episode(turns)
+            self.enhanced_memory_store.working_memory = []
+            self.enhanced_memory_store.save_to_json(str(ENHANCED_PERSONA_MEMORY_PATH))
+        except Exception as e:
+            print(f"[PersonaChatService] enhanced memory session compression failed: {e}")
 
 
 def example_persona_chat_call() -> Dict[str, Any]:

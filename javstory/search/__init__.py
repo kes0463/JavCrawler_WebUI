@@ -1,0 +1,2 @@
+"""Search helpers for JAVSTORY."""
+

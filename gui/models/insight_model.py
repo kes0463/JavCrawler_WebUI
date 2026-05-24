@@ -55,6 +55,9 @@ class InsightModel(QObject):
     weeklyDigestChanged = Signal()
     allDataChanged = Signal()
     logMessage          = Signal(str)
+    personaChatTokenReceived = Signal(str)
+    personaChatResponseCompleted = Signal(str)
+    personaChatErrorOccurred = Signal(str)
 
     _refreshReady = Signal(object)
     _refreshError = Signal(str)
@@ -62,6 +65,8 @@ class InsightModel(QObject):
     _personaReady = Signal(str)
     _personaError = Signal(str)
     _personaChatReady = Signal(object)
+    _personaChatToken = Signal(str)
+    _personaChatStreamCompleted = Signal(str)
     _personaChatError = Signal(str)
     _personaChatFinished = Signal()
 
@@ -89,6 +94,7 @@ class InsightModel(QObject):
         self._persona_card = "{}"
         self._persona_chat_history: list[dict[str, str]] = self._load_persona_chat_history()
         self._persona_chat_messages = json.dumps(self._persona_chat_history, ensure_ascii=False)
+        self._persona_chat_worker = None
         self._pipeline_report = "{}"
         self._weekly_digest = "{}"
         self._batch_running  = False
@@ -106,6 +112,8 @@ class InsightModel(QObject):
         self._personaReady.connect(self._apply_persona)
         self._personaError.connect(lambda msg: self.logMessage.emit(msg))
         self._personaChatReady.connect(self._apply_persona_chat_message)
+        self._personaChatToken.connect(self._apply_persona_chat_token)
+        self._personaChatStreamCompleted.connect(self._apply_persona_chat_stream_completed)
         self._personaChatError.connect(self._apply_persona_chat_error)
         self._personaChatFinished.connect(self._finish_persona_chat)
 
@@ -352,15 +360,18 @@ class InsightModel(QObject):
     def clearPersonaChat(self) -> None:
         self._persona_chat_history = []
         try:
+            from javstory.persona.persona_chat import PersonaChatService
             from javstory.persona.persona_memory import PersonaChatMemory
 
+            PersonaChatService().close_session()
             PersonaChatMemory().clear_recent_messages()
         except Exception:
             pass
         self._sync_persona_chat_messages()
 
     @Slot(str)
-    def sendPersonaChatMessage(self, message: str) -> None:
+    @Slot(str, bool)
+    def sendPersonaChatMessage(self, message: str, use_streaming: bool = False) -> None:
         text = (message or "").strip()
         if not text or self._persona_chat_running:
             return
@@ -369,6 +380,26 @@ class InsightModel(QObject):
         self._append_persona_chat_message("user", text)
         self._persona_chat_running = True
         self.personaChatRunningChanged.emit()
+
+        if use_streaming:
+            try:
+                from javstory.insight.insight_model import StreamingChatWorker
+
+                worker = StreamingChatWorker(text, history=history)
+                self._persona_chat_worker = worker
+                worker.token_received.connect(self.personaChatTokenReceived.emit)
+                worker.token_received.connect(self._personaChatToken.emit)
+                worker.response_completed.connect(self.personaChatResponseCompleted.emit)
+                worker.response_completed.connect(self._personaChatStreamCompleted.emit)
+                worker.error_occurred.connect(self.personaChatErrorOccurred.emit)
+                worker.error_occurred.connect(self._personaChatError.emit)
+                worker.finished.connect(self._personaChatFinished.emit)
+                worker.finished.connect(lambda: setattr(self, "_persona_chat_worker", None))
+                worker.start()
+            except Exception as e:
+                self._personaChatError.emit(str(e))
+                self._personaChatFinished.emit()
+            return
 
         def _worker():
             try:
@@ -438,6 +469,18 @@ class InsightModel(QObject):
         self._persona_chat_history = self._persona_chat_history[-40:]
         self._sync_persona_chat_messages()
 
+    def _upsert_streaming_assistant_message(self, content: str, *, status: str = "streaming") -> None:
+        text = str(content or "")
+        if not text:
+            return
+        if self._persona_chat_history and self._persona_chat_history[-1].get("role") == "assistant":
+            self._persona_chat_history[-1]["content"] = text
+            self._persona_chat_history[-1]["status"] = status
+        else:
+            self._persona_chat_history.append({"role": "assistant", "content": text, "status": status})
+        self._persona_chat_history = self._persona_chat_history[-40:]
+        self._sync_persona_chat_messages()
+
     def _apply_persona_chat_message(self, payload: object) -> None:
         if not isinstance(payload, dict):
             return
@@ -447,8 +490,22 @@ class InsightModel(QObject):
             status=str(payload.get("status") or "ok"),
         )
 
+    def _apply_persona_chat_token(self, token: str) -> None:
+        current = ""
+        if self._persona_chat_history and self._persona_chat_history[-1].get("role") == "assistant":
+            current = str(self._persona_chat_history[-1].get("content") or "")
+        self._upsert_streaming_assistant_message(current + str(token or ""), status="streaming")
+
+    def _apply_persona_chat_stream_completed(self, content: str) -> None:
+        text = str(content or "")
+        if text:
+            self._upsert_streaming_assistant_message(text, status="ok")
+        elif self._persona_chat_history and self._persona_chat_history[-1].get("role") == "assistant":
+            self._persona_chat_history[-1]["status"] = "ok"
+            self._sync_persona_chat_messages()
+
     def _apply_persona_chat_error(self, msg: str) -> None:
-        self._append_persona_chat_message("assistant", msg, status="error")
+        self._append_persona_chat_message("assistant", "응답 생성 중 오류가 발생했습니다.", status="error")
         self.logMessage.emit(f"[InsightModel] 페르소나 챗 실패: {msg}")
 
     def _finish_persona_chat(self) -> None:

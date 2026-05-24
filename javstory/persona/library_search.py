@@ -8,7 +8,7 @@ from typing import Any, Dict, Iterable, List
 
 from sqlalchemy import or_
 
-from javstory.harvest.database import JAVMetadata, get_db_session_ctx
+from javstory.harvest.database import JAVMetadata, WatchHistory, get_db_session_ctx
 
 _PRODUCT_CODE_RE = re.compile(r"(?<![A-Z0-9])([A-Z]{1,8})[-_\s]?(\d{2,7})(?![A-Z0-9])", re.IGNORECASE)
 _MULTI_PART_PRODUCT_CODE_RE = re.compile(
@@ -289,6 +289,50 @@ def _merge_result(results: List[Dict[str, Any]], item: Dict[str, Any]) -> None:
     results.append(item)
 
 
+def _completion_ratio(history: WatchHistory) -> float:
+    total = int(history.total_duration or 0)
+    watched = int(history.watch_duration or 0)
+    if bool(history.is_completed):
+        return 1.0
+    if total <= 0 or watched <= 0:
+        return 0.0
+    return max(0.0, min(1.0, watched / total))
+
+
+def _attach_user_watch_signals(results: List[Dict[str, Any]]) -> None:
+    codes = sorted(
+        {
+            str(item.get("product_code") or "").strip().upper()
+            for item in results
+            if str(item.get("product_code") or "").strip()
+        }
+    )
+    if not codes:
+        return
+
+    with get_db_session_ctx() as session:
+        histories = {
+            str(row.product_code or "").strip().upper(): row
+            for row in session.query(WatchHistory).filter(WatchHistory.product_code.in_(codes)).all()
+        }
+
+    for item in results:
+        pc = str(item.get("product_code") or "").strip().upper()
+        history = histories.get(pc)
+        if not history:
+            item["user_rating"] = 0
+            item["user_liked"] = False
+            item["user_disliked"] = False
+            item["user_is_completed"] = False
+            item["user_completion_ratio"] = 0.0
+            continue
+        item["user_rating"] = int(history.rating or 0)
+        item["user_liked"] = bool(history.liked)
+        item["user_disliked"] = bool(history.disliked)
+        item["user_is_completed"] = bool(history.is_completed)
+        item["user_completion_ratio"] = round(_completion_ratio(history), 3)
+
+
 def _load_grok_summary(product_code: str) -> Dict[str, Any]:
     try:
         from javstory.translation.story_grok_module import load_cached_grok_json_flexible
@@ -483,6 +527,7 @@ class PersonaLibrarySearch:
                 if len(results) >= self.limit:
                     break
 
+        _attach_user_watch_signals(results)
         results.sort(key=lambda x: (float(x.get("score") or 0), int(x.get("favorite_score") or 0)), reverse=True)
         return {
             "query": query,

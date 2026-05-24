@@ -7,24 +7,189 @@ graphic sexual roleplay.
 
 from __future__ import annotations
 
+import asyncio
 import json
+import math
 from dataclasses import dataclass
 from typing import Any, Dict, List
 
 from javstory.analytics.persona_card import get_persona_card
 from javstory.analytics.persona_context import build_persona_context
 from javstory.harvest.database import JAVMetadata, get_db_session_ctx
+from javstory.library.embeddings.pipeline import embeddings_ollama_model_from_env
+from javstory.llm.ollama_embeddings import ollama_embed_texts
 from javstory.persona.library_search import (
-    PersonaLibrarySearch,
+    _attach_user_watch_signals,
+    detect_source_policy,
     extract_product_codes,
+    extract_strict_title_terms,
     normalize_product_code,
+    row_to_search_result,
+    split_query_terms,
 )
+from javstory.search.library_search import HybridLibrarySearch
+
+CONTEXT_SIMILARITY_THRESHOLD = 0.6
+CONTEXT_MAX_ITEMS = 8
 
 
 def _split_csv(text: str | None) -> List[str]:
     if not text:
         return []
     return [v.strip() for v in text.replace("、", ",").split(",") if v.strip()]
+
+
+def _cosine_similarity(a: List[float], b: List[float]) -> float:
+    if not a or not b:
+        return float("-inf")
+    n = min(len(a), len(b))
+    if n <= 0:
+        return float("-inf")
+    dot = 0.0
+    norm_a = 0.0
+    norm_b = 0.0
+    for idx in range(n):
+        av = float(a[idx])
+        bv = float(b[idx])
+        dot += av * bv
+        norm_a += av * av
+        norm_b += bv * bv
+    if norm_a <= 0 or norm_b <= 0:
+        return float("-inf")
+    return dot / (math.sqrt(norm_a) * math.sqrt(norm_b))
+
+
+def _embed_texts_blocking(texts: List[str]) -> List[List[float]]:
+    model = embeddings_ollama_model_from_env()
+    try:
+        return asyncio.run(ollama_embed_texts(texts=texts, model=model, timeout_sec=90.0))
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        try:
+            return loop.run_until_complete(ollama_embed_texts(texts=texts, model=model, timeout_sec=90.0))
+        finally:
+            loop.close()
+
+
+def _context_value_to_text(value: Any) -> str:
+    if isinstance(value, str):
+        return value.strip()
+    return json.dumps(value, ensure_ascii=False, default=str)
+
+
+def build_focused_context(user_message: str, full_persona_data: dict) -> str:
+    """Select persona attributes most relevant to the current user message."""
+    query = str(user_message or "").strip()
+    if not query or not isinstance(full_persona_data, dict):
+        return "[취향 정보]"
+
+    items: List[tuple[str, str]] = []
+    for key, value in full_persona_data.items():
+        value_text = _context_value_to_text(value)
+        if str(key).strip() and value_text:
+            items.append((str(key), value_text))
+    if not items:
+        return "[취향 정보]"
+
+    texts = [query] + [f"{key}: {value}" for key, value in items]
+    try:
+        vectors = _embed_texts_blocking(texts)
+    except Exception:
+        return "[취향 정보]"
+    if len(vectors) != len(texts):
+        return "[취향 정보]"
+
+    query_vec = vectors[0]
+    scored: List[tuple[float, str, str]] = []
+    for (key, value), vec in zip(items, vectors[1:]):
+        score = _cosine_similarity(query_vec, vec)
+        if math.isfinite(score) and score >= CONTEXT_SIMILARITY_THRESHOLD:
+            scored.append((score, key, value))
+    scored.sort(key=lambda item: item[0], reverse=True)
+
+    lines = ["[취향 정보]"]
+    for _score, key, value in scored[:CONTEXT_MAX_ITEMS]:
+        lines.append(f"- {key}: {value}")
+    return "\n".join(lines)
+
+
+def _adapt_hybrid_search_results(
+    query: str,
+    hybrid_results: List[Dict[str, Any]],
+    *,
+    product_codes: List[str] | None = None,
+    fallback_seed_codes: List[str] | None = None,
+) -> Dict[str, Any]:
+    """Adapt HybridLibrarySearch rows to Persona Chat's library_search schema."""
+    codes = list(product_codes or extract_product_codes(query, limit=5))
+    strict_title_terms = extract_strict_title_terms(query)
+    source_policy = detect_source_policy(
+        query,
+        product_codes=codes,
+        strict_title_terms=strict_title_terms,
+    )
+    result_codes: List[str] = []
+    result_by_code: Dict[str, Dict[str, Any]] = {}
+    for item in hybrid_results:
+        code = normalize_product_code(str(item.get("id") or ""))
+        if code and code not in result_by_code:
+            result_codes.append(code)
+            result_by_code[code] = item
+    adapted_results: List[Dict[str, Any]] = []
+
+    with get_db_session_ctx() as session:
+        rows = (
+            session.query(JAVMetadata)
+            .filter(JAVMetadata.product_code.in_(result_codes))
+            .all()
+            if result_codes
+            else []
+        )
+        row_by_code = {str(row.product_code or "").strip().upper(): row for row in rows}
+
+    for code in result_codes:
+        item = result_by_code.get(code) or {}
+        row = row_by_code.get(code)
+        if row:
+            adapted = row_to_search_result(
+                row,
+                source=str(item.get("source") or "hybrid"),
+                score=float(item.get("score") or 0),
+            )
+        else:
+            adapted = {
+                "product_code": code,
+                "title_ko": str(item.get("title") or ""),
+                "title_ja": "",
+                "actors": [],
+                "genres": [],
+                "maker": "",
+                "release_date": "",
+                "synopsis": "",
+                "favorite_score": 0,
+                "folder_path": "",
+                "source": str(item.get("source") or "hybrid"),
+                "score": float(item.get("score") or 0),
+            }
+        adapted["hybrid_score"] = float(item.get("score") or 0)
+        adapted["hybrid_source"] = str(item.get("source") or "hybrid")
+        adapted_results.append(adapted)
+
+    _attach_user_watch_signals(adapted_results)
+    return {
+        "query": query,
+        "terms": split_query_terms(query),
+        "strict_title_terms": strict_title_terms,
+        "strict_title_contains": bool(strict_title_terms),
+        "source_policy": source_policy,
+        "product_codes": codes,
+        "fallback_seed_codes": [
+            normalize_product_code(code)
+            for code in list(fallback_seed_codes or [])
+            if normalize_product_code(code)
+        ],
+        "results": adapted_results,
+    }
 
 
 @dataclass
@@ -105,8 +270,16 @@ class EroticPersonaEngine:
         context = self.context_snapshot() if not self.cache_only else {}
         products = [self.product_snapshot(pc) for pc in mentioned[:3]]
         products = [p for p in products if p]
-        library_search = PersonaLibrarySearch(limit=self.search_limit).search(
+        # LEGACY: 아래 코드는 HybridLibrarySearch로 대체됨
+        # library_search = PersonaLibrarySearch(limit=self.search_limit).search(
+        #     user_message,
+        #     product_codes=mentioned,
+        #     fallback_seed_codes=seed_product_codes,
+        # )
+        hybrid_results = HybridLibrarySearch(top_k=20).search_with_fusion(user_message)
+        library_search = _adapt_hybrid_search_results(
             user_message,
+            hybrid_results,
             product_codes=mentioned,
             fallback_seed_codes=seed_product_codes,
         )

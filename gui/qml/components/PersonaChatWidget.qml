@@ -11,6 +11,8 @@ GlassCard {
     property string messagesJson: "[]"
     property bool running: false
     property var messages: []
+    property var streamTarget: null
+    property bool streamingActive: false
 
     signal sendRequested(string message)
     signal clearRequested()
@@ -28,18 +30,84 @@ GlassCard {
         var text = input.text.trim()
         if (!text || root.running)
             return
+        root.streamingActive = true
         root.sendRequested(text)
         input.text = ""
     }
 
+    function appendStreamingToken(token) {
+        if (!token)
+            return
+        root.streamingActive = true
+        var next = root.messages.slice()
+        if (next.length > 0 && next[next.length - 1].role === "assistant") {
+            var last = Object.assign({}, next[next.length - 1])
+            last.content = (last.content || "") + token
+            last.status = "streaming"
+            next[next.length - 1] = last
+        } else {
+            next.push({ "role": "assistant", "content": token, "status": "streaming" })
+        }
+        root.messages = next
+        Qt.callLater(function() {
+            chatList.positionViewAtEnd()
+        })
+    }
+
+    function completeStreamingResponse(content) {
+        root.streamingActive = false
+        var next = root.messages.slice()
+        if (next.length > 0 && next[next.length - 1].role === "assistant") {
+            var last = Object.assign({}, next[next.length - 1])
+            if (content)
+                last.content = content
+            last.status = "ok"
+            next[next.length - 1] = last
+            root.messages = next
+        }
+        Qt.callLater(function() {
+            chatList.positionViewAtEnd()
+        })
+    }
+
+    function showStreamingError() {
+        root.streamingActive = false
+        var next = root.messages.slice()
+        next.push({
+            "role": "assistant",
+            "content": "응답 생성 중 오류가 발생했습니다.",
+            "status": "error"
+        })
+        root.messages = next
+        Qt.callLater(function() {
+            chatList.positionViewAtEnd()
+        })
+    }
+
     onMessagesJsonChanged: {
         parseMessages()
+        if (!root.running)
+            root.streamingActive = false
         Qt.callLater(function() {
             chatList.positionViewAtEnd()
         })
     }
 
     Component.onCompleted: parseMessages()
+
+    Connections {
+        target: root.streamTarget
+        ignoreUnknownSignals: true
+        function onPersonaChatTokenReceived(token) {
+            root.appendStreamingToken(token)
+        }
+        function onPersonaChatResponseCompleted(content) {
+            root.completeStreamingResponse(content)
+        }
+        function onPersonaChatErrorOccurred(_message) {
+            root.showStreamingError()
+        }
+    }
 
     ColumnLayout {
         anchors.fill: parent
@@ -178,14 +246,36 @@ GlassCard {
 
             footer: Item {
                 width: chatList.width
-                height: root.running ? 28 : 0
-                visible: root.running
-                Text {
+                height: (root.running && root.streamingActive) ? 32 : 0
+                visible: root.running && root.streamingActive
+                Row {
                     anchors.left: parent.left
                     anchors.verticalCenter: parent.verticalCenter
-                    text: "답변 생성 중..."
-                    font.pixelSize: Theme.fontCaption
-                    color: Theme.textMuted
+                    spacing: 4
+
+                    Text {
+                        text: "타이핑 중"
+                        font.pixelSize: Theme.fontCaption
+                        color: Theme.textMuted
+                    }
+
+                    Repeater {
+                        model: 3
+                        Text {
+                            text: "."
+                            font.pixelSize: Theme.fontCaption
+                            color: Theme.textMuted
+                            opacity: 0.25
+
+                            SequentialAnimation on opacity {
+                                loops: Animation.Infinite
+                                PauseAnimation { duration: index * 160 }
+                                NumberAnimation { to: 1.0; duration: 180 }
+                                NumberAnimation { to: 0.25; duration: 360 }
+                                PauseAnimation { duration: 480 - index * 120 }
+                            }
+                        }
+                    }
                 }
             }
         }
