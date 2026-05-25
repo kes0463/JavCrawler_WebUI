@@ -475,7 +475,11 @@ def _ensure_idle_monitor_started(*, logger_func: LoggerFunc | None = None) -> No
     if not llamacpp_idle_shutdown_enabled():
         return
     with _lock:
-        if _idle_thread is not None and _idle_thread.is_alive():
+        if (
+            _idle_thread is not None
+            and _idle_thread.is_alive()
+            and not _idle_stop_event.is_set()
+        ):
             return
         _idle_stop_event.clear()
         _idle_shutdown_logged = False
@@ -503,9 +507,50 @@ def _ensure_idle_monitor_started(*, logger_func: LoggerFunc | None = None) -> No
     _idle_thread.start()
 
 
+def _terminate_llamacpp_proc(
+    proc: subprocess.Popen,
+    *,
+    logger_func: LoggerFunc | None = None,
+    label: str = "llama-server",
+) -> None:
+    """Terminate the managed llama-server process, including its tree on Windows."""
+    log = logger_func or print
+    if proc.poll() is not None:
+        return
+    try:
+        proc.terminate()
+        proc.wait(timeout=15)
+        log(f"[llama.cpp] {label} 종료")
+        return
+    except subprocess.TimeoutExpired:
+        pass
+    except Exception as e:
+        log(f"[llama.cpp] {label} 종료 요청 오류(강제 종료 시도): {e}")
+
+    if sys.platform == "win32":
+        try:
+            subprocess.run(
+                ["taskkill", "/PID", str(proc.pid), "/T", "/F"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+                creationflags=subprocess.CREATE_NO_WINDOW,  # type: ignore[attr-defined]
+            )
+        except Exception as e:
+            log(f"[llama.cpp] taskkill 오류(무시): {e}")
+
+    try:
+        if proc.poll() is None:
+            proc.kill()
+        proc.wait(timeout=5)
+        log(f"[llama.cpp] {label} 강제 종료")
+    except Exception as e:
+        log(f"[llama.cpp] {label} 강제 종료 오류(무시): {e}")
+
+
 def stop_llamacpp_server(*, logger_func: LoggerFunc | None = None) -> None:
     global _server_proc, _active_preset_id, _active_requests
-    log = logger_func or print
+    _idle_stop_event.set()
     with _lock:
         proc = _server_proc
         _server_proc = None
@@ -513,15 +558,7 @@ def stop_llamacpp_server(*, logger_func: LoggerFunc | None = None) -> None:
         _active_requests = 0
     if proc is None:
         return
-    try:
-        proc.terminate()
-        proc.wait(timeout=15)
-        log("[llama.cpp] llama-server 종료")
-    except subprocess.TimeoutExpired:
-        proc.kill()
-        log("[llama.cpp] llama-server 강제 종료")
-    except Exception as e:
-        log(f"[llama.cpp] 종료 중 오류(무시): {e}")
+    _terminate_llamacpp_proc(proc, logger_func=logger_func)
 
 
 def register_llamacpp_app_shutdown(app: Any, *, logger_func: LoggerFunc | None = None) -> None:
@@ -646,21 +683,22 @@ def ensure_llamacpp_server_ready(
         return ready_alias
 
     if proc_to_stop is not None:
-        try:
-            proc_to_stop.terminate()
-            proc_to_stop.wait(timeout=15)
-            log("[llama.cpp] llama-server 종료")
-        except subprocess.TimeoutExpired:
-            proc_to_stop.kill()
-            log("[llama.cpp] llama-server 강제 종료")
-        except Exception as e:
-            log(f"[llama.cpp] 종료 중 오류(무시): {e}")
+        _terminate_llamacpp_proc(proc_to_stop, logger_func=log)
 
     argv = build_server_argv(gguf, cfg, preset)
     proc = _spawn_server(argv, logger_func=log)
+    with _lock:
+        # Register immediately so app shutdown can stop the server even while it is still loading.
+        _server_proc = proc
+        _active_preset_id = preset.id
+        _last_activity_at = time.time()
     deadline = time.time() + max(5.0, wait_sec)
     while time.time() < deadline:
         if proc.poll() is not None:
+            with _lock:
+                if _server_proc is proc:
+                    _server_proc = None
+                    _active_preset_id = None
             tail = _tail_server_log()
             hint = _server_exit_hint(tail)
             msg = f"llama-server가 조기 종료되었습니다 (code={proc.returncode}). 로그: {_log_path}"

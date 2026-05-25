@@ -48,6 +48,30 @@ def test_insight_fetch_core_uses_cache_only_persona(monkeypatch):
             mock_persona.assert_called_once_with(cache_only=True)
 
 
+def test_persona_feedback_persists_jsonl(tmp_path, monkeypatch):
+    import javstory.config.app_config as app_config
+    from gui.models.insight_model import InsightModel
+
+    monkeypatch.setattr(app_config, "DATA_ROOT", tmp_path)
+    InsightModel._persist_persona_feedback(
+        "positive",
+        {
+            "persona_type": "검증형",
+            "summary": "요약",
+            "input_fingerprint": "abc",
+            "semantic_fingerprint": "def",
+            "generated_at": "2099-01-01T00:00:00",
+            "source": "test",
+        },
+    )
+
+    path = tmp_path / "cache" / "persona_feedback.jsonl"
+    rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+    assert rows[0]["feedback"] == "positive"
+    assert rows[0]["persona_type"] == "검증형"
+    assert rows[0]["input_fingerprint"] == "abc"
+
+
 def test_library_distribution_cache_short_circuit():
     from unittest.mock import patch
     import time

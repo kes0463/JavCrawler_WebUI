@@ -17,7 +17,11 @@ def test_persona_chat_dynamic_temperature_and_tokens():
 
 
 def test_persona_chat_filters_reasoning_only_payload():
-    from javstory.persona.persona_chat import _coalesce_response_text, _strip_reasoning_leak
+    from javstory.persona.persona_chat import (
+        _coalesce_response_text,
+        _is_incomplete_stage_direction_response,
+        _strip_reasoning_leak,
+    )
 
     payload = {
         "choices": [
@@ -33,6 +37,8 @@ def test_persona_chat_filters_reasoning_only_payload():
 
     leaked = "Analysis: hidden notes\nFinal Answer: 이 작품은 긴장감과 관계성 때문에 꽂히는 쪽이야."
     assert _strip_reasoning_leak(leaked) == "이 작품은 긴장감과 관계성 때문에 꽂히는 쪽이야."
+    assert _is_incomplete_stage_direction_response("(깊게 숨을 들이마시며") is True
+    assert _is_incomplete_stage_direction_response("(낮게 웃으며) 네 취향은 긴장감 쪽에 가까워.") is False
 
 
 def test_persona_chat_applies_personalized_ranking():
@@ -142,6 +148,45 @@ def test_persona_chat_ranking_uses_user_watch_signals():
     assert "사용자 싫어요/낮은 별점 이력이라 감점" in ranked[1]["ranking_reasons"]
 
 
+def test_persona_chat_penalizes_recently_recommended_codes():
+    from javstory.persona.persona_chat import _apply_personalized_ranking
+
+    context = {
+        "persona": {"sensual_summary": "마사지 긴장감", "turn_ons": ["마사지"], "affinities": []},
+        "library_search": {
+            "query": "마사지 작품 추천",
+            "results": [
+                {
+                    "product_code": "OLD-001",
+                    "title_ko": "마사지 긴장감 기존 추천작",
+                    "genres": ["마사지"],
+                    "source": "db_text",
+                    "score": 1.0,
+                },
+                {
+                    "product_code": "NEW-001",
+                    "title_ko": "마사지 긴장감 새 추천작",
+                    "genres": ["마사지"],
+                    "source": "db_text",
+                    "score": 0.75,
+                },
+            ],
+        },
+    }
+    ranked = _apply_personalized_ranking(
+        context,
+        {
+            "strong_reaction_notes": [],
+            "negative_feedback_notes": [],
+            "recent_recommended_product_codes": ["OLD-001"],
+        },
+    )["library_search"]
+
+    assert ranked["results"][0]["product_code"] == "NEW-001"
+    assert "OLD-001" in ranked["diversity_policy"]["recent_recommended_product_codes"]
+    assert any("다양성 감점" in reason for reason in ranked["results"][1]["ranking_reasons"])
+
+
 def test_persona_chat_build_messages_uses_focused_context(monkeypatch):
     from javstory.persona import persona_chat as pc
 
@@ -170,6 +215,118 @@ def test_persona_chat_build_messages_uses_focused_context(monkeypatch):
 
     assert "압축됨" in context_message
     assert "전체 페르소나" not in context_message
+
+
+def test_persona_chat_story_summary_pins_exact_product_context(monkeypatch):
+    from javstory.persona import persona_chat as pc
+
+    class DummyEngine:
+        def build_chat_context(self, *_args, **_kwargs):
+            return {
+                "persona": {"summary": "전체 페르소나", "turn_ons": ["마사지"]},
+                "taste_context": {},
+                "mentioned_products": [
+                    {
+                        "product_code": "ABC-123",
+                        "title_ko": "테스트 작품",
+                        "title_ja": "テスト作品",
+                        "actors": ["배우A"],
+                        "genres": ["드라마"],
+                        "synopsis": "공식 시놉시스 내용",
+                        "story_context": {
+                            "summary": "Grok이 저장한 정확한 스토리 요약",
+                            "tags": ["긴장감"],
+                            "tones": ["차분함"],
+                        },
+                    }
+                ],
+                "library_search": {
+                    "results": [
+                        {
+                            "product_code": "WRONG-999",
+                            "title_ko": "다른 후보",
+                            "grok": {"summary": "다른 작품 줄거리"},
+                        }
+                    ]
+                },
+            }
+
+    class DummyMemory:
+        def prompt_context(self, *_args, **_kwargs):
+            return {}
+
+    monkeypatch.setattr(pc, "build_focused_context", lambda *_args, **_kwargs: "[취향 정보]")
+
+    service = pc.PersonaChatService(engine=DummyEngine(), memory_store=DummyMemory())
+    messages = service.build_messages("ABC-123 작품 설명해줘")
+    context_message = messages[1]["content"]
+    memory_message = messages[2]["content"]
+
+    assert "[작품 사실 고정 근거]" in context_message
+    assert "ABC-123" in context_message
+    assert "story_reliability: 높음" in context_message
+    assert "story_source: DB synopsis + Grok story_context" in context_message
+    assert "공식 시놉시스 내용" in context_message
+    assert "Grok이 저장한 정확한 스토리 요약" in context_message
+    assert "다른 검색 후보" in context_message
+    assert "다른 작품 줄거리" not in context_message
+    assert "[취향 정보]" not in context_message
+    assert "사실 근거로 쓰지 않는다" in memory_message
+
+
+def test_persona_chat_story_context_only_is_marked_lower_confidence(monkeypatch):
+    from javstory.persona import persona_chat as pc
+
+    class DummyEngine:
+        def build_chat_context(self, *_args, **_kwargs):
+            return {
+                "persona": {},
+                "taste_context": {},
+                "mentioned_products": [
+                    {
+                        "product_code": "ABC-123",
+                        "title_ko": "테스트 작품",
+                        "synopsis": "",
+                        "story_context": {
+                            "summary": "Grok 캐시 요약",
+                            "source": "grok_story_cache",
+                            "confidence": "medium",
+                        },
+                    }
+                ],
+                "library_search": {"results": []},
+            }
+
+    class DummyMemory:
+        def prompt_context(self, *_args, **_kwargs):
+            return {}
+
+    service = pc.PersonaChatService(engine=DummyEngine(), memory_store=DummyMemory())
+    messages = service.build_messages("ABC-123 작품 설명해줘")
+    context_message = messages[1]["content"]
+
+    assert "story_reliability: 중간" in context_message
+    assert "story_source: Grok story_context only" in context_message
+    assert "공식 줄거리처럼 말하지 않는다" in context_message
+
+
+def test_persona_chat_final_only_prompt_blocks_parenthetical_stage_direction(monkeypatch):
+    from javstory.persona import persona_chat as pc
+
+    class DummyEngine:
+        def build_chat_context(self, *_args, **_kwargs):
+            return {"persona": {}, "taste_context": {}, "mentioned_products": [], "library_search": {"results": []}}
+
+    class DummyMemory:
+        def prompt_context(self, *_args, **_kwargs):
+            return {}
+
+    monkeypatch.setattr(pc, "build_focused_context", lambda *_args, **_kwargs: "[취향 정보]")
+
+    service = pc.PersonaChatService(engine=DummyEngine(), memory_store=DummyMemory())
+    messages = service.build_messages("더 세게 말해줘", force_final_only=True)
+
+    assert any("괄호로 된 행동 지문" in message["content"] for message in messages)
 
 
 def test_persona_chat_close_session_compresses_enhanced_memory(tmp_path, monkeypatch):

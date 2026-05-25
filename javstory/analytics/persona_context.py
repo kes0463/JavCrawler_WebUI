@@ -12,6 +12,14 @@ from javstory.analytics.preference_engine import compute_recent_trend, get_top_a
 from javstory.harvest.database import JAVMetadata, WatchHistory, get_db_session_ctx
 
 
+def _env_int(name: str, default: int, min_value: int, max_value: int) -> int:
+    try:
+        value = int(os.environ.get(name, str(default)) or default)
+    except (TypeError, ValueError):
+        value = default
+    return max(min_value, min(max_value, value))
+
+
 def persona_deep_enabled() -> bool:
     raw = (os.environ.get("JAVSTORY_PERSONA_DEEP_ENABLED", "1") or "1").strip().lower()
     return raw in ("1", "true", "yes", "on")
@@ -23,6 +31,39 @@ def persona_sample_size() -> int:
     except ValueError:
         n = 8
     return max(4, min(12, n))
+
+
+def persona_recent_days() -> int:
+    return _env_int("JAVSTORY_PERSONA_RECENT_DAYS", 30, 3, 90)
+
+
+def persona_short_recent_days() -> int:
+    return min(persona_recent_days(), _env_int("JAVSTORY_PERSONA_SHORT_RECENT_DAYS", 7, 1, 30))
+
+
+def persona_context_budget() -> Dict[str, int]:
+    return {
+        "grok_summary_chars": _env_int("JAVSTORY_PERSONA_GROK_SUMMARY_CHARS", 400, 80, 1000),
+        "per_product_tag_limit": _env_int("JAVSTORY_PERSONA_PER_PRODUCT_TAG_LIMIT", 16, 4, 40),
+        "tag_counter_limit": _env_int("JAVSTORY_PERSONA_TAG_COUNTER_LIMIT", 15, 4, 40),
+        "tone_counter_limit": _env_int("JAVSTORY_PERSONA_TONE_COUNTER_LIMIT", 8, 2, 24),
+        "semantic_seed_limit": _env_int("JAVSTORY_PERSONA_SEMANTIC_SEED_LIMIT", 30, 4, 80),
+        "semantic_top_k": _env_int("JAVSTORY_PERSONA_SEMANTIC_TOP_K", 5, 0, 20),
+    }
+
+
+def persona_prompt_budget() -> Dict[str, int]:
+    return {
+        "taste_axes": _env_int("JAVSTORY_PERSONA_PROMPT_TASTE_AXES", 6, 1, 12),
+        "top_actors": _env_int("JAVSTORY_PERSONA_PROMPT_TOP_ACTORS", 5, 1, 12),
+        "top_genres": _env_int("JAVSTORY_PERSONA_PROMPT_TOP_GENRES", 8, 1, 16),
+        "recent_genres": _env_int("JAVSTORY_PERSONA_PROMPT_RECENT_GENRES", 5, 1, 12),
+        "tag_counter": _env_int("JAVSTORY_PERSONA_PROMPT_TAG_COUNTER", 12, 2, 30),
+        "tone_counter": _env_int("JAVSTORY_PERSONA_PROMPT_TONE_COUNTER", 6, 1, 20),
+        "samples": _env_int("JAVSTORY_PERSONA_PROMPT_SAMPLES", 10, 1, 20),
+        "grok_summary_chars": _env_int("JAVSTORY_PERSONA_PROMPT_GROK_SUMMARY_CHARS", 200, 80, 800),
+        "sample_tags": _env_int("JAVSTORY_PERSONA_PROMPT_SAMPLE_TAGS", 6, 1, 16),
+    }
 
 
 def _completion_ratio(h: WatchHistory) -> float:
@@ -143,40 +184,46 @@ def _watch_meta_by_codes(codes: List[str]) -> Dict[str, Dict[str, Any]]:
     return out
 
 
-def _extract_grok_product(pc: str, grok: Dict[str, Any]) -> Dict[str, Any]:
+def _extract_grok_product(
+    pc: str,
+    grok: Dict[str, Any],
+    *,
+    summary_chars: int = 400,
+    item_limit: int = 16,
+) -> Dict[str, Any]:
     tags: List[str] = []
     tones: List[str] = []
     for s in grok.get("scenes") or []:
         if not isinstance(s, dict):
             continue
         for t in s.get("key_tags") or []:
-            if isinstance(t, str) and t.strip():
+            if isinstance(t, str) and t.strip() and len(tags) < item_limit:
                 tags.append(t.strip())
         tone = (s.get("tone") or "").strip()
-        if tone:
+        if tone and len(tones) < item_limit:
             tones.append(tone)
     summary = (grok.get("overall_summary") or grok.get("synopsis_short") or "").strip()
     return {
         "product_code": pc,
         "source": "grok",
-        "overall_summary": summary[:400] if summary else "",
+        "overall_summary": summary[:summary_chars] if summary else "",
         "tags": tags,
         "tones": tones,
         "scene_count": len(grok.get("scenes") or []),
     }
 
 
-def _extract_canonical_product(pc: str, state) -> Dict[str, Any]:
+def _extract_canonical_product(pc: str, state, *, item_limit: int = 16) -> Dict[str, Any]:
     tags: List[str] = []
     tones: List[str] = []
     labels: List[str] = []
     for s in state.scenes or []:
         for t in s.key_tags or []:
-            if t and str(t).strip():
+            if t and str(t).strip() and len(tags) < item_limit:
                 tags.append(str(t).strip())
-        if s.tone and str(s.tone).strip():
+        if s.tone and str(s.tone).strip() and len(tones) < item_limit:
             tones.append(str(s.tone).strip())
-        if s.scene_label and str(s.scene_label).strip():
+        if s.scene_label and str(s.scene_label).strip() and len(labels) < 5:
             labels.append(str(s.scene_label).strip())
     return {
         "product_code": pc,
@@ -184,7 +231,7 @@ def _extract_canonical_product(pc: str, state) -> Dict[str, Any]:
         "scene_count": len(state.scenes or []),
         "tags": tags,
         "tones": tones,
-        "labels": labels[:5],
+        "labels": labels,
     }
 
 
@@ -285,6 +332,11 @@ def _sample_roles_by_code(groups: Dict[str, List[str]]) -> Dict[str, List[str]]:
 
 
 def _build_semantic_profile(seed_codes: List[str], exclude_codes: set[str]) -> Dict[str, Any]:
+    budget = persona_context_budget()
+    seed_limit = budget["semantic_seed_limit"]
+    top_k = budget["semantic_top_k"]
+    if top_k <= 0:
+        return {}
     try:
         from javstory.library.embeddings.pipeline import (
             embeddings_enabled_from_env,
@@ -301,12 +353,12 @@ def _build_semantic_profile(seed_codes: List[str], exclude_codes: set[str]) -> D
         return {}
 
     model = embeddings_ollama_model_from_env()
-    profile = build_user_profile_vector(model=model, seed_codes=seed_codes[:30])
+    profile = build_user_profile_vector(model=model, seed_codes=seed_codes[:seed_limit])
     if not profile:
         return {"enabled": True, "model": model, "seed_count": len(seed_codes), "nearest_unwatched": []}
 
     nearest = []
-    for item in rank_unwatched_by_vector(profile, model=model, exclude_codes=exclude_codes, top_k=5):
+    for item in rank_unwatched_by_vector(profile, model=model, exclude_codes=exclude_codes, top_k=top_k):
         nearest.append({
             "product_code": item.product_code,
             "score": round(float(item.score), 4),
@@ -315,25 +367,39 @@ def _build_semantic_profile(seed_codes: List[str], exclude_codes: set[str]) -> D
     return {
         "enabled": True,
         "model": model,
-        "seed_count": len(seed_codes),
+        "seed_count": min(len(seed_codes), seed_limit),
         "nearest_unwatched": nearest,
     }
 
 
-def _build_drift_hint(monthly: List[Dict[str, Any]], recent_genres: List[Dict[str, Any]]) -> str:
-    if not monthly and not recent_genres:
+def _build_drift_hint(
+    monthly: List[Dict[str, Any]],
+    short_recent_genres: List[Dict[str, Any]],
+    recent_genres: List[Dict[str, Any]],
+    *,
+    short_days: int,
+    recent_days: int,
+) -> str:
+    if not monthly and not short_recent_genres and not recent_genres:
         return ""
     old_top: List[str] = []
     if len(monthly) >= 2:
         genres = monthly[-1].get("genres") or []
         old_top = [g.get("name", "") for g in genres[:2] if g.get("name")]
+    short_top = [g.get("name", "") for g in (short_recent_genres or [])[:2] if g.get("name")]
     recent_top = [g.get("name", "") for g in (recent_genres or [])[:2] if g.get("name")]
-    if not recent_top:
+    if short_top and recent_top and short_top[0] != recent_top[0]:
+        return (
+            f"최근 {short_days}일 취향은 '{short_top[0]}' 쪽으로 빠르게 기울고 있으며, "
+            f"{recent_days}일 기준 선호('{recent_top[0]}')와 차이가 있습니다."
+        )
+    if not short_top and not recent_top:
         return ""
-    if old_top and recent_top[0] and recent_top[0] not in old_top:
-        return f"최근 취향은 '{recent_top[0]}' 장르 쪽으로 이동하는 경향이 있습니다."
-    if recent_top:
-        return f"최근 자주 보는 장르: {', '.join(recent_top)}."
+    focus_top = short_top or recent_top
+    if old_top and focus_top[0] and focus_top[0] not in old_top:
+        return f"최근 {short_days}일 취향은 '{focus_top[0]}' 장르 쪽으로 이동하는 경향이 있습니다."
+    if focus_top:
+        return f"최근 {short_days}일 자주 보는 장르: {', '.join(focus_top)}."
     return ""
 
 
@@ -342,6 +408,9 @@ def build_persona_context(*, max_products: int | None = None) -> Dict[str, Any]:
     페르소나 합성용 구조화 컨텍스트.
     """
     n = int(max_products or persona_sample_size())
+    budget = persona_context_budget()
+    recent_days = persona_recent_days()
+    short_days = persona_short_recent_days()
     from javstory.config.app_config import similarity_excluded_genres_from_env
 
     excluded = similarity_excluded_genres_from_env()
@@ -349,24 +418,38 @@ def build_persona_context(*, max_products: int | None = None) -> Dict[str, Any]:
     stats = get_library_stats()
     taste = compute_taste_vector()
     monthly = get_monthly_genre_trend(3)
-    recent = compute_recent_trend(30, excluded_genres=excluded)
-    drift_hint = _build_drift_hint(monthly, recent.get("genres") or [])
+    recent = compute_recent_trend(recent_days, excluded_genres=excluded)
+    short_recent = compute_recent_trend(short_days, excluded_genres=excluded)
+    drift_hint = _build_drift_hint(
+        monthly,
+        short_recent.get("genres") or [],
+        recent.get("genres") or [],
+        short_days=short_days,
+        recent_days=recent_days,
+    )
 
     ctx: Dict[str, Any] = {
         "stats": stats,
         "taste_axes": taste.get("axes") or [],
         "top_actors": get_top_actors(5),
         "top_genres": get_top_genres(8, excluded=excluded),
-        "top_actors_recent": get_top_actors(5, use_recent=True),
-        "top_genres_recent": get_top_genres(5, use_recent=True, excluded=excluded),
+        "top_actors_recent": short_recent.get("actors") or recent.get("actors") or [],
+        "top_genres_recent": short_recent.get("genres") or recent.get("genres") or [],
         "monthly_genres": monthly,
+        "recent_window": {
+            "short_days": short_days,
+            "days": recent_days,
+        },
+        "recent_trend": recent,
+        "short_recent_trend": short_recent,
         "drift_hint": drift_hint,
         "samples": [],
         "sample_codes": [],
         "sample_groups": {},
         "excluded_genres": sorted(excluded),
         "semantic_profile": {},
-        "coverage": {"grok": 0, "canonical": 0, "subtitle": 0},
+        "coverage": {"grok": 0, "grok_errors": 0, "canonical": 0, "subtitle": 0},
+        "context_budget": budget,
         "tag_counter": [],
         "tone_counter": [],
         "subtitle_profile": {},
@@ -375,7 +458,10 @@ def build_persona_context(*, max_products: int | None = None) -> Dict[str, Any]:
     if not persona_deep_enabled():
         return ctx
 
-    from javstory.translation.story_grok_module import load_cached_grok_json_flexible
+    try:
+        from javstory.translation.story_grok_module import load_cached_grok_json_flexible
+    except Exception:
+        load_cached_grok_json_flexible = None
 
     sample_groups = _sample_product_groups(n)
     codes = sample_groups.get("codes") or []
@@ -411,9 +497,20 @@ def build_persona_context(*, max_products: int | None = None) -> Dict[str, Any]:
                 "rating": int(meta.get("rating") or 0),
             }
 
-        grok = load_cached_grok_json_flexible(pc)
+        grok = None
+        if load_cached_grok_json_flexible is not None:
+            try:
+                grok = load_cached_grok_json_flexible(pc)
+            except Exception as exc:
+                entry["grok_error"] = exc.__class__.__name__
+                ctx["coverage"]["grok_errors"] += 1
         if grok and grok.get("verification_ok") is not False and not grok.get("code_mismatch"):
-            g = _extract_grok_product(pc, grok)
+            g = _extract_grok_product(
+                pc,
+                grok,
+                summary_chars=budget["grok_summary_chars"],
+                item_limit=budget["per_product_tag_limit"],
+            )
             entry["grok"] = g
             ctx["coverage"]["grok"] += 1
             for t in g.get("tags") or []:
@@ -429,7 +526,7 @@ def build_persona_context(*, max_products: int | None = None) -> Dict[str, Any]:
             sp = library_state_path(pc)
             if sp.is_file():
                 state = load_library_state(sp)
-                c = _extract_canonical_product(pc, state)
+                c = _extract_canonical_product(pc, state, item_limit=budget["per_product_tag_limit"])
                 entry["canonical"] = c
                 ctx["coverage"]["canonical"] += 1
                 for t in c.get("tags") or []:
@@ -452,8 +549,11 @@ def build_persona_context(*, max_products: int | None = None) -> Dict[str, Any]:
             products.append(entry)
 
     ctx["samples"] = products
-    ctx["tag_counter"] = _filtered_counter(tag_counter, excluded, 15)
-    ctx["tone_counter"] = [{"name": k, "count": v} for k, v in tone_counter.most_common(8)]
+    ctx["tag_counter"] = _filtered_counter(tag_counter, excluded, budget["tag_counter_limit"])
+    ctx["tone_counter"] = [
+        {"name": k, "count": v}
+        for k, v in tone_counter.most_common(budget["tone_counter_limit"])
+    ]
 
     if cues_per_min_list:
         avg = sum(cues_per_min_list) / len(cues_per_min_list)

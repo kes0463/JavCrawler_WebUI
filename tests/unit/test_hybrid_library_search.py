@@ -47,7 +47,29 @@ def test_hybrid_library_search_with_fusion_uses_all_rankers(monkeypatch):
 
     assert results
     assert set(results[0]) == {"id", "title", "score", "source"}
-    assert len(results) <= 5
+    assert len(results) <= search.top_k
+
+
+def test_hybrid_library_search_returns_configured_top_k(monkeypatch):
+    from javstory.search.library_search import HybridLibrarySearch, _LibraryDoc, _SearchResult
+
+    docs = [_LibraryDoc(f"TST-{idx:03d}", f"테스트 {idx}", "마사지", "배우") for idx in range(8)]
+    search = HybridLibrarySearch(weights=(1.0, 0.0, 0.0), top_k=8)
+    monkeypatch.setattr(search, "_load_docs", lambda: docs)
+    monkeypatch.setattr(
+        search,
+        "_search_bm25",
+        lambda query, docs, top_k: [
+            _SearchResult(f"TST-{idx:03d}", f"테스트 {idx}", "bm25", 1.0)
+            for idx in range(8)
+        ],
+    )
+    monkeypatch.setattr(search, "_search_embedding", lambda query, docs, top_k: [])
+    monkeypatch.setattr(search, "_search_metadata", lambda query, docs, top_k: [])
+
+    results = search.search_with_fusion("마사지")
+
+    assert len(results) == 8
 
 
 def test_hybrid_results_adapter_matches_persona_schema():

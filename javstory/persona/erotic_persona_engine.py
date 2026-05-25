@@ -134,6 +134,78 @@ def _summarize_sensual_triggers(turn_ons: List[Any], strong_reactions: List[Dict
     return "이 사용자는 특히 " + ", ".join(triggers[:8]) + " 계열의 자극에 크게 반응한다."
 
 
+def _chat_intent(user_message: str, mentioned_codes: List[str]) -> str:
+    text = str(user_message or "").lower()
+    if any(hint in text for hint in ("내 취향", "취향 분석", "페르소나", "성향", "무슨 타입")):
+        return "self_analysis"
+    if mentioned_codes or any(hint in text for hint in ("이 작품", "품번", "작품 어때", "어때?", "분석해")):
+        return "product"
+    if any(hint in text for hint in ("추천", "비슷", "찾아", "골라", "볼만", "작품")):
+        return "recommendation"
+    if "왜" in text:
+        return "self_analysis"
+    return "general"
+
+
+def _selected_persona_fields(
+    intent: str,
+    *,
+    persona_type: str,
+    persona_summary: str,
+    sensual_summary: str,
+    sensual_focus: str,
+    turn_ons: List[Any],
+    avoidances: List[Any],
+    affinities: List[Any],
+    evidence: List[Any],
+    source: str,
+) -> Dict[str, Any]:
+    base: Dict[str, Any] = {
+        "intent": intent,
+        "type": persona_type,
+        "included_fields": [],
+        "sensual_focus": {
+            "priority": "high" if sensual_summary else "fallback",
+            "summary": sensual_focus,
+            "instruction": (
+                "답변에서는 일반 요약보다 이 관능 취향 요약을 우선 근거로 삼고, "
+                "사용자가 어떤 분위기와 관계성에 강하게 반응하는지 선명하게 짚는다."
+            ),
+        },
+        "source": source,
+    }
+
+    def include(key: str, value: Any) -> None:
+        if value in ("", None, [], {}):
+            return
+        base[key] = value
+        base["included_fields"].append(key)
+
+    if intent == "recommendation":
+        include("sensual_summary", sensual_summary)
+        include("turn_ons", turn_ons)
+        include("avoidances", avoidances)
+        include("affinities", affinities[:4])
+    elif intent == "self_analysis":
+        include("summary", persona_summary)
+        include("sensual_summary", sensual_summary)
+        include("turn_ons", turn_ons)
+        include("avoidances", avoidances)
+        include("affinities", affinities)
+        include("evidence", evidence[:3])
+    elif intent == "product":
+        include("sensual_summary", sensual_summary)
+        include("turn_ons", turn_ons[:5])
+        include("avoidances", avoidances[:4])
+        include("evidence", evidence[:2])
+    else:
+        include("summary", persona_summary)
+        include("sensual_summary", sensual_summary)
+        include("turn_ons", turn_ons[:4])
+        include("avoidances", avoidances[:3])
+    return base
+
+
 def build_focused_context(user_message: str, full_persona_data: dict) -> str:
     """Select persona attributes most relevant to the current user message."""
     query = str(user_message or "").strip()
@@ -288,7 +360,15 @@ class EroticPersonaEngine:
             from javstory.translation.story_grok_module import load_cached_grok_json_flexible
 
             grok = load_cached_grok_json_flexible(pc)
-            if grok and grok.get("verification_ok") is not False and not grok.get("code_mismatch"):
+            grok_pc = normalize_product_code(str((grok or {}).get("product_code") or ""))
+            if grok and (not grok_pc or grok_pc != pc):
+                data["story_context_status"] = {
+                    "available": False,
+                    "reason": "grok_product_code_mismatch",
+                    "requested_product_code": pc,
+                    "grok_product_code": grok_pc or "",
+                }
+            elif grok and grok.get("verification_ok") is not False and not grok.get("code_mismatch"):
                 scene_tags: List[str] = []
                 scene_tones: List[str] = []
                 for scene in grok.get("scenes") or []:
@@ -305,6 +385,15 @@ class EroticPersonaEngine:
                     "tags": scene_tags[:12],
                     "tones": scene_tones[:8],
                     "scene_count": len(grok.get("scenes") or []),
+                    "source": "grok_story_cache",
+                    "verified_product_code": grok_pc,
+                    "confidence": "medium",
+                }
+                data["story_context_status"] = {
+                    "available": bool(data["story_context"]["summary"]),
+                    "reason": "grok_verified_product_code_match",
+                    "requested_product_code": pc,
+                    "grok_product_code": grok_pc,
                 }
         except Exception:
             pass
@@ -323,6 +412,7 @@ class EroticPersonaEngine:
         if explicit_pc and explicit_pc not in mentioned:
             mentioned.insert(0, explicit_pc)
 
+        intent = _chat_intent(user_message, mentioned)
         persona = self.persona_snapshot()
         context = self.context_snapshot() if not self.cache_only else {}
         products = [self.product_snapshot(pc) for pc in mentioned[:3]]
@@ -356,6 +446,18 @@ class EroticPersonaEngine:
         turn_ons = list(persona.get("turn_ons") or [])
         avoidances = list(persona.get("avoidances") or [])
         affinities = list(persona.get("affinities") or [])
+        selected_persona = _selected_persona_fields(
+            intent,
+            persona_type=str(persona.get("persona_type") or ""),
+            persona_summary=persona_summary,
+            sensual_summary=sensual_summary,
+            sensual_focus=sensual_focus,
+            turn_ons=turn_ons,
+            avoidances=avoidances,
+            affinities=affinities,
+            evidence=list(persona.get("evidence") or []),
+            source=str(persona.get("source") or ""),
+        )
         trigger_summary = _summarize_sensual_triggers(turn_ons, strong_reactions)
         recommendation_reasoning_guide = {
             "must_explain": [
@@ -403,24 +505,7 @@ class EroticPersonaEngine:
                 ),
                 "recommendation_reasoning_guide": recommendation_reasoning_guide,
             },
-            "persona": {
-                "type": persona.get("persona_type", ""),
-                "summary": persona_summary,
-                "sensual_summary": sensual_summary,
-                "sensual_focus": {
-                    "priority": "high" if sensual_summary else "fallback",
-                    "summary": sensual_focus,
-                    "instruction": (
-                        "답변에서는 일반 요약보다 이 관능 취향 요약을 우선 근거로 삼고, "
-                        "사용자가 어떤 분위기와 관계성에 강하게 반응하는지 선명하게 짚는다."
-                    ),
-                },
-                "turn_ons": turn_ons,
-                "avoidances": avoidances,
-                "affinities": affinities,
-                "evidence": persona.get("evidence") or [],
-                "source": persona.get("source", ""),
-            },
+            "persona": selected_persona,
             "taste_context": {
                 "top_actors": (context.get("top_actors") or [])[:5],
                 "top_genres": (context.get("top_genres") or [])[:8],

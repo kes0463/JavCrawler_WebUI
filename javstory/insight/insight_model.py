@@ -12,6 +12,7 @@ from javstory.llm.llamacpp_backend import llamacpp_request_scope
 from javstory.persona.persona_chat import (
     ENHANCED_PERSONA_MEMORY_PATH,
     PersonaChatService,
+    _is_incomplete_stage_direction_response,
     _situational_max_tokens,
     _situational_temperature,
     _strip_reasoning_leak,
@@ -42,6 +43,7 @@ class StreamingChatWorker(QThread):
         self.history = list(history or [])
         self.product_code = product_code
         self.service = service or PersonaChatService()
+        self._retried_non_streaming = False
 
     def run(self) -> None:
         """Stream tokens, emit sentence-sized chunks, and finish safely."""
@@ -86,13 +88,35 @@ class StreamingChatWorker(QThread):
                                 sentence_buffer = ""
 
             full_text = _strip_reasoning_leak(full_text)
+            if full_text and _is_incomplete_stage_direction_response(full_text):
+                full_text = self._retry_non_streaming_final()
+                sentence_buffer = full_text
             if sentence_buffer and full_text:
                 self.token_received.emit(sentence_buffer)
-            if full_text:
+            if full_text and not self._retried_non_streaming:
                 self._record_memory(full_text)
             self.response_completed.emit(full_text)
         except Exception as exc:
             self.error_occurred.emit(str(exc))
+
+    def _retry_non_streaming_final(self) -> str:
+        """Fallback when streaming returns only an incomplete stage direction."""
+        try:
+            self._retried_non_streaming = True
+            response = self.service.chat(
+                self.user_message,
+                history=[],
+                product_code=self.product_code,
+                temperature=0.75,
+                max_tokens=800,
+            )
+            content = ((response.get("choices") or [{}])[0].get("message") or {}).get("content")
+            cleaned = _strip_reasoning_leak(str(content or ""))
+            if _is_incomplete_stage_direction_response(cleaned):
+                return ""
+            return cleaned
+        except Exception:
+            return ""
 
     def _record_memory(self, content: str) -> None:
         try:

@@ -18,6 +18,7 @@ from javstory.library.canonical.schema import LibraryCanonical
 from javstory.library.detail_persist import load_canonical_for_product
 from javstory.library.embeddings.document_builder import build_embedding_documents
 from javstory.library.embeddings.store import embeddings_cache_path, write_embeddings_json
+from javstory.translation.story_grok_module import story_context_cache_path_grok
 
 
 def _utc_now_iso() -> str:
@@ -34,6 +35,18 @@ def embeddings_enabled_from_env() -> bool:
 def embeddings_ollama_model_from_env() -> str:
     # Reasonable default (user can override). Must exist in Ollama.
     return (os.environ.get("JAVSTORY_EMBEDDINGS_OLLAMA_MODEL", "") or "").strip() or "nomic-embed-text"
+
+
+def _story_context_newer_than_embedding(product_code: str, embedding_path: Path) -> bool:
+    if not embedding_path.is_file():
+        return False
+    try:
+        story_path = story_context_cache_path_grok(product_code)
+        if not story_path.is_file():
+            return False
+        return story_path.stat().st_mtime > embedding_path.stat().st_mtime
+    except OSError:
+        return False
 
 
 async def build_and_store_embeddings_for_product(
@@ -57,8 +70,10 @@ async def build_and_store_embeddings_for_product(
     out_path = embeddings_cache_path(pc, model=m)
 
     if out_path.is_file() and not force:
-        log(f"✅ 임베딩 캐시 이미 존재: {out_path.name}")
-        return out_path
+        if not _story_context_newer_than_embedding(pc, out_path):
+            log(f"✅ 임베딩 캐시 이미 존재: {out_path.name}")
+            return out_path
+        log("♻️ 스토리 컨텍스트가 임베딩보다 최신입니다. 임베딩을 재생성합니다.")
 
     st = state if state is not None else load_canonical_for_product(pc)
 

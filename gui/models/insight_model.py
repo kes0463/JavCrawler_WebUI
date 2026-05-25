@@ -64,6 +64,7 @@ class InsightModel(QObject):
     _batchDone    = Signal(object)
     _personaReady = Signal(str)
     _personaError = Signal(str)
+    _personaFinished = Signal()
     _personaChatReady = Signal(object)
     _personaChatToken = Signal(str)
     _personaChatStreamCompleted = Signal(str)
@@ -92,6 +93,7 @@ class InsightModel(QObject):
         self._actor_collections = "{}"
         self._watch_heatmap = "{}"
         self._persona_card = "{}"
+        self._persona_card_object: dict[str, Any] = {}
         self._persona_chat_history: list[dict[str, str]] = self._load_persona_chat_history()
         self._persona_chat_messages = json.dumps(self._persona_chat_history, ensure_ascii=False)
         self._persona_chat_worker = None
@@ -111,6 +113,7 @@ class InsightModel(QObject):
         self._batchDone.connect(self._on_batch_done)
         self._personaReady.connect(self._apply_persona)
         self._personaError.connect(lambda msg: self.logMessage.emit(msg))
+        self._personaFinished.connect(self._finish_persona_regeneration)
         self._personaChatReady.connect(self._apply_persona_chat_message)
         self._personaChatToken.connect(self._apply_persona_chat_token)
         self._personaChatStreamCompleted.connect(self._apply_persona_chat_stream_completed)
@@ -189,6 +192,10 @@ class InsightModel(QObject):
     def personaCard(self):
         return self._persona_card
 
+    @Property("QVariantMap", notify=personaCardChanged)
+    def personaCardObject(self):
+        return self._persona_card_object
+
     @Property(str, notify=pipelineReportChanged)
     def pipelineReport(self):
         return self._pipeline_report
@@ -216,6 +223,38 @@ class InsightModel(QObject):
         from javstory.config.app_config import similarity_excluded_genres_from_env
 
         return similarity_excluded_genres_from_env()
+
+    @staticmethod
+    def _json_object(value: str) -> dict[str, Any]:
+        try:
+            parsed = json.loads(value or "{}")
+        except (TypeError, json.JSONDecodeError):
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+
+    @staticmethod
+    def _persist_persona_feedback(feedback: str, persona: dict[str, Any]) -> None:
+        from datetime import datetime
+        from javstory.config.app_config import DATA_ROOT
+
+        value = str(feedback or "").strip().lower()
+        if value not in {"positive", "negative"}:
+            raise ValueError(f"invalid persona feedback: {feedback}")
+
+        path = DATA_ROOT / "cache" / "persona_feedback.jsonl"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        record = {
+            "feedback": value,
+            "persona_type": str(persona.get("persona_type") or ""),
+            "summary": str(persona.get("summary") or persona.get("body") or "")[:500],
+            "input_fingerprint": str(persona.get("input_fingerprint") or ""),
+            "semantic_fingerprint": str(persona.get("semantic_fingerprint") or ""),
+            "generated_at": str(persona.get("generated_at") or ""),
+            "source": str(persona.get("source") or ""),
+            "created_at": datetime.now().isoformat(timespec="seconds"),
+        }
+        with path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(record, ensure_ascii=False) + "\n")
 
     @classmethod
     def _fetch_phase(cls, phase: str) -> dict[str, str]:
@@ -437,16 +476,32 @@ class InsightModel(QObject):
             except Exception as e:
                 self._personaError.emit(f"[InsightModel] 페르소나 재생성 실패: {e}")
             finally:
-                self._persona_regenerating = False
-                self.personaRegeneratingChanged.emit()
+                self._personaFinished.emit()
 
         threading.Thread(target=_worker, daemon=True, name="insight-persona").start()
 
+    @Slot(str)
+    def submitPersonaFeedback(self, feedback: str) -> None:
+        """현재 페르소나 카드에 대한 사용자 피드백을 JSONL로 저장합니다."""
+        try:
+            self._persist_persona_feedback(feedback, self._persona_card_object)
+            label = "맞아요" if str(feedback).strip().lower() == "positive" else "아니에요"
+            self.logMessage.emit(f"[InsightModel] 페르소나 피드백 저장: {label}")
+        except Exception as e:
+            self.logMessage.emit(f"[InsightModel] 페르소나 피드백 저장 실패: {e}")
+
     def _apply_persona(self, persona_json: str) -> None:
-        if persona_json != self._persona_card:
+        persona_obj = self._json_object(persona_json)
+        if persona_json != self._persona_card or persona_obj != self._persona_card_object:
             self._persona_card = persona_json
+            self._persona_card_object = persona_obj
             self.personaCardChanged.emit()
             self.allDataChanged.emit()
+
+    def _finish_persona_regeneration(self) -> None:
+        if self._persona_regenerating:
+            self._persona_regenerating = False
+            self.personaRegeneratingChanged.emit()
 
     @staticmethod
     def _load_persona_chat_history() -> list[dict[str, str]]:
@@ -549,14 +604,25 @@ class InsightModel(QObject):
             ("weekly_digest", "_weekly_digest", self.weeklyDigestChanged),
         ]
         changed = False
+        persona_changed = False
         for key, attr, _sig in mapping:
             if key not in results:
                 continue
             val = results[key]
+            if key == "persona":
+                persona_obj = self._json_object(str(val or "{}"))
+                if self._persona_card != val or self._persona_card_object != persona_obj:
+                    self._persona_card = val
+                    self._persona_card_object = persona_obj
+                    persona_changed = True
+                    changed = True
+                continue
             if getattr(self, attr) != val:
                 setattr(self, attr, val)
                 changed = True
         if changed:
+            if persona_changed:
+                self.personaCardChanged.emit()
             self.allDataChanged.emit()
 
     @Slot()

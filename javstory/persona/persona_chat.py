@@ -36,6 +36,7 @@ from javstory.llm.llamacpp_backend import (
 )
 from javstory.config.app_config import DATA_ROOT
 from javstory.persona.erotic_persona_engine import EroticPersonaEngine, build_focused_context
+from javstory.persona.library_search import extract_product_codes
 from javstory.persona.persona_memory import EnhancedPersonaMemory, PersonaChatMemory
 from javstory.persona.prompts.prompt_loader import get_prompt
 
@@ -59,6 +60,7 @@ SENSUAL_PERSONA_SYSTEM_PROMPT = """\
 추천 원칙:
 - library_search.results와 source_policy를 반드시 따른다.
 - strict_title_contains가 true이면 제목에 정확히 해당 단어가 들어간 작품만 추천한다.
+- 특정 품번의 작품 설명/정보/줄거리 요청에서는 DB synopsis와 품번 검증된 story_context만 사실 근거로 사용한다. 근거가 부족하면 모른다고 말하고, 취향 데이터나 장르 추정으로 작품 내용을 만들어내지 않는다.
 - 작품을 추천할 때는 sensual_summary, turn_ons, strong_reaction_notes, user_rating을 가장 강하게 고려한다.
 - 각 추천작은 품번과 함께 **"왜 이 작품이 너의 sensual_summary와 turn_ons를 건드리는지"**를 1~2문장으로 강하게 설명한다.
 - 단순 장르 나열이 아니라, 배우·장면 결·분위기·관계성·긴장감·들킨 취향을 하나의 취향선으로 묶어서 말한다.
@@ -142,6 +144,31 @@ _SENSUAL_TEMPERATURE_DEFAULT = 1.22
 _SENSUAL_TEMPERATURE_MAX = 1.25
 _SHORT_RESPONSE_HINTS = ("짧게", "간단", "한줄", "요약")
 _DEEP_RESPONSE_HINTS = ("자세히", "길게", "깊게", "상세", "분석", "추천", "비슷")
+_STORY_SUMMARY_HINTS = (
+    "스토리",
+    "줄거리",
+    "시놉",
+    "시놉시스",
+    "내용",
+    "무슨 내용",
+    "어떤 내용",
+)
+_PRODUCT_FACTUAL_HINTS = (
+    "스토리",
+    "줄거리",
+    "시놉",
+    "시놉시스",
+    "내용",
+    "설명",
+    "정보",
+    "소개",
+    "어때",
+    "어떤 작품",
+    "무슨 작품",
+    "뭐하는 작품",
+    "뭔 작품",
+    "작품이야",
+)
 _RANKING_STOPWORDS = {
     "사용자",
     "작품",
@@ -273,6 +300,29 @@ def _recommendation_seed_codes(memory_context: Mapping[str, Any], *, limit: int 
     return _memory_product_codes(memory_context, "strong_reaction_notes", limit=limit)
 
 
+def _recent_assistant_product_codes(memory_store: PersonaChatMemory, *, limit: int = 12) -> List[str]:
+    out: List[str] = []
+    try:
+        messages = memory_store.load_recent_messages()
+    except Exception:
+        return out
+    for item in reversed(messages):
+        if str(item.get("role") or "") != "assistant":
+            continue
+        for code in extract_product_codes(str(item.get("content") or "")):
+            pc = str(code or "").strip().upper()
+            if pc and pc not in out:
+                out.append(pc)
+            if len(out) >= limit:
+                return out
+    return out
+
+
+def _is_recommendation_request(text: str) -> bool:
+    lowered = str(text or "").lower()
+    return any(hint in lowered for hint in ("추천", "비슷", "유사", "찾아", "골라", "볼만", "대체", "같은 느낌", "같은 분위기"))
+
+
 def _item_rank_text(item: Mapping[str, Any]) -> str:
     grok = item.get("grok") if isinstance(item.get("grok"), Mapping) else {}
     parts: List[str] = [
@@ -298,6 +348,7 @@ def _score_recommendation_item(
     strong_codes: set[str],
     negative_codes: set[str],
     fallback_seed_codes: set[str],
+    recent_recommended_codes: set[str],
 ) -> tuple[float, List[str], List[str]]:
     source_score = float(item.get("score") or 0)
     score = min(25.0, source_score * 25.0)
@@ -367,6 +418,10 @@ def _score_recommendation_item(
         score *= 0.35
         reasons.append("사용자 부정 피드백 품번이라 감점")
 
+    if pc in recent_recommended_codes:
+        score *= 0.25
+        reasons.append("최근 챗에서 이미 추천/언급한 작품이라 다양성 감점")
+
     return max(0.0, min(100.0, score)), reasons[:5], matched_terms
 
 
@@ -392,6 +447,16 @@ def _apply_personalized_ranking(ctx: Mapping[str, Any], memory_context: Mapping[
     strong_codes = set(_memory_product_codes(memory_context, "strong_reaction_notes", limit=12))
     negative_codes = set(_memory_product_codes(memory_context, "negative_feedback_notes", limit=12))
     fallback_seed_codes = set(str(code or "").strip().upper() for code in search.get("fallback_seed_codes") or [])
+    source_policy = search.get("source_policy") if isinstance(search.get("source_policy"), Mapping) else {}
+    is_recommendation = _is_recommendation_request(search.get("query") or "") or str(source_policy.get("mode") or "") in {
+        "similar_by_work",
+        "taste_recommendation",
+    }
+    recent_recommended_codes = (
+        set(str(code or "").strip().upper() for code in memory_context.get("recent_recommended_product_codes") or [])
+        if is_recommendation
+        else set()
+    )
 
     ranked: List[Dict[str, Any]] = []
     for item in results:
@@ -401,6 +466,7 @@ def _apply_personalized_ranking(ctx: Mapping[str, Any], memory_context: Mapping[
             strong_codes=strong_codes,
             negative_codes=negative_codes,
             fallback_seed_codes=fallback_seed_codes,
+            recent_recommended_codes=recent_recommended_codes,
         )
         item["persona_match_score"] = round(score, 1)
         item["ranking_reasons"] = reasons
@@ -423,8 +489,14 @@ def _apply_personalized_ranking(ctx: Mapping[str, Any], memory_context: Mapping[
             "grok_scene_richness",
             "embedding_similarity",
             "negative_feedback_penalty",
+            "recent_recommendation_diversity_penalty",
         ],
     }
+    if recent_recommended_codes:
+        search["diversity_policy"] = {
+            "recent_recommended_product_codes": sorted(recent_recommended_codes),
+            "instruction": "최근 챗에서 이미 추천한 품번은 가능한 한 반복하지 말고, 같은 취향 축의 다른 후보를 우선한다.",
+        }
     search["results"] = ranked
     out["library_search"] = search
     return out
@@ -450,6 +522,91 @@ def _clip_text(value: Any, limit: int) -> str:
     if len(text) <= limit:
         return text
     return text[: max(0, limit - 1)].rstrip() + "..."
+
+
+def _is_story_summary_request(text: str) -> bool:
+    lowered = str(text or "").lower()
+    if not lowered.strip():
+        return False
+    return any(hint in lowered for hint in _STORY_SUMMARY_HINTS) and any(
+        hint in lowered for hint in ("요약", "알려", "설명", "뭐야", "무엇")
+    )
+
+
+def _is_product_factual_request(text: str) -> bool:
+    lowered = str(text or "").lower()
+    if not lowered.strip():
+        return False
+    if _is_story_summary_request(lowered):
+        return True
+    if not any(hint in lowered for hint in _PRODUCT_FACTUAL_HINTS):
+        return False
+    return any(
+        hint in lowered
+        for hint in ("스토리", "줄거리", "시놉", "내용", "설명", "정보", "소개", "어때", "어떤 작품", "무슨 작품")
+    )
+
+
+def _product_factual_grounding_block(user_message: str, ctx: Mapping[str, Any]) -> str:
+    """Pin exact product metadata/story data for factual product questions."""
+    products = [item for item in list(ctx.get("mentioned_products") or []) if isinstance(item, Mapping)]
+    if not products:
+        return ""
+    if not _is_product_factual_request(user_message):
+        return ""
+
+    lines = [
+        "[작품 사실 고정 근거]",
+        "사용자가 특정 품번의 작품 설명/정보/스토리 요약을 요청했다.",
+        "답변은 아래 product_code의 DB 메타데이터, synopsis, story_context만 근거로 한다.",
+        "다른 검색 후보, 취향 메모리, 강한 반응 작품, 일반적인 장르 추정으로 작품 내용을 채우거나 새 장면을 만들어내지 않는다.",
+    ]
+    for idx, product in enumerate(products[:2], start=1):
+        story = product.get("story_context") if isinstance(product.get("story_context"), Mapping) else {}
+        story_status = (
+            product.get("story_context_status")
+            if isinstance(product.get("story_context_status"), Mapping)
+            else {}
+        )
+        synopsis = _clip_text(product.get("synopsis") or "", 900)
+        story_summary = _clip_text((story or {}).get("summary") or "", 900)
+        reliability = "높음" if synopsis else ("중간" if story_summary else "낮음")
+        source_note = (
+            "DB synopsis + Grok story_context"
+            if synopsis and story_summary
+            else ("DB synopsis" if synopsis else ("Grok story_context only" if story_summary else "no story source"))
+        )
+        lines.extend(
+            [
+                f"- 대상 {idx} product_code: {product.get('product_code') or ''}",
+                f"  story_reliability: {reliability}",
+                f"  story_source: {source_note}",
+                f"  title_ko: {product.get('title_ko') or ''}",
+                f"  title_ja: {product.get('title_ja') or ''}",
+                f"  actors: {', '.join(str(v) for v in (product.get('actors') or [])[:6])}",
+                f"  genres: {', '.join(str(v) for v in (product.get('genres') or [])[:8])}",
+                f"  synopsis: {synopsis}",
+                f"  story_context.summary: {story_summary}",
+                f"  story_context.status: {json.dumps(story_status, ensure_ascii=False) if story_status else ''}",
+                f"  story_context.tags: {', '.join(str(v) for v in ((story or {}).get('tags') or [])[:10])}",
+                f"  story_context.tones: {', '.join(str(v) for v in ((story or {}).get('tones') or [])[:8])}",
+            ]
+        )
+        if not synopsis and not story_summary:
+            lines.append("  story_data_status: synopsis/story_context가 비어 있음")
+
+    lines.extend(
+        [
+            "[작품 설명 응답 규칙]",
+            "- synopsis가 있으면 이를 최우선 근거로 한국어로 설명한다.",
+            "- synopsis가 없고 story_context.summary만 있으면 'Grok 캐시 기준' 또는 '저장된 스토리 캐시 기준'이라고 밝히고, 확정적인 공식 줄거리처럼 말하지 않는다.",
+            "- 제목/배우/장르/제작사 같은 DB 메타데이터는 사실 정보로만 짧게 사용한다.",
+            "- synopsis와 story_context.summary가 모두 비어 있으면 '이 품번은 저장된 스토리 캐시/시놉시스가 없어 정확히 설명할 수 없다'고 말한다.",
+            "- story_reliability가 낮음/중간이면 자신 있게 단정하지 말고, 확인 가능한 근거와 불확실한 부분을 분리해서 말한다.",
+            "- 취향 분석은 사용자가 명시적으로 원할 때만 보조로 짧게 붙이고, 작품 내용 자체를 취향 데이터로 추정하지 않는다.",
+        ]
+    )
+    return "\n".join(lines)
 
 
 def _normalize_history(
@@ -587,6 +744,7 @@ def _compact_chat_context(ctx: Mapping[str, Any], *, aggressive: bool = False) -
             "product_codes": search.get("product_codes") or [],
             "fallback_seed_codes": search.get("fallback_seed_codes") or [],
             "ranking_policy": search.get("ranking_policy") or {},
+            "diversity_policy": search.get("diversity_policy") or {},
             "results": results,
         },
     }
@@ -688,6 +846,27 @@ def _strip_reasoning_leak(text: str) -> str:
     if _contains_reasoning_leak(cleaned):
         return ""
     return cleaned
+
+
+def _is_incomplete_stage_direction_response(text: str) -> bool:
+    """Detect local-model stalls that return only a short parenthetical action cue."""
+    raw = str(text or "").strip()
+    if not raw:
+        return False
+    normalized = re.sub(r"\s+", " ", raw)
+    if len(normalized) > 120:
+        return False
+    if re.fullmatch(r"[\(\（][^\)\）]*[\)\）]?", normalized):
+        return True
+    if normalized.startswith(("(", "（")) and ")" not in normalized and "）" not in normalized:
+        return True
+    stage_words = ("숨", "들이마시", "내쉬", "웃", "고개", "눈", "시선", "몸", "다가", "속삭")
+    dangling_endings = ("며", "면서", "고", "듯", "채", "서")
+    return (
+        normalized.startswith(("(", "（"))
+        and any(word in normalized for word in stage_words)
+        and normalized.endswith(dangling_endings)
+    )
 
 
 def _openai_compatible_response(
@@ -795,6 +974,10 @@ class PersonaChatService:
         compact: bool = False,
     ) -> List[Dict[str, str]]:
         memory_context = self.memory_store.prompt_context(user_message, max_items=4 if compact else 7)
+        recent_recommended_codes = _recent_assistant_product_codes(self.memory_store)
+        if recent_recommended_codes:
+            memory_context = dict(memory_context)
+            memory_context["recent_recommended_product_codes"] = recent_recommended_codes
         context = self.engine.build_chat_context(
             user_message,
             product_code=product_code,
@@ -807,9 +990,25 @@ class PersonaChatService:
             ensure_ascii=False,
             default=str,
         )
-        focused_context = build_focused_context(user_message, compact_context)
+        factual_grounding = _product_factual_grounding_block(user_message, context)
+        focused_context = (
+            factual_grounding
+            if factual_grounding
+            else build_focused_context(user_message, compact_context)
+        )
         logger.debug(f"컨텍스트 압축: {len(context_json)} → {len(focused_context)} chars")
         style_instruction = _response_style_instruction(user_message)
+        memory_instruction = (
+            "장기 대화 메모리 JSON이다. 사용자가 이전에 남긴 취향 단서, 강렬 반응, 교정, 말투 선호를 "
+            "현재 답변에 자연스럽게 반영하라. 단, DB/library_search 결과와 충돌하면 "
+            "DB/library_search를 우선하고 메모리는 보조 근거로만 사용하라."
+        )
+        if factual_grounding:
+            memory_instruction = (
+                "장기 대화 메모리 JSON이다. 이번 요청은 특정 품번의 작품 사실 설명이므로, "
+                "메모리는 말투 선호 외에는 사실 근거로 쓰지 않는다. 작품 내용·장면·전개는 "
+                "[작품 사실 고정 근거]의 synopsis/story_context에 없는 내용을 보태지 않는다."
+            )
         messages: List[Dict[str, str]] = [
             # Before: {"role": "system", "content": SENSUAL_PERSONA_SYSTEM_PROMPT}
             # After:  {"role": "system", "content": self.system_prompt}
@@ -824,9 +1023,8 @@ class PersonaChatService:
             {
                 "role": "system",
                 "content": (
-                    "장기 대화 메모리 JSON이다. 사용자가 이전에 남긴 취향 단서, 강렬 반응, 교정, 말투 선호를 "
-                    "현재 답변에 자연스럽게 반영하라. 단, DB/library_search 결과와 충돌하면 "
-                    "DB/library_search를 우선하고 메모리는 보조 근거로만 사용하라.\n"
+                    memory_instruction
+                    + "\n"
                     + json.dumps(memory_context, ensure_ascii=False)
                 ),
             },
@@ -840,6 +1038,7 @@ class PersonaChatService:
                     "content": (
                         "중요: 이전 생성에서 내부 추론 초안이 노출됐다. 이번 응답은 반드시 한국어 최종 답변만 작성한다. "
                         "`Thinking Process`, `Analyze Request`, 번호 매긴 사고 과정, 영어 분석 메모, 내부 계획을 출력하면 안 된다. "
+                        "괄호로 된 행동 지문, 예: `(깊게 숨을 들이마시며)` 같은 문장으로 시작하거나 끝내지 않는다. "
                         "바로 사용자에게 말하듯 자연스러운 대화문으로 3~8문장만 답하라."
                     ),
                 }
@@ -962,6 +1161,8 @@ class PersonaChatService:
                     headers=headers,
                 )
             content = _strip_reasoning_leak(_coalesce_response_text(raw))
+            if content and _is_incomplete_stage_direction_response(content):
+                content = ""
             if not content:
                 retry_payload = self._build_payload(
                     model=model,
@@ -1000,6 +1201,8 @@ class PersonaChatService:
                         headers=headers,
                     )
                 content = _strip_reasoning_leak(_coalesce_response_text(raw))
+                if content and _is_incomplete_stage_direction_response(content):
+                    content = ""
 
         if content:
             try:

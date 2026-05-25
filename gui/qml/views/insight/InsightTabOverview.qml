@@ -15,7 +15,7 @@ ColumnLayout {
     property var persona: ({})
     property var personaCoverageLabel: function() { return "" }
     property real viewportHeight: 0
-    readonly property int profileCardHeight: 500
+    readonly property int profileCardHeight: 700
 
     property bool digestExpanded: false
     readonly property var digestLines: tab.weeklyDigest.lines || []
@@ -140,6 +140,9 @@ ColumnLayout {
             coverageLabel: tab.personaCoverageLabel(tab.persona)
             regenerating: InsightModel.isPersonaRegenerating
             onRegenerateRequested: InsightModel.regeneratePersona()
+            onFeedbackSubmitted: function(feedback) {
+                InsightModel.submitPersonaFeedback(feedback)
+            }
         }
     }
 

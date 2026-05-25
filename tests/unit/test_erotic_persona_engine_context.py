@@ -58,3 +58,83 @@ def test_build_chat_context_emphasizes_sensual_priority(monkeypatch):
     assert "크게 자극받을 가능성" in guide["must_explain"][3]
     assert "최근 강한 반응 작품과 자극 축" in captured["query"]
     assert ctx["library_search"]["fallback_seed_codes"] == ["DDD-444", "BBB-222", "CCC-333"]
+
+
+def test_build_chat_context_selects_persona_fields_by_intent(monkeypatch):
+    from javstory.persona import erotic_persona_engine as engine_mod
+    from javstory.persona.erotic_persona_engine import EroticPersonaEngine
+
+    class DummyMemory:
+        def prompt_context(self, *_args, **_kwargs):
+            return {"strong_reaction_notes": []}
+
+    monkeypatch.setattr(engine_mod, "PersonaChatMemory", lambda: DummyMemory())
+    monkeypatch.setattr(engine_mod.HybridLibrarySearch, "search_with_fusion", lambda self, query: [])
+
+    engine = EroticPersonaEngine()
+    monkeypatch.setattr(
+        engine,
+        "persona_snapshot",
+        lambda: {
+            "persona_type": "테스트형",
+            "summary": "전체 요약",
+            "sensual_summary": "관능 요약",
+            "turn_ons": ["긴장감"],
+            "avoidances": ["코미디"],
+            "affinities": ["몰입"],
+            "evidence": [{"product_code": "AAA-111", "reason": "근거"}],
+            "source": "test",
+        },
+    )
+
+    rec_ctx = engine.build_chat_context("긴장감 있는 작품 추천해줘")
+    rec_persona = rec_ctx["persona"]
+    assert rec_persona["intent"] == "recommendation"
+    assert "turn_ons" in rec_persona["included_fields"]
+    assert "evidence" not in rec_persona
+
+    analysis_ctx = engine.build_chat_context("내 취향 분석해줘")
+    analysis_persona = analysis_ctx["persona"]
+    assert analysis_persona["intent"] == "self_analysis"
+    assert "summary" in analysis_persona["included_fields"]
+    assert "evidence" in analysis_persona
+
+
+def test_product_snapshot_rejects_mismatched_grok_product_code(monkeypatch):
+    from javstory.persona import erotic_persona_engine as engine_mod
+    from javstory.persona.erotic_persona_engine import EroticPersonaEngine
+
+    class DummyQuery:
+        def filter_by(self, **_kwargs):
+            return self
+
+        def first(self):
+            return None
+
+    class DummySession:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def query(self, *_args, **_kwargs):
+            return DummyQuery()
+
+    monkeypatch.setattr(engine_mod, "get_db_session_ctx", lambda: DummySession())
+    monkeypatch.setattr(
+        "javstory.translation.story_grok_module.load_cached_grok_json_flexible",
+        lambda _code: {
+            "product_code": "WRONG-999",
+            "verification_ok": True,
+            "code_mismatch": False,
+            "overall_summary": "다른 작품 요약",
+            "scenes": [],
+        },
+    )
+
+    data = EroticPersonaEngine().product_snapshot("ABC-123")
+
+    assert "story_context" not in data
+    assert data["story_context_status"]["reason"] == "grok_product_code_mismatch"
+    assert data["story_context_status"]["grok_product_code"] == "WRONG-999"

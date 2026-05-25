@@ -152,6 +152,36 @@ def test_cleanup_llamacpp_respects_stop_after_job(monkeypatch):
   assert len(calls) == 1
 
 
+def test_stop_llamacpp_server_terminates_registered_loading_process(monkeypatch):
+    from javstory.llm import llamacpp_backend as backend
+
+    calls: list[str] = []
+
+    class DummyProc:
+        pid = 12345
+
+        def poll(self):
+            return None
+
+        def terminate(self):
+            calls.append("terminate")
+
+        def wait(self, timeout=None):
+            calls.append(f"wait:{timeout}")
+
+    proc = DummyProc()
+    monkeypatch.setattr(backend, "_server_proc", proc)
+    monkeypatch.setattr(backend, "_active_preset_id", "gemma-4-e4b")
+    monkeypatch.setattr(backend, "_active_requests", 2)
+
+    backend.stop_llamacpp_server(logger_func=lambda _msg: None)
+
+    assert calls == ["terminate", "wait:15"]
+    assert backend._server_proc is None
+    assert backend._active_preset_id is None
+    assert backend._active_requests == 0
+
+
 def test_resolve_active_llamacpp_preset_unifies_correction_over_model(monkeypatch):
     monkeypatch.setenv(
         "JAVSTORY_CORRECTION_PASS2_MODEL",

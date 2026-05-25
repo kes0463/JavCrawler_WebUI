@@ -186,15 +186,104 @@ def get_top_makers(n: int = 5, use_recent: bool = False) -> List[Dict[str, Any]]
     return _get_top("maker", n, use_recent=use_recent)
 
 
+def _recent_watch_weight(h: WatchHistory) -> float:
+    total = int(h.total_duration or 0)
+    watched = int(h.watch_duration or 0)
+    completion = 1.0 if bool(h.is_completed) else 0.0
+    if total > 0:
+        completion = max(completion, max(0.0, min(1.0, watched / float(total))))
+
+    rating = int(h.rating or 0)
+    score = 1.0 + completion
+    if bool(h.liked):
+        score += 2.0
+    if bool(h.is_completed):
+        score += 1.0
+    if rating >= 4:
+        score += float(rating)
+    elif rating > 0:
+        score += rating * 0.5
+    if bool(getattr(h, "disliked", False)) or (0 < rating <= 2):
+        score *= 0.35
+    return max(0.1, score)
+
+
+def _rank_recent_items(scores: Dict[str, Dict[str, Any]], n: int) -> List[Dict[str, Any]]:
+    ranked = sorted(
+        scores.values(),
+        key=lambda item: (float(item.get("recent_score") or 0), str(item.get("last_watched_at") or "")),
+        reverse=True,
+    )
+    return ranked[:n]
+
+
 def compute_recent_trend(days: int = 7,
                          excluded_genres: set[str] | None = None) -> Dict[str, List[Dict[str, Any]]]:
     """
-    최근 N일 기준 취향 변화를 반환합니다.
+    최근 N일 안의 실제 시청 이력으로 취향 변화를 반환합니다.
+    데이터가 부족하면 기존 recent_score 기반 선호도로 폴백합니다.
     Returns: {"actors": [...], "genres": [...]}
     """
+    try:
+        window_days = max(1, min(365, int(days)))
+    except (TypeError, ValueError):
+        window_days = 7
+    cutoff = datetime.datetime.now() - datetime.timedelta(days=window_days)
+    excluded = excluded_genres or set()
+    actor_scores: Dict[str, Dict[str, Any]] = {}
+    genre_scores: Dict[str, Dict[str, Any]] = {}
+
+    def add_score(bucket: Dict[str, Dict[str, Any]], name: str, weight: float, watched_at: str) -> None:
+        key = str(name or "").strip()
+        if not key:
+            return
+        item = bucket.setdefault(
+            key,
+            {"name": key, "score": 0, "recent_score": 0, "last_watched_at": watched_at},
+        )
+        item["score"] = round(float(item.get("score") or 0) + weight, 3)
+        item["recent_score"] = round(float(item.get("recent_score") or 0) + weight, 3)
+        if watched_at > str(item.get("last_watched_at") or ""):
+            item["last_watched_at"] = watched_at
+
+    with get_db_session_ctx() as session:
+        histories = (
+            session.query(WatchHistory)
+            .filter(WatchHistory.updated_at >= cutoff)
+            .order_by(WatchHistory.updated_at.desc())
+            .limit(300)
+            .all()
+        )
+        codes = [str(h.product_code or "").strip().upper() for h in histories if h.product_code]
+        if not codes:
+            return {
+                "actors": get_top_actors(5, use_recent=True),
+                "genres": get_top_genres(5, use_recent=True, excluded=excluded_genres),
+            }
+
+        meta_by_code = {
+            str(row.product_code or "").strip().upper(): row
+            for row in session.query(JAVMetadata).filter(JAVMetadata.product_code.in_(codes)).all()
+        }
+        for h in histories:
+            pc = str(h.product_code or "").strip().upper()
+            row = meta_by_code.get(pc)
+            if not row:
+                continue
+            weight = _recent_watch_weight(h)
+            watched_at = h.updated_at.isoformat() if h.updated_at else ""
+            for actor in _parse_comma(row.actors_ko or row.actors_ja or row.actors or ""):
+                add_score(actor_scores, actor, weight, watched_at)
+            for genre in _parse_comma(row.genres_ko or row.genres or ""):
+                if genre in excluded:
+                    continue
+                add_score(genre_scores, genre, weight, watched_at)
+
+    actors = _rank_recent_items(actor_scores, 5)
+    genres = _rank_recent_items(genre_scores, 5)
     return {
-        "actors": get_top_actors(5, use_recent=True),
-        "genres": get_top_genres(5, use_recent=True, excluded=excluded_genres),
+        "actors": actors or get_top_actors(5, use_recent=True),
+        "genres": genres or get_top_genres(5, use_recent=True, excluded=excluded_genres),
     }
 
 

@@ -58,7 +58,7 @@ Item {
 
         root.heatmapData = root.parseJson(InsightModel.watchHeatmap, {year: 2026, days:{}, max:0})
 
-        root.persona = root.parseJson(InsightModel.personaCard, {})
+        root.persona = InsightModel.personaCardObject || {}
 
         root.pipeline = root.parseJson(InsightModel.pipelineReport, {})
 
@@ -94,7 +94,7 @@ Item {
 
     property var heatmapData: parseJson(InsightModel.watchHeatmap, {year: 2026, days:{}, max:0})
 
-    property var persona:     parseJson(InsightModel.personaCard,  {})
+    property var persona:     InsightModel.personaCardObject || {}
 
     property var pipeline:    parseJson(InsightModel.pipelineReport, {})
 
@@ -150,7 +150,7 @@ Item {
 
         function onPersonaCardChanged() {
 
-            root.persona = root.parseJson(InsightModel.personaCard, {})
+            root.persona = InsightModel.personaCardObject || {}
 
         }
 

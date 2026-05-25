@@ -13,6 +13,7 @@ GlassCard {
     property var messages: []
     property var streamTarget: null
     property bool streamingActive: false
+    readonly property int chatMessageFontSize: Theme.fontBody + 1
 
     signal sendRequested(string message)
     signal clearRequested()
@@ -167,7 +168,7 @@ GlassCard {
                 TextMetrics {
                     id: messageMetrics
                     text: modelData.content || ""
-                    font.pixelSize: Theme.fontCaption
+                    font.pixelSize: root.chatMessageFontSize
                 }
 
                 Rectangle {
@@ -234,7 +235,7 @@ GlassCard {
                             persistentSelection: true
                             textFormat: TextEdit.PlainText
                             wrapMode: TextEdit.Wrap
-                            font.pixelSize: Theme.fontCaption
+                            font.pixelSize: root.chatMessageFontSize
                             color: errorMessage ? Theme.error : Theme.textSecondary
                             selectedTextColor: "#000000"
                             selectionColor: Theme.accentNeon
@@ -255,7 +256,7 @@ GlassCard {
 
                     Text {
                         text: "타이핑 중"
-                        font.pixelSize: Theme.fontCaption
+                        font.pixelSize: Theme.fontBody
                         color: Theme.textMuted
                     }
 
@@ -263,7 +264,7 @@ GlassCard {
                         model: 3
                         Text {
                             text: "."
-                            font.pixelSize: Theme.fontCaption
+                            font.pixelSize: Theme.fontBody
                             color: Theme.textMuted
                             opacity: 0.25
 
@@ -294,7 +295,7 @@ GlassCard {
                 color: Theme.textPrimary
                 selectedTextColor: "#000000"
                 selectionColor: Theme.accentNeon
-                font.pixelSize: Theme.fontBody
+                font.pixelSize: root.chatMessageFontSize
                 Keys.onPressed: function(event) {
                     if ((event.key === Qt.Key_Return || event.key === Qt.Key_Enter)
                             && (event.modifiers & Qt.ControlModifier)) {

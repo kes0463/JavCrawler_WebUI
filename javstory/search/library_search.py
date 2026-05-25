@@ -142,7 +142,7 @@ class HybridLibrarySearch:
         query: str,
         weights: tuple[float, float, float] | None = None,
     ) -> list:
-        """Search three rankers and return top 5 RRF-fused results."""
+        """Search three rankers and return top-k RRF-fused results."""
         q = (query or "").strip()
         if not q:
             return []
@@ -164,7 +164,7 @@ class HybridLibrarySearch:
                 "score": round(score, 6),
                 "source": item.source,
             }
-            for item, score in fused[:5]
+            for item, score in fused[: self.top_k]
         ]
 
     def _load_docs(self) -> List[_LibraryDoc]:
