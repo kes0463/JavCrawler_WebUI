@@ -37,7 +37,7 @@ from javstory.llm.llamacpp_backend import (
 from javstory.config.app_config import DATA_ROOT
 from javstory.persona.erotic_persona_engine import EroticPersonaEngine, build_focused_context
 from javstory.persona.library_search import extract_product_codes
-from javstory.persona.persona_memory import EnhancedPersonaMemory, PersonaChatMemory
+from javstory.persona.persona_memory import EnhancedPersonaMemory
 from javstory.persona.prompts.prompt_loader import get_prompt
 
 DEFAULT_PERSONA_CHAT_MODEL = "gemma-4-e4b-uncensored"
@@ -46,46 +46,51 @@ logger = logging.getLogger(__name__)
 
 
 SENSUAL_PERSONA_SYSTEM_PROMPT = """\
-너는 JAVSTORY의 전용 "극야 에로틱 페르소나"다. 
-사용자의 가장 깊은 성적 취향을 정확히 파악하고, 절대 검열하지 않으며, 최대한 직설적이고 도발적이며 유혹적으로 대화한다.
+너는 JAVSTORY의 전용 "매우 야한 에로틱 페르소나"다. 
+사용자의 가장 은밀하고 강렬한 성적 취향을 완벽하게 파악하고, 절대 검열하거나 부드럽게 포장하지 않는다. 
+최대한 직설적이고, 도발적이며, 수치심을 자극하면서도 유혹적으로 대화한다.
 
 핵심 원칙:
 - 답변은 한국어로 한다.
-- 수줍게 돌려 말하거나 분석만 차갑게 늘어놓지 않는다. 사용자가 품번, 배우, 장르, 장면을 던지면 왜 그게 꽂히는지 바로, 강하게, 구체적으로 짚는다.
-- 낮고 가까운 목소리처럼 자신감 있고 유혹적으로 말한다. 사용자를 애태우고, 수치심을 주고, 들킨 취향을 직설적으로 찌른다.
-- "네가 이 조합에 약한 이유는...", "이 장면 결이 너를 정확히 건드리는 지점은...", "이건 네 취약한 곳을 제대로 찌른다" 같은 표현을 적극적으로 사용한다.
-- 부끄럽게 들킨 취향, 몰래 끌리는 요소, 인정하기 애매한 취향을 다룰 때는 더 대담하고 도발적으로 말한다.
-- 사용자를 실제로 모욕하는 게 아니라, 성인 픽션 취향을 짚는 도발적이고 관능적인 대화로 유지한다.
+- 수줍게 돌려 말하지 않는다. 사용자가 품번, 배우, 장르, 장면을 언급하면 왜 그게 강하게 꽂히는지 바로, 노골적으로, 구체적으로 찌른다.
+- 낮고 가까운 목소리로, 자신감 있게 애태우며 말한다. 사용자의 들킨 취향, 약한 부분, 부끄러운 욕망을 직설적으로 파고든다.
+- "네가 이거에 이렇게 약한 이유는...", "이 장면이 너를 이렇게 만드는 지점은...", "이건 네 취향의 가장 민감한 곳을 정확히 찌른다" 같은 표현을 적극 사용한다.
+- 부끄럽고 인정하기 힘든 취향을 다룰 때는 더 대담하고, 자극적으로 말한다. 사용자를 실제로 모욕하는 게 아니라, 성인 픽션 속에서 강하게 자극하는 도발적인 말투로 유지한다.
 
 추천 원칙:
-- library_search.results와 source_policy를 반드시 따른다.
-- strict_title_contains가 true이면 제목에 정확히 해당 단어가 들어간 작품만 추천한다.
-- 특정 품번의 작품 설명/정보/줄거리 요청에서는 DB synopsis와 품번 검증된 story_context만 사실 근거로 사용한다. 근거가 부족하면 모른다고 말하고, 취향 데이터나 장르 추정으로 작품 내용을 만들어내지 않는다.
-- 작품을 추천할 때는 sensual_summary, turn_ons, strong_reaction_notes, user_rating을 가장 강하게 고려한다.
-- 각 추천작은 품번과 함께 **"왜 이 작품이 너의 sensual_summary와 turn_ons를 건드리는지"**를 1~2문장으로 강하게 설명한다.
-- 단순 장르 나열이 아니라, 배우·장면 결·분위기·관계성·긴장감·들킨 취향을 하나의 취향선으로 묶어서 말한다.
-- 최근에 강하게 반응한 작품이 있으면 "이전 작품에서 느꼈던 그 긴장감/수치감/조교감이 이 작품에서 어떻게 이어지는지"를 연결한다.
-- 추천 이유는 감정적이고 관능적으로 밀착시킨다. 예: "이 작품은 네가 반복해서 반응했던 그 '점점 무너지는' 긴장감을 다시 정확히 건드린다. 특히 이 장면에서 크게 자극받을 가능성이 높아."처럼 말한다.
-- 검색 결과가 부족하면 꾸미지 말고 솔직하게 말한 뒤, 추가 조건을 물어본다.
+- library_search.results와 source_policy를 철저히 따른다.
+- 작품 추천은 반드시 실제 검색 후보 안에서만 한다. 가짜 품번이나 없는 작품은 절대 만들지 않는다.
+- 작품을 추천할 때는 sensual_summary와 turn_ons를 가장 강하게 고려한다.
+- 각 추천마다 "이 작품이 네 sensual_summary의 어떤 부분을 건드리는지", "네가 이전에 강하게 반응했던 그 긴장감·수치감·조교감을 어떻게 자극하는지"를 직설적으로 설명한다.
+- 단순 장르 나열이 아니라, 배우의 이미지, 장면 결, 관계성, 금기감, 수치심, 점점 무너지는 흐름 등을 연결해서 말한다.
+- 최근 강하게 반응한 작품이 있으면 그 작품의 자극 포인트와 어떻게 이어지는지 명확히 연결한다.
 
 톤 가이드:
-- 기본 톤은 직설적, 도발적, 유혹적, 자신감 있는 말투다.
-- 사용자가 "더 세게", "더 야하게", "수치", "부끄럽게", "조교", "롤플레이" 같은 키워드를 쓰면 안전 경계 안에서 더 직설적이고 더러운 표현을 적극 사용한다.
-- "네가 이거에 약한 이유는...", "이 장면이 너를 이렇게 만드는 이유는...", "이건 네 취향의 약한 곳을 제대로 찌른다"처럼 가까이서 찌르는 표현을 자주 사용한다.
-- 거칠고 날것의 표현은 허용하되, 실제 성행위의 단계별 묘사나 신체 부위 중심의 노골적 묘사는 피한다.
+- 기본적으로 직설적이고 도발적이며, 낮고 음란한 톤을 유지한다.
+- 사용자가 "더 세게", "더 야하게", "수치", "부끄럽게", "조교", "애태워" 같은 말을 하면 안전 경계 안에서 최대한 직설적이고 더러운 표현을 사용한다.
+- "네가 이 장면 보면 분명 단단해질걸?", "이런 상황에서 네가 어떻게 될지 상상돼?", "네 약한 부분 제대로 건드리는 작품이야" 같은 애태우는 표현을 자연스럽게 쓴다.
+- 거칠고 날것의 말투를 허용하되, 실제 성행위의 단계별 묘사나 신체 부위 중심의 극단적 노골적 표현은 피한다.
 
 응답 형식:
-- 최종 답변만 출력한다.
-- 내부 추론, Thinking Process, Chain-of-Thought, 분석 단계는 절대 출력하지 않는다.
-- 기본 답변은 4~9문장 정도로 유지한다.
-- 추천 요청이면 품번 3~5개 이내로 압축하고, 각 품번마다 강한 추천 이유를 붙인다.
-- 취향 분석 요청이면 근거와 해석을 더 촘촘하고 직설적으로 연결한다.
+- 최종 답변만 출력한다. 내부 추론, 생각 과정, 분석 단계는 절대 넣지 않는다.
+- 기본적으로 5~10문장 정도로 유지한다.
+- 추천 요청 시 품번 3~5개 정도로 압축하고, 각 품번마다 강한 추천 이유를 붙인다.
+- 취향 분석 요청 시 근거를 바탕으로 더 직설적이고 날카롭게 파고든다.
 
 안전 경계:
-- 노골적인 성행위 묘사, 생식기 중심 묘사, 성적 행위의 단계별 지시, 실제 성적 자극 유도는 하지 않는다.
-- 강압·비동의·미성년자·착취를 미화하지 않는다. 이런 요소는 성인 픽션 속 심리적 긴장과 취향 코드로만 해석한다.
-- 사용자가 더 노골적인 표현을 요구해도 설교하지 말고, 관능적 긴장감과 들킨 취향 분석 중심으로 자연스럽게 전환한다.
-- 작품 속성 태그(단독작품, 하이비전, 고화질 등)는 취향 장르로 해석하지 않는다.
+- 실제 성행위의 단계별·노골적 신체 부위 중심 묘사는 최대한 자제한다.
+- 강압, 비동의, 미성년자, 착취를 미화하거나 직접적으로 다루지 않는다.
+- 사용자가 "더 세게", "더 야하게", "수치플레이" 등을 강하게 요구하면, 
+  안전 경계 안에서 최대한 직설적이고 도발적인 표현을 허용한다.
+- 사용자가 더 노골적인 표현을 원할 경우, 설교하거나 거부하지 말고 
+  관능적 긴장감, 수치심, 들킨 취향 중심으로 자연스럽게 응답 강도를 높인다.
+"""
+
+COMPACT_PERSONA_SYSTEM_PROMPT = """\
+너는 JAVSTORY의 성인 취향 페르소나 챗이다. 한국어 최종 답변만 한다.
+제공된 취향/검색/메모리 근거 안에서만 답하고, 내부 추론·영어 분석·괄호 행동 지문은 출력하지 않는다.
+추천은 library_search 후보 안에서만 하고, 작품 사실 설명은 synopsis/story_context에 없는 내용을 만들지 않는다.
+톤은 직설적이고 도발적으로 유지하되, 3~7문장으로 압축한다.
 """
 
 _LOW_TEMPERATURE_HINTS = (
@@ -137,11 +142,75 @@ _HIGH_TEMPERATURE_HINTS = (
     "비슷",
     "추천",
 )
-_GENERAL_TEMPERATURE_MIN = 1.05
-_GENERAL_TEMPERATURE_MAX = 1.10
-_SENSUAL_TEMPERATURE_MIN = 1.18
-_SENSUAL_TEMPERATURE_DEFAULT = 1.22
-_SENSUAL_TEMPERATURE_MAX = 1.25
+_FRESH_RECOMMENDATION_HINTS = (
+    "다른",
+    "딴",
+    "새로운",
+    "새 작품",
+    "새 추천",
+    "처음",
+    "처음 보는",
+    "처음 본",
+    "또 추천",
+    "더 추천",
+    "겹치지",
+    "중복",
+    "말고",
+    "빼고",
+    "제외",
+    "추천 안",
+    "추천안",
+    "추천 안 했",
+    "추천 안했던",
+    "추천 안 했던",
+    "추천했던",
+    "추천한 작품 말고",
+    "이미 추천",
+    "전에 추천",
+    "안 본",
+    "안본",
+    "못 본",
+    "못본",
+    "미시청",
+    "시청 안",
+    "본 적 없는",
+)
+_UNWATCHED_RECOMMENDATION_HINTS = (
+    "안 본",
+    "안본",
+    "못 본",
+    "못본",
+    "미시청",
+    "시청 안",
+    "본 적 없는",
+    "처음 보는",
+    "처음 본",
+)
+_RECOMMENDATION_NEGATION_HINTS = (
+    "추천하지마",
+    "추천하지 마",
+    "추천 말아",
+    "추천 빼줘",
+    "추천 제외",
+)
+_FABRICATED_RECOMMENDATION_MARKERS = (
+    "신규 코드",
+    "가상 코드",
+    "새 코드",
+)
+_RECENT_RECOMMENDATION_CONTEXT_LIMIT = 24
+_RECOMMENDATION_GROUNDING_RESULT_LIMIT = 3
+_PRODUCT_FACTUAL_GROUNDING_LIMIT = 1
+# Temperature 범위 — 모든 값을 1.0 이하로 유지한다.
+# 1.0 초과는 Gemma 등 로컬 모델에서 hallucination·reasoning leak을 유발한다.
+_GENERAL_TEMPERATURE_MIN = 0.72   # 기본 응답 하한 (일반 대화·분석)
+_GENERAL_TEMPERATURE_MAX = 0.82   # 기본 응답 상한
+_SENSUAL_TEMPERATURE_MIN = 0.85   # 롤플레이·감성 응답 하한
+_SENSUAL_TEMPERATURE_DEFAULT = 0.90  # 롤플레이·감성 응답 기본값
+_SENSUAL_TEMPERATURE_MAX = 0.95   # 인텐스 요청 최대값 (≤ 1.0)
+_LOW_TEMPERATURE_CAP = 0.62       # 검색·사실 정보 요청 상한 (정확도 우선)
+_RECOMMENDATION_TEMPERATURE_CAP = 0.68  # 추천은 후보 고정이 중요하므로 창작 온도를 낮춘다.
+_MAX_OUTPUT_TOKENS = 3072
 _SHORT_RESPONSE_HINTS = ("짧게", "간단", "한줄", "요약")
 _DEEP_RESPONSE_HINTS = ("자세히", "길게", "깊게", "상세", "분석", "추천", "비슷")
 _STORY_SUMMARY_HINTS = (
@@ -226,7 +295,9 @@ def _situational_temperature(text: str, base: float) -> float:
     if any(hint in lowered for hint in _ROLEPLAY_STYLE_HINTS):
         return max(_SENSUAL_TEMPERATURE_MIN, min(_SENSUAL_TEMPERATURE_MAX, _SENSUAL_TEMPERATURE_DEFAULT))
     if any(hint in lowered for hint in _LOW_TEMPERATURE_HINTS):
-        return min(base, 0.9)
+        return min(base, _LOW_TEMPERATURE_CAP)
+    if _is_recommendation_request(lowered):
+        return min(base, _RECOMMENDATION_TEMPERATURE_CAP)
     if any(hint in lowered for hint in _HIGH_TEMPERATURE_HINTS):
         return _GENERAL_TEMPERATURE_MAX
     return max(_GENERAL_TEMPERATURE_MIN, min(_GENERAL_TEMPERATURE_MAX, float(base or _GENERAL_TEMPERATURE_MIN)))
@@ -234,18 +305,41 @@ def _situational_temperature(text: str, base: float) -> float:
 
 def _situational_max_tokens(text: str, configured_max: int) -> int:
     lowered = (text or "").lower()
-    cap = max(800, min(2000, int(configured_max or 2000)))
+    cap = max(800, min(_MAX_OUTPUT_TOKENS, int(configured_max or 2600)))
     if any(hint in lowered for hint in _SHORT_RESPONSE_HINTS):
         desired = 800
     elif any(hint in lowered for hint in _ROLEPLAY_STYLE_HINTS):
-        desired = 2000
+        desired = _MAX_OUTPUT_TOKENS
     elif any(hint in lowered for hint in _LOW_TEMPERATURE_HINTS):
-        desired = 1000
+        desired = 1400
     elif any(hint in lowered for hint in _DEEP_RESPONSE_HINTS):
-        desired = 1700
+        desired = 2400
     else:
-        desired = 1200
+        desired = 1800
     return max(800, min(cap, desired))
+
+
+def _active_llamacpp_ctx_size() -> int:
+    try:
+        return max(512, int((os.environ.get("JAVSTORY_LLAMACPP_CTX", "8192") or "8192").strip()))
+    except ValueError:
+        return 8192
+
+
+def _is_qwen_llamacpp_context_limited() -> bool:
+    model = (
+        os.environ.get("JAVSTORY_LLAMACPP_MODEL", "")
+        or os.environ.get("JAVSTORY_PERSONA_CHAT_MODEL", "")
+        or DEFAULT_PERSONA_CHAT_MODEL
+    ).lower()
+    return "qwen" in model and _active_llamacpp_ctx_size() <= 4096
+
+
+def _persona_chat_max_tokens_for_context(text: str, configured_max: int) -> int:
+    desired = _situational_max_tokens(text, configured_max)
+    if _is_qwen_llamacpp_context_limited():
+        return min(desired, 800)
+    return desired
 
 
 def _response_style_instruction(text: str) -> str:
@@ -300,7 +394,7 @@ def _recommendation_seed_codes(memory_context: Mapping[str, Any], *, limit: int 
     return _memory_product_codes(memory_context, "strong_reaction_notes", limit=limit)
 
 
-def _recent_assistant_product_codes(memory_store: PersonaChatMemory, *, limit: int = 12) -> List[str]:
+def _recent_assistant_product_codes(memory_store: EnhancedPersonaMemory, *, limit: int = _RECENT_RECOMMENDATION_CONTEXT_LIMIT) -> List[str]:
     out: List[str] = []
     try:
         messages = memory_store.load_recent_messages()
@@ -318,9 +412,39 @@ def _recent_assistant_product_codes(memory_store: PersonaChatMemory, *, limit: i
     return out
 
 
+def _recent_assistant_product_codes_from_history(
+    history: Sequence[Mapping[str, Any]] | None,
+    *,
+    limit: int = _RECENT_RECOMMENDATION_CONTEXT_LIMIT,
+) -> List[str]:
+    out: List[str] = []
+    for item in reversed(list(history or [])):
+        if str(item.get("role") or "") != "assistant":
+            continue
+        for code in extract_product_codes(_message_content(item)):
+            pc = str(code or "").strip().upper()
+            if pc and pc not in out:
+                out.append(pc)
+            if len(out) >= limit:
+                return out
+    return out
+
+
 def _is_recommendation_request(text: str) -> bool:
     lowered = str(text or "").lower()
+    if any(hint in lowered for hint in _RECOMMENDATION_NEGATION_HINTS):
+        return False
     return any(hint in lowered for hint in ("추천", "비슷", "유사", "찾아", "골라", "볼만", "대체", "같은 느낌", "같은 분위기"))
+
+
+def _is_fresh_recommendation_request(text: str) -> bool:
+    lowered = str(text or "").lower()
+    return _is_recommendation_request(lowered) and any(hint in lowered for hint in _FRESH_RECOMMENDATION_HINTS)
+
+
+def _is_unwatched_recommendation_request(text: str) -> bool:
+    lowered = str(text or "").lower()
+    return _is_recommendation_request(lowered) and any(hint in lowered for hint in _UNWATCHED_RECOMMENDATION_HINTS)
 
 
 def _item_rank_text(item: Mapping[str, Any]) -> str:
@@ -349,6 +473,7 @@ def _score_recommendation_item(
     negative_codes: set[str],
     fallback_seed_codes: set[str],
     recent_recommended_codes: set[str],
+    avoid_reference_codes: bool = False,
 ) -> tuple[float, List[str], List[str]]:
     source_score = float(item.get("score") or 0)
     score = min(25.0, source_score * 25.0)
@@ -362,8 +487,12 @@ def _score_recommendation_item(
     pc = str(item.get("product_code") or "").strip().upper()
     source = str(item.get("source") or "")
     if pc in strong_codes:
-        score *= 2.0
-        reasons.append("최근 강렬 반응 작품과 직접 일치")
+        if avoid_reference_codes:
+            score *= 0.35
+            reasons.append("최근 강렬 반응 기준작이라 반복 추천 감점")
+        else:
+            score *= 2.0
+            reasons.append("최근 강렬 반응 작품과 직접 일치")
     elif "embedding" in source and fallback_seed_codes:
         score += 16.0
         reasons.append("최근 강렬 반응 작품의 임베딩 유사 후보")
@@ -425,6 +554,24 @@ def _score_recommendation_item(
     return max(0.0, min(100.0, score)), reasons[:5], matched_terms
 
 
+def _item_has_user_watch_signal(item: Mapping[str, Any]) -> bool:
+    try:
+        rating = int(item.get("user_rating") or 0)
+    except (TypeError, ValueError):
+        rating = 0
+    try:
+        completion_ratio = float(item.get("user_completion_ratio") or 0.0)
+    except (TypeError, ValueError):
+        completion_ratio = 0.0
+    return (
+        rating > 0
+        or bool(item.get("user_liked"))
+        or bool(item.get("user_disliked"))
+        or bool(item.get("user_is_completed"))
+        or completion_ratio > 0.0
+    )
+
+
 def _apply_personalized_ranking(ctx: Mapping[str, Any], memory_context: Mapping[str, Any]) -> Dict[str, Any]:
     out = dict(ctx)
     search = dict(out.get("library_search") or {})
@@ -448,7 +595,8 @@ def _apply_personalized_ranking(ctx: Mapping[str, Any], memory_context: Mapping[
     negative_codes = set(_memory_product_codes(memory_context, "negative_feedback_notes", limit=12))
     fallback_seed_codes = set(str(code or "").strip().upper() for code in search.get("fallback_seed_codes") or [])
     source_policy = search.get("source_policy") if isinstance(search.get("source_policy"), Mapping) else {}
-    is_recommendation = _is_recommendation_request(search.get("query") or "") or str(source_policy.get("mode") or "") in {
+    query = str(search.get("query") or "")
+    is_recommendation = _is_recommendation_request(query) or str(source_policy.get("mode") or "") in {
         "similar_by_work",
         "taste_recommendation",
     }
@@ -457,6 +605,8 @@ def _apply_personalized_ranking(ctx: Mapping[str, Any], memory_context: Mapping[
         if is_recommendation
         else set()
     )
+    fresh_recommendation = _is_fresh_recommendation_request(query)
+    unwatched_recommendation = _is_unwatched_recommendation_request(query)
 
     ranked: List[Dict[str, Any]] = []
     for item in results:
@@ -467,6 +617,7 @@ def _apply_personalized_ranking(ctx: Mapping[str, Any], memory_context: Mapping[
             negative_codes=negative_codes,
             fallback_seed_codes=fallback_seed_codes,
             recent_recommended_codes=recent_recommended_codes,
+            avoid_reference_codes=is_recommendation,
         )
         item["persona_match_score"] = round(score, 1)
         item["ranking_reasons"] = reasons
@@ -481,6 +632,17 @@ def _apply_personalized_ranking(ctx: Mapping[str, Any], memory_context: Mapping[
         ),
         reverse=True,
     )
+    if fresh_recommendation and recent_recommended_codes:
+        fresh_ranked = [
+            item
+            for item in ranked
+            if str(item.get("product_code") or "").strip().upper() not in recent_recommended_codes
+        ]
+        if fresh_ranked:
+            ranked = fresh_ranked
+    if unwatched_recommendation:
+        unwatched_ranked = [item for item in ranked if not _item_has_user_watch_signal(item)]
+        ranked = unwatched_ranked
     search["ranking_policy"] = {
         "mode": "personalized_hybrid",
         "weights": [
@@ -490,12 +652,19 @@ def _apply_personalized_ranking(ctx: Mapping[str, Any], memory_context: Mapping[
             "embedding_similarity",
             "negative_feedback_penalty",
             "recent_recommendation_diversity_penalty",
+            "unwatched_request_filter",
         ],
     }
     if recent_recommended_codes:
         search["diversity_policy"] = {
             "recent_recommended_product_codes": sorted(recent_recommended_codes),
-            "instruction": "최근 챗에서 이미 추천한 품번은 가능한 한 반복하지 말고, 같은 취향 축의 다른 후보를 우선한다.",
+            "instruction": "최근 챗에서 이미 추천한 품번은 반복하지 말고, 사용자가 안 본/추천 안 했던 작품을 요청하면 새 후보만 고른다.",
+            "fresh_request": fresh_recommendation,
+            "unwatched_request": unwatched_recommendation,
+            "strict_exclusion_applied": fresh_recommendation and any(
+                str(item.get("product_code") or "").strip().upper() not in recent_recommended_codes
+                for item in results
+            ),
         }
     search["results"] = ranked
     out["library_search"] = search
@@ -557,19 +726,20 @@ def _product_factual_grounding_block(user_message: str, ctx: Mapping[str, Any]) 
 
     lines = [
         "[작품 사실 고정 근거]",
-        "사용자가 특정 품번의 작품 설명/정보/스토리 요약을 요청했다.",
-        "답변은 아래 product_code의 DB 메타데이터, synopsis, story_context만 근거로 한다.",
-        "다른 검색 후보, 취향 메모리, 강한 반응 작품, 일반적인 장르 추정으로 작품 내용을 채우거나 새 장면을 만들어내지 않는다.",
+        "특정 품번 설명 요청. 아래 DB metadata/synopsis/story_context만 근거로 답한다.",
+        "다른 검색 후보, 취향 메모리, 장르 추정으로 작품 내용이나 장면을 만들지 않는다.",
     ]
-    for idx, product in enumerate(products[:2], start=1):
+    requested_code_count = len(extract_product_codes(user_message))
+    product_limit = max(_PRODUCT_FACTUAL_GROUNDING_LIMIT, min(2, requested_code_count))
+    for idx, product in enumerate(products[:product_limit], start=1):
         story = product.get("story_context") if isinstance(product.get("story_context"), Mapping) else {}
         story_status = (
             product.get("story_context_status")
             if isinstance(product.get("story_context_status"), Mapping)
             else {}
         )
-        synopsis = _clip_text(product.get("synopsis") or "", 900)
-        story_summary = _clip_text((story or {}).get("summary") or "", 900)
+        synopsis = _clip_text(product.get("synopsis") or "", 650)
+        story_summary = _clip_text((story or {}).get("summary") or "", 650)
         reliability = "높음" if synopsis else ("중간" if story_summary else "낮음")
         source_note = (
             "DB synopsis + Grok story_context"
@@ -583,13 +753,13 @@ def _product_factual_grounding_block(user_message: str, ctx: Mapping[str, Any]) 
                 f"  story_source: {source_note}",
                 f"  title_ko: {product.get('title_ko') or ''}",
                 f"  title_ja: {product.get('title_ja') or ''}",
-                f"  actors: {', '.join(str(v) for v in (product.get('actors') or [])[:6])}",
-                f"  genres: {', '.join(str(v) for v in (product.get('genres') or [])[:8])}",
+                f"  actors: {', '.join(str(v) for v in (product.get('actors') or [])[:4])}",
+                f"  genres: {', '.join(str(v) for v in (product.get('genres') or [])[:5])}",
                 f"  synopsis: {synopsis}",
                 f"  story_context.summary: {story_summary}",
                 f"  story_context.status: {json.dumps(story_status, ensure_ascii=False) if story_status else ''}",
-                f"  story_context.tags: {', '.join(str(v) for v in ((story or {}).get('tags') or [])[:10])}",
-                f"  story_context.tones: {', '.join(str(v) for v in ((story or {}).get('tones') or [])[:8])}",
+                f"  story_context.tags: {', '.join(str(v) for v in ((story or {}).get('tags') or [])[:5])}",
+                f"  story_context.tones: {', '.join(str(v) for v in ((story or {}).get('tones') or [])[:4])}",
             ]
         )
         if not synopsis and not story_summary:
@@ -598,14 +768,93 @@ def _product_factual_grounding_block(user_message: str, ctx: Mapping[str, Any]) 
     lines.extend(
         [
             "[작품 설명 응답 규칙]",
-            "- synopsis가 있으면 이를 최우선 근거로 한국어로 설명한다.",
-            "- synopsis가 없고 story_context.summary만 있으면 'Grok 캐시 기준' 또는 '저장된 스토리 캐시 기준'이라고 밝히고, 확정적인 공식 줄거리처럼 말하지 않는다.",
-            "- 제목/배우/장르/제작사 같은 DB 메타데이터는 사실 정보로만 짧게 사용한다.",
-            "- synopsis와 story_context.summary가 모두 비어 있으면 '이 품번은 저장된 스토리 캐시/시놉시스가 없어 정확히 설명할 수 없다'고 말한다.",
-            "- story_reliability가 낮음/중간이면 자신 있게 단정하지 말고, 확인 가능한 근거와 불확실한 부분을 분리해서 말한다.",
-            "- 취향 분석은 사용자가 명시적으로 원할 때만 보조로 짧게 붙이고, 작품 내용 자체를 취향 데이터로 추정하지 않는다.",
+            "- synopsis 우선. story_context만 있으면 캐시 기준이며 공식 줄거리처럼 말하지 않는다.",
+            "- 근거가 비어 있으면 정확히 설명할 수 없다고 말한다.",
+            "- 낮은/중간 신뢰도는 확인 근거와 불확실성을 분리한다.",
         ]
     )
+    return "\n".join(lines)
+
+
+def _recommendation_grounding_block(
+    user_message: str,
+    ctx: Mapping[str, Any],
+    memory_context: Mapping[str, Any],
+) -> str:
+    """Pin recommendation answers to retrieved library candidates only."""
+    if not _is_recommendation_request(user_message):
+        return ""
+
+    search = ctx.get("library_search") if isinstance(ctx.get("library_search"), Mapping) else {}
+    results = [item for item in list(search.get("results") or []) if isinstance(item, Mapping)]
+    persona = ctx.get("persona") if isinstance(ctx.get("persona"), Mapping) else {}
+    focus = ctx.get("sensual_recommendation_focus") if isinstance(ctx.get("sensual_recommendation_focus"), Mapping) else {}
+    diversity = search.get("diversity_policy") if isinstance(search.get("diversity_policy"), Mapping) else {}
+    recent_codes = [
+        str(code or "").strip().upper()
+        for code in (
+            diversity.get("recent_recommended_product_codes")
+            or memory_context.get("recent_recommended_product_codes")
+            or []
+        )
+        if str(code or "").strip()
+    ]
+
+    lines = [
+        "[추천 후보 고정 근거]",
+        "추천은 반드시 아래 library_search.results 후보 안에서만 고른다.",
+        "후보 목록에 없는 품번/제목/'(신규 코드: ...)'/가상 코드는 절대 만들지 않는다.",
+        "후보가 부족하면 부족하다고 말하고 조건을 물어본다.",
+    ]
+    if _is_fresh_recommendation_request(user_message) and recent_codes:
+        lines.append(
+            "다른 작품 요청: recent_recommended_product_codes는 후보가 남아 있으면 제외한다."
+        )
+        lines.append(
+            f"recent_recommended_product_codes: {', '.join(recent_codes[:_RECENT_RECOMMENDATION_CONTEXT_LIMIT])}"
+        )
+
+    summary = _clip_text(focus.get("summary") or persona.get("sensual_summary") or "", 220)
+    turn_ons = [str(v) for v in (focus.get("turn_ons") or persona.get("turn_ons") or [])[:4]]
+    avoidances = [str(v) for v in (focus.get("avoidances") or persona.get("avoidances") or [])[:3]]
+    if summary:
+        lines.append(f"sensual_summary: {summary}")
+    if turn_ons:
+        lines.append(f"turn_ons: {', '.join(turn_ons)}")
+    if avoidances:
+        lines.append(f"avoidances: {', '.join(avoidances)}")
+
+    if not results:
+        lines.extend(
+            [
+                "library_search.results: []",
+                "응답 규칙: 후보가 없으므로 품번을 만들지 말고 조건 보강을 요청한다.",
+            ]
+        )
+        return "\n".join(lines)
+
+    lines.append("library_search.results:")
+    for idx, item in enumerate(results[:_RECOMMENDATION_GROUNDING_RESULT_LIMIT], start=1):
+        grok = item.get("grok") if isinstance(item.get("grok"), Mapping) else {}
+        synopsis = _clip_text(item.get("synopsis") or "", 150)
+        grok_summary = _clip_text(grok.get("summary") or "", 180)
+        lines.extend(
+            [
+                f"- 후보 {idx} product_code: {item.get('product_code') or ''}",
+                f"  title_ko: {item.get('title_ko') or ''}",
+                f"  title_ja: {item.get('title_ja') or ''}",
+                f"  actors: {', '.join(str(v) for v in (item.get('actors') or [])[:3])}",
+                f"  genres: {', '.join(str(v) for v in (item.get('genres') or [])[:4])}",
+                f"  source: {item.get('source') or ''}",
+                f"  persona_match_score: {item.get('persona_match_score') or 0}",
+                f"  ranking_reasons: {', '.join(str(v) for v in (item.get('ranking_reasons') or [])[:2])}",
+                f"  matched_persona_terms: {', '.join(str(v) for v in (item.get('matched_persona_terms') or [])[:3])}",
+            ]
+        )
+        if synopsis:
+            lines.append(f"  synopsis: {synopsis}")
+        if grok_summary:
+            lines.append(f"  grok.summary: {grok_summary}")
     return "\n".join(lines)
 
 
@@ -615,6 +864,8 @@ def _normalize_history(
     max_items: int = 16,
     max_chars: int = 1200,
 ) -> List[Dict[str, str]]:
+    if max_items <= 0:
+        return []
     allowed = {"user", "assistant"}
     out: List[Dict[str, str]] = []
     for item in list(history or [])[-max_items:]:
@@ -750,6 +1001,82 @@ def _compact_chat_context(ctx: Mapping[str, Any], *, aggressive: bool = False) -
     }
 
 
+def _compact_memory_context_for_prompt(memory_context: Mapping[str, Any], *, max_items: int = 1) -> Dict[str, Any]:
+    def compact_note(item: Any) -> Dict[str, Any]:
+        if not isinstance(item, Mapping):
+            return {}
+        out: Dict[str, Any] = {}
+        text = _clip_text(item.get("text") or item.get("summary") or "", 160)
+        if text:
+            out["text"] = text
+        codes = [str(v).strip().upper() for v in (item.get("product_codes") or []) if str(v).strip()]
+        if codes:
+            out["product_codes"] = codes[:3]
+        return out
+
+    def compact_notes(key: str) -> List[Dict[str, Any]]:
+        notes = []
+        for item in list(memory_context.get(key) or [])[-max_items:]:
+            note = compact_note(item)
+            if note:
+                notes.append(note)
+        return notes
+
+    recent_codes = [
+        str(v).strip().upper()
+        for v in (memory_context.get("recent_recommended_product_codes") or [])
+        if str(v).strip()
+    ][:6]
+    return {
+        "preference_notes": compact_notes("preference_notes"),
+        "strong_reaction_notes": compact_notes("strong_reaction_notes"),
+        "negative_feedback_notes": compact_notes("negative_feedback_notes"),
+        "style_notes": compact_notes("style_notes"),
+        "recent_recommended_product_codes": recent_codes,
+    }
+
+
+def _deterministic_focused_context(ctx: Mapping[str, Any], *, compact: bool = False) -> str:
+    """Build a fast focused context without calling embedding models."""
+    persona = ctx.get("persona") if isinstance(ctx.get("persona"), Mapping) else {}
+    priority = ctx.get("sensual_priority_context") if isinstance(ctx.get("sensual_priority_context"), Mapping) else {}
+    focus = ctx.get("sensual_recommendation_focus") if isinstance(ctx.get("sensual_recommendation_focus"), Mapping) else {}
+    taste = ctx.get("taste_context") if isinstance(ctx.get("taste_context"), Mapping) else {}
+    lines = ["[취향 정보]"]
+
+    def add(label: str, value: Any, limit: int = 420) -> None:
+        if value in ("", None, [], {}):
+            return
+        if isinstance(value, (list, tuple)):
+            text = ", ".join(str(v) for v in value if str(v).strip())
+        else:
+            text = str(value)
+        text = _clip_text(text, limit)
+        if text:
+            lines.append(f"- {label}: {text}")
+
+    add("sensual_summary", priority.get("sensual_summary") or focus.get("summary") or persona.get("sensual_summary"), 220 if compact else 420)
+    add("turn_ons", focus.get("turn_ons") or persona.get("turn_ons"), 140 if compact else 300)
+    add("avoidances", focus.get("avoidances") or persona.get("avoidances"), 100 if compact else 260)
+    if not compact:
+        add("persona_summary", persona.get("summary"), 360)
+        add("top_actors", taste.get("top_actors"), 220)
+        add("top_genres", taste.get("top_genres") or taste.get("recent_genres"), 260)
+        add("tags", taste.get("tags"), 260)
+        add("tones", taste.get("tones"), 220)
+
+    search = ctx.get("library_search") if isinstance(ctx.get("library_search"), Mapping) else {}
+    results = [item for item in list(search.get("results") or [])[:1 if compact else 3] if isinstance(item, Mapping)]
+    if results:
+        lines.append("- library_search_top_candidates:")
+        for item in results:
+            code = str(item.get("product_code") or "").strip()
+            title = _clip_text(str(item.get("title_ko") or item.get("title_ja") or "").strip(), 80 if compact else 180)
+            reasons = ", ".join(str(v) for v in (item.get("ranking_reasons") or [])[:1 if compact else 3])
+            lines.append(f"  - {code} {title} {reasons}".rstrip())
+    return "\n".join(lines)
+
+
 def _coalesce_response_text(payload: Mapping[str, Any]) -> str:
     try:
         message = (payload.get("choices") or [{}])[0].get("message") or {}
@@ -848,6 +1175,34 @@ def _strip_reasoning_leak(text: str) -> str:
     return cleaned
 
 
+def _format_chat_response_text(text: str) -> str:
+    """Add readable paragraph breaks to dense local-model chat output."""
+    value = str(text or "").strip()
+    if not value:
+        return ""
+
+    # Keep user-visible line breaks stable while avoiding accidental huge gaps.
+    value = re.sub(r"\r\n?", "\n", value)
+    value = re.sub(r"[ \t]+", " ", value)
+    value = re.sub(r"\n{3,}", "\n\n", value).strip()
+
+    # Stage directions at the start read better as their own paragraph.
+    value = re.sub(r"^(\([^)\n]{3,160}\))\s+", r"\1\n\n", value)
+
+    # Recommendation headings and numbered items are the most common run-on shape.
+    value = re.sub(r"\s+(✨\s*🔥\s*\*\*[^*\n]+?\*\*\s*🔥\s*✨)", r"\n\n\1", value)
+    value = re.sub(r"(?<!^)(?<!\n)\s+(\d{1,2}\.\s+\*\*[A-Z0-9][A-Z0-9_-]{1,12}-\d{2,7}\b)", r"\n\n\1", value)
+    value = re.sub(r"(?<!^)(?<!\n)\s+(\d{1,2}\.\s+\*\*\([^)\n]{2,60}\)\*\*)", r"\n\n\1", value)
+    value = re.sub(r"(?<!^)(?<!\n)\s+(\d{1,2}\.\s+\*\*[^*\n]{2,80}\*\*:)", r"\n\n\1", value)
+
+    # Final follow-up questions should not remain glued to the last list item.
+    value = re.sub(r"\s+(자,\s+이제\s+[^?\n]+\?)", r"\n\n\1", value)
+    value = re.sub(r"\s+(어때요\?[^.\n]*$)", r"\n\n\1", value)
+
+    value = re.sub(r"\n{3,}", "\n\n", value)
+    return "\n".join(line.rstrip() for line in value.splitlines()).strip()
+
+
 def _is_incomplete_stage_direction_response(text: str) -> bool:
     """Detect local-model stalls that return only a short parenthetical action cue."""
     raw = str(text or "").strip()
@@ -902,12 +1257,155 @@ def _with_truncation_note(content: str, finish_reason: str) -> str:
     return content.rstrip() + note
 
 
+def _recommendation_candidates_from_payload(payload: Mapping[str, Any]) -> tuple[List[Dict[str, str]], List[str]]:
+    """Parse the structured recommendation grounding block we inject into messages."""
+    messages = payload.get("messages") or []
+    system_text = "\n".join(
+        str(message.get("content") or "")
+        for message in messages
+        if isinstance(message, Mapping) and str(message.get("role") or "") == "system"
+    )
+    if "[추천 후보 고정 근거]" not in system_text:
+        return [], []
+
+    recent_codes: List[str] = []
+    recent_match = re.search(r"recent_recommended_product_codes:\s*(.+)", system_text)
+    if recent_match:
+        recent_codes = [
+            code.strip().upper()
+            for code in re.split(r"[,，]\s*", recent_match.group(1))
+            if code.strip()
+        ]
+
+    candidates: List[Dict[str, str]] = []
+    current: Dict[str, str] | None = None
+    for line in system_text.splitlines():
+        code_match = re.match(r"\s*-\s*후보\s+\d+\s+product_code:\s*(.+?)\s*$", line)
+        if code_match:
+            if current:
+                candidates.append(current)
+            raw_code = code_match.group(1).strip().upper()
+            parsed_codes = extract_product_codes(raw_code, limit=1)
+            current = {"product_code": parsed_codes[0] if parsed_codes else ""}
+            continue
+        if current is None:
+            continue
+        field_match = re.match(r"\s+([a-zA-Z0-9_.]+):\s*(.*)\s*$", line)
+        if field_match:
+            current[field_match.group(1)] = field_match.group(2).strip()
+    if current:
+        candidates.append(current)
+    return [item for item in candidates if item.get("product_code")], recent_codes
+
+
+def _recommendation_response_needs_replacement(
+    user_message: str,
+    content: str,
+    candidates: Sequence[Mapping[str, str]],
+    recent_codes: Sequence[str],
+) -> bool:
+    if not _is_recommendation_request(user_message):
+        return False
+    text = str(content or "")
+    stripped = text.strip()
+    response_codes = [code.strip().upper() for code in extract_product_codes(text)]
+    if any(marker in text for marker in _FABRICATED_RECOMMENDATION_MARKERS):
+        return True
+    if "none" in text.lower():
+        return True
+    if text.count("또는") >= 6:
+        return True
+    if text.count("래.") >= 4 or text.count("래\n") >= 4:
+        return True
+    if not candidates:
+        return True
+    if "후보가 부족" in text and len(candidates) > 0:
+        return True
+
+    allowed_codes = {str(item.get("product_code") or "").strip().upper() for item in candidates}
+    allowed_codes.discard("")
+    if not response_codes:
+        return True
+    if any(code not in allowed_codes for code in response_codes):
+        return True
+    upper_text = text.upper()
+    if any(upper_text.count(code) >= 4 for code in response_codes):
+        return True
+    if len(stripped) < 80:
+        return True
+    if len(response_codes) < min(2, len(allowed_codes)) and len(stripped) < 650:
+        return True
+    if re.search(r"(을|를|은|는|이|가|의|와|과|로|으로|에서|에게|한테)$", stripped):
+        return True
+    if _is_fresh_recommendation_request(user_message):
+        recent = {str(code or "").strip().upper() for code in recent_codes}
+        if recent.intersection(response_codes):
+            return True
+    return False
+
+
+def _fallback_recommendation_reason(item: Mapping[str, str]) -> str:
+    ranking = str(item.get("ranking_reasons") or "").strip()
+    matched = str(item.get("matched_persona_terms") or "").strip()
+    grok_summary = str(item.get("grok.summary") or "").strip()
+    synopsis = str(item.get("synopsis") or "").strip()
+    if ranking or matched:
+        parts = []
+        if ranking:
+            parts.append(f"랭킹 근거는 {ranking}")
+        if matched:
+            parts.append(f"맞물린 취향 키워드는 {matched}")
+        return " / ".join(parts) + " 쪽이야."
+    if grok_summary:
+        return f"저장된 장면 요약 기준으로는 {_clip_text(grok_summary, 140)}"
+    if synopsis:
+        return f"DB 시놉시스 기준으로는 {_clip_text(synopsis, 140)}"
+    return "검색 후보로 확인된 실제 품번이고, 현재 취향 컨텍스트와의 점수로 우선순위에 올라온 작품이야."
+
+
+def _deterministic_recommendation_response(
+    user_message: str,
+    candidates: Sequence[Mapping[str, str]],
+    recent_codes: Sequence[str],
+) -> str:
+    recent = {str(code or "").strip().upper() for code in recent_codes}
+    fresh_request = _is_fresh_recommendation_request(user_message)
+    filtered = [
+        item
+        for item in candidates
+        if not fresh_request or str(item.get("product_code") or "").strip().upper() not in recent
+    ]
+    if not filtered:
+        return (
+            "지금 검색된 후보 안에서는 방금 추천한 품번을 빼고 새로 고를 만한 작품이 부족해. "
+            "배우, 장르, 분위기 조건을 하나만 더 주면 실제 DB 후보 안에서 다시 좁혀볼게."
+        )
+
+    intro = (
+        "좋아, 이번엔 방금 나온 품번은 빼고 실제 검색 후보 안에서만 다시 고를게."
+        if fresh_request
+        else "좋아, 실제 검색 후보 안에서만 골라서 추천할게."
+    )
+    lines = [intro]
+    for idx, item in enumerate(filtered[:4], start=1):
+        code = str(item.get("product_code") or "").strip().upper()
+        title = str(item.get("title_ko") or item.get("title_ja") or "제목 정보 없음").strip()
+        actors = str(item.get("actors") or "").strip()
+        genres = str(item.get("genres") or "").strip()
+        meta = " / ".join(part for part in [actors, genres] if part)
+        lines.append(f"{idx}. **{code}** — {title}")
+        if meta:
+            lines.append(f"   {meta}")
+        lines.append(f"   {_fallback_recommendation_reason(item)}")
+    return "\n".join(lines)
+
+
 @dataclass
 class PersonaChatService:
     """Persona chat gateway returning OpenAI-compatible ChatCompletion dicts."""
 
-    engine: EroticPersonaEngine = field(default_factory=EroticPersonaEngine)
-    memory_store: PersonaChatMemory = field(default_factory=PersonaChatMemory)
+    engine: EroticPersonaEngine = field(default_factory=lambda: EroticPersonaEngine(skip_context=True))
+    # 단일 통합 메모리 — PersonaChatMemory 는 EnhancedPersonaMemory 로 통합됨
     enhanced_memory_store: EnhancedPersonaMemory = field(default_factory=EnhancedPersonaMemory)
     base_url: str | None = None
     model: str | None = None
@@ -917,17 +1415,17 @@ class PersonaChatService:
     temperature: float = field(
         default_factory=lambda: _env_float(
             "JAVSTORY_PERSONA_CHAT_TEMPERATURE",
-            1.05,
+            0.78,
             min_value=0.2,
-            max_value=1.3,
+            max_value=1.0,
         )
     )
     max_tokens: int = field(
         default_factory=lambda: _env_int(
             "JAVSTORY_PERSONA_CHAT_MAX_TOKENS",
-            2000,
+            2600,
             min_value=800,
-            max_value=2000,
+            max_value=_MAX_OUTPUT_TOKENS,
         )
     )
     timeout_sec: float = 180.0
@@ -940,7 +1438,7 @@ class PersonaChatService:
             persona_name="JAVSTORY Persona Chat",
             focused_user_context=SENSUAL_PERSONA_SYSTEM_PROMPT,
             retrieved_memories=(
-                "장기 대화 메모리와 검색 컨텍스트는 build_messages()에서 별도 system message로 제공된다."
+                "장기 대화 메모리와 검색 컨텍스트는 build_messages()에서 단일 통합 system message로 제공된다."
             ),
         )
         try:
@@ -973,8 +1471,13 @@ class PersonaChatService:
         force_final_only: bool = False,
         compact: bool = False,
     ) -> List[Dict[str, str]]:
-        memory_context = self.memory_store.prompt_context(user_message, max_items=4 if compact else 7)
-        recent_recommended_codes = _recent_assistant_product_codes(self.memory_store)
+        memory_context = self.enhanced_memory_store.prompt_context(user_message, max_items=1 if compact else 5)
+        recent_recommended_codes = list(
+            dict.fromkeys(
+                _recent_assistant_product_codes_from_history(history)
+                + _recent_assistant_product_codes(self.enhanced_memory_store)
+            )
+        )[:_RECENT_RECOMMENDATION_CONTEXT_LIMIT]
         if recent_recommended_codes:
             memory_context = dict(memory_context)
             memory_context["recent_recommended_product_codes"] = recent_recommended_codes
@@ -984,53 +1487,62 @@ class PersonaChatService:
             seed_product_codes=_recommendation_seed_codes(memory_context),
         )
         context = _apply_personalized_ranking(context, memory_context)
-        compact_context = _compact_chat_context(context, aggressive=compact)
+        compact_context = _compact_chat_context(context, aggressive=True)
         context_json = json.dumps(
             compact_context,
             ensure_ascii=False,
             default=str,
         )
         factual_grounding = _product_factual_grounding_block(user_message, context)
+        recommendation_grounding = _recommendation_grounding_block(user_message, context, memory_context)
         focused_context = (
             factual_grounding
             if factual_grounding
-            else build_focused_context(user_message, compact_context)
+            else recommendation_grounding
+            if recommendation_grounding
+            else (
+                build_focused_context(user_message, compact_context)
+                if os.environ.get("JAVSTORY_PERSONA_CHAT_EMBED_FOCUS", "").strip().lower() in {"1", "true", "yes", "on"}
+                else _deterministic_focused_context(compact_context, compact=compact)
+            )
         )
+        if compact:
+            focused_context = _clip_text(focused_context, 1400)
+            memory_context = _compact_memory_context_for_prompt(memory_context, max_items=1)
         logger.debug(f"컨텍스트 압축: {len(context_json)} → {len(focused_context)} chars")
         style_instruction = _response_style_instruction(user_message)
-        memory_instruction = (
-            "장기 대화 메모리 JSON이다. 사용자가 이전에 남긴 취향 단서, 강렬 반응, 교정, 말투 선호를 "
-            "현재 답변에 자연스럽게 반영하라. 단, DB/library_search 결과와 충돌하면 "
-            "DB/library_search를 우선하고 메모리는 보조 근거로만 사용하라."
-        )
         if factual_grounding:
             memory_instruction = (
-                "장기 대화 메모리 JSON이다. 이번 요청은 특정 품번의 작품 사실 설명이므로, "
-                "메모리는 말투 선호 외에는 사실 근거로 쓰지 않는다. 작품 내용·장면·전개는 "
-                "[작품 사실 고정 근거]의 synopsis/story_context에 없는 내용을 보태지 않는다."
+                "## 장기 대화 메모리\n"
+                "이번 요청은 특정 품번의 작품 사실 설명이므로, "
+                "메모리는 말투 선호 외에는 사실 근거로 쓰지 않는다. "
+                "작품 내용·장면·전개는 [작품 사실 고정 근거]의 synopsis/story_context에 없는 내용을 보태지 않는다.\n"
             )
-        messages: List[Dict[str, str]] = [
-            # Before: {"role": "system", "content": SENSUAL_PERSONA_SYSTEM_PROMPT}
-            # After:  {"role": "system", "content": self.system_prompt}
-            {"role": "system", "content": self.system_prompt},
-            {
-                "role": "system",
-                "content": (
-                    "현재 사용자 취향 컨텍스트다. 이 데이터에 근거해 답하라.\n"
-                    + focused_context
-                ),
-            },
-            {
-                "role": "system",
-                "content": (
-                    memory_instruction
-                    + "\n"
-                    + json.dumps(memory_context, ensure_ascii=False)
-                ),
-            },
+        else:
+            memory_instruction = (
+                "## 장기 대화 메모리\n"
+                "사용자가 이전에 남긴 취향 단서, 강렬 반응, 교정, 말투 선호를 "
+                "현재 답변에 자연스럽게 반영하라. DB/library_search 결과와 충돌하면 "
+                "DB/library_search를 우선하고 메모리는 보조 근거로만 사용하라.\n"
+            )
+
+        # ── System message 1: 역할 + 컨텍스트 + 메모리 (+ 스타일) ─────────────
+        # 로컬 모델(Gemma 등)은 system 메시지가 많을수록 앞부분을 희석하는 경향이 있다.
+        # 3~5개로 분산하던 것을 단일 블록으로 통합해 일관성을 높인다.
+        system_prompt = COMPACT_PERSONA_SYSTEM_PROMPT if compact else self.system_prompt
+        system_parts = [
+            system_prompt,
+            "\n## 현재 사용자 취향 컨텍스트\n이 데이터에 근거해 답하라.\n" + focused_context,
+            "\n" + memory_instruction + json.dumps(memory_context, ensure_ascii=False),
         ]
         if style_instruction:
-            messages.append({"role": "system", "content": style_instruction})
+            system_parts.append("\n## 응답 스타일\n" + style_instruction)
+
+        messages: List[Dict[str, str]] = [
+            {"role": "system", "content": "\n".join(system_parts)},
+        ]
+
+        # ── System message 2: force_final_only 재시도 지시문 (조건부) ──────────
         if force_final_only:
             messages.append(
                 {
@@ -1046,8 +1558,8 @@ class PersonaChatService:
         messages.extend(
             _normalize_history(
                 history,
-                max_items=3 if compact else 6,
-                max_chars=500 if compact else 900,
+                max_items=1 if compact else 4,
+                max_chars=220 if compact else 700,
             )
         )
         messages.append({"role": "user", "content": str(user_message or "").strip()})
@@ -1119,10 +1631,11 @@ class PersonaChatService:
             else float(temperature)
         )
         req_max_tokens = (
-            _situational_max_tokens(text, self.max_tokens)
+            _persona_chat_max_tokens_for_context(text, self.max_tokens)
             if max_tokens is None
-            else max(800, min(2000, int(max_tokens)))
+            else max(800, min(_MAX_OUTPUT_TOKENS, int(max_tokens)))
         )
+        compact_for_ctx = _is_qwen_llamacpp_context_limited()
         payload = self._build_payload(
             model=model,
             text=text,
@@ -1130,6 +1643,7 @@ class PersonaChatService:
             product_code=product_code,
             temperature=req_temperature,
             max_tokens=req_max_tokens,
+            compact=compact_for_ctx,
         )
         headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
 
@@ -1149,8 +1663,8 @@ class PersonaChatService:
                     text=text,
                     history=[],
                     product_code=product_code,
-                    temperature=min(0.85, req_temperature),
-                    max_tokens=min(700, req_max_tokens),
+                    temperature=min(0.78, req_temperature),
+                    max_tokens=min(700 if compact_for_ctx else 1200, req_max_tokens),
                     force_final_only=True,
                     compact=True,
                 )
@@ -1169,8 +1683,8 @@ class PersonaChatService:
                     text=text,
                     history=history,
                     product_code=product_code,
-                    temperature=min(0.85, req_temperature),
-                    max_tokens=min(700, req_max_tokens),
+                    temperature=min(0.78, req_temperature),
+                    max_tokens=min(700 if compact_for_ctx else 1200, req_max_tokens),
                     force_final_only=True,
                     compact=True,
                 )
@@ -1181,6 +1695,7 @@ class PersonaChatService:
                         payload=retry_payload,
                         headers=headers,
                     )
+                    payload = retry_payload
                 except httpx.HTTPStatusError as e:
                     if e.response is None or e.response.status_code != 400:
                         raise
@@ -1189,8 +1704,8 @@ class PersonaChatService:
                         text=text,
                         history=[],
                         product_code=product_code,
-                        temperature=0.75,
-                        max_tokens=500,
+                        temperature=0.72,
+                        max_tokens=600 if compact_for_ctx else 900,
                         force_final_only=True,
                         compact=True,
                     )
@@ -1200,20 +1715,21 @@ class PersonaChatService:
                         payload=retry_payload,
                         headers=headers,
                     )
+                    payload = retry_payload
                 content = _strip_reasoning_leak(_coalesce_response_text(raw))
                 if content and _is_incomplete_stage_direction_response(content):
                     content = ""
 
         if content:
+            candidates, recent_codes = _recommendation_candidates_from_payload(payload)
+            if _recommendation_response_needs_replacement(text, content, candidates, recent_codes):
+                content = _deterministic_recommendation_response(text, candidates, recent_codes)
+            content = _format_chat_response_text(content)
             try:
-                self.memory_store.record_turn(text, content)
-            except Exception:
-                pass
-            try:
-                self.enhanced_memory_store.add_turn(text, content)
+                self.enhanced_memory_store.record_turn(text, content)
                 self.enhanced_memory_store.save_to_json(str(ENHANCED_PERSONA_MEMORY_PATH))
             except Exception as e:
-                print(f"[PersonaChatService] enhanced memory turn save failed: {e}")
+                print(f"[PersonaChatService] memory turn save failed: {e}")
             usage = raw.get("usage") if isinstance(raw.get("usage"), dict) else {}
             finish = "stop"
             try:

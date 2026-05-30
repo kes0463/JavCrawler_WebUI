@@ -482,6 +482,19 @@ Item {
                         }
                     }
                 }
+
+                ActionButton {
+                    id: refreshAddedBtn
+                    text: "새 작품만"
+                    primary: false
+                    focusPolicy: Qt.StrongFocus
+                    onClicked: LibraryModel.refreshAddedOnly()
+                    ToolTip {
+                        text: "기존 카드와 스크롤 위치는 유지하고, DB에 새로 추가된 작품만 끝에 붙입니다."
+                        visible: parent.hovered
+                        delay: 500
+                    }
+                }
             }
 
             Row {
@@ -1128,7 +1141,8 @@ Item {
                         "♥ 기간증가 순",
                         "♥ 기간감소 순",
                         "별점순",
-                        "나중에 볼 추가순"
+                        "나중에 볼 추가순",
+                        "추천순"
                     ]
                     currentIndex: LibraryModel.sortMode
                     onCurrentIndexChanged: LibraryModel.sortMode = currentIndex
@@ -1391,6 +1405,29 @@ Item {
                             border.color: Theme.accentNeon
                             border.width: 4
                             color: Theme.accentGlow
+                        }
+                        add: Transition {
+                            NumberAnimation {
+                                property: "opacity"
+                                from: 0
+                                to: 1
+                                duration: 140
+                                easing.type: Easing.OutCubic
+                            }
+                            NumberAnimation {
+                                property: "scale"
+                                from: 0.96
+                                to: 1
+                                duration: 140
+                                easing.type: Easing.OutCubic
+                            }
+                        }
+                        displaced: Transition {
+                            NumberAnimation {
+                                properties: "x,y"
+                                duration: 100
+                                easing.type: Easing.OutCubic
+                            }
                         }
 
                         delegate: PosterCard {

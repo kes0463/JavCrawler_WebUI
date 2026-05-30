@@ -17,6 +17,7 @@ GlassCard {
 
     signal sendRequested(string message)
     signal clearRequested()
+    signal cancelRequested()
 
     function parseMessages() {
         try {
@@ -71,6 +72,10 @@ GlassCard {
         })
     }
 
+    function handleCancelled() {
+        root.streamingActive = false
+    }
+
     function showStreamingError() {
         root.streamingActive = false
         var next = root.messages.slice()
@@ -107,6 +112,9 @@ GlassCard {
         }
         function onPersonaChatErrorOccurred(_message) {
             root.showStreamingError()
+        }
+        function onPersonaChatCancelledOccurred() {
+            root.handleCancelled()
         }
     }
 
@@ -312,10 +320,19 @@ GlassCard {
             }
 
             ActionButton {
-                text: root.running ? "생성 중" : "전송"
+                visible: root.running
+                text: "취소"
+                danger: true
+                height: 42
+                onClicked: root.cancelRequested()
+            }
+
+            ActionButton {
+                visible: !root.running
+                text: "전송"
                 primary: true
                 height: 42
-                enabled: !root.running && input.text.trim().length > 0
+                enabled: input.text.trim().length > 0
                 onClicked: root.sendCurrent()
             }
         }

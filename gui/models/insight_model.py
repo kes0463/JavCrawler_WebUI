@@ -58,6 +58,7 @@ class InsightModel(QObject):
     personaChatTokenReceived = Signal(str)
     personaChatResponseCompleted = Signal(str)
     personaChatErrorOccurred = Signal(str)
+    personaChatCancelledOccurred = Signal()  # QML이 취소 상태를 반영할 때 사용
 
     _refreshReady = Signal(object)
     _refreshError = Signal(str)
@@ -69,6 +70,7 @@ class InsightModel(QObject):
     _personaChatToken = Signal(str)
     _personaChatStreamCompleted = Signal(str)
     _personaChatError = Signal(str)
+    _personaChatCancelled = Signal()
     _personaChatFinished = Signal()
 
     _PHASE_CORE = "core"
@@ -97,6 +99,9 @@ class InsightModel(QObject):
         self._persona_chat_history: list[dict[str, str]] = self._load_persona_chat_history()
         self._persona_chat_messages = json.dumps(self._persona_chat_history, ensure_ascii=False)
         self._persona_chat_worker = None
+        self._persona_chat_service = None  # PersonaChatService 재사용 인스턴스
+        self._persona_chat_request_id = 0
+        self._persona_chat_cancel_requested = False
         self._pipeline_report = "{}"
         self._weekly_digest = "{}"
         self._batch_running  = False
@@ -118,6 +123,7 @@ class InsightModel(QObject):
         self._personaChatToken.connect(self._apply_persona_chat_token)
         self._personaChatStreamCompleted.connect(self._apply_persona_chat_stream_completed)
         self._personaChatError.connect(self._apply_persona_chat_error)
+        self._personaChatCancelled.connect(self._apply_persona_chat_cancelled)
         self._personaChatFinished.connect(self._finish_persona_chat)
 
         QTimer.singleShot(2000, self._start_initial_load)
@@ -395,15 +401,32 @@ class InsightModel(QObject):
         elif tab_index == 3 and self._PHASE_COLLECTION not in self._phase_loaded:
             self._run_phases([self._PHASE_COLLECTION], full=False)
 
+    def _get_or_create_chat_service(self):
+        """PersonaChatService 인스턴스를 지연 생성하고 재사용한다.
+
+        메인 스레드에서만 호출할 것. 인스턴스를 미리 확보한 뒤
+        백그라운드 스레드에 레퍼런스로 넘겨야 스레드 안전하다.
+        """
+        if self._persona_chat_service is None:
+            from javstory.persona.persona_chat import PersonaChatService
+
+            self._persona_chat_service = PersonaChatService()
+        return self._persona_chat_service
+
     @Slot()
     def clearPersonaChat(self) -> None:
         self._persona_chat_history = []
         try:
-            from javstory.persona.persona_chat import PersonaChatService
-            from javstory.persona.persona_memory import PersonaChatMemory
+            from javstory.persona.persona_chat import ENHANCED_PERSONA_MEMORY_PATH
+            from javstory.persona.persona_memory import EnhancedPersonaMemory
 
-            PersonaChatService().close_session()
-            PersonaChatMemory().clear_recent_messages()
+            # 통합 메모리 초기화 (단일 파일)
+            blank = EnhancedPersonaMemory()
+            blank.save_to_json(str(ENHANCED_PERSONA_MEMORY_PATH))
+
+            # 재사용 중인 서비스 인스턴스의 인메모리 스토어도 함께 초기화
+            if self._persona_chat_service is not None:
+                self._persona_chat_service.enhanced_memory_store.clear_all()
         except Exception:
             pass
         self._sync_persona_chat_messages()
@@ -417,6 +440,9 @@ class InsightModel(QObject):
 
         history = list(self._persona_chat_history)
         self._append_persona_chat_message("user", text)
+        self._persona_chat_request_id += 1
+        request_id = self._persona_chat_request_id
+        self._persona_chat_cancel_requested = False
         self._persona_chat_running = True
         self.personaChatRunningChanged.emit()
 
@@ -424,27 +450,38 @@ class InsightModel(QObject):
             try:
                 from javstory.insight.insight_model import StreamingChatWorker
 
-                worker = StreamingChatWorker(text, history=history)
+                # 서비스 인스턴스를 메인 스레드에서 확보해 재사용
+                worker = StreamingChatWorker(text, history=history, service=self._get_or_create_chat_service())
                 self._persona_chat_worker = worker
-                worker.token_received.connect(self.personaChatTokenReceived.emit)
-                worker.token_received.connect(self._personaChatToken.emit)
-                worker.response_completed.connect(self.personaChatResponseCompleted.emit)
-                worker.response_completed.connect(self._personaChatStreamCompleted.emit)
-                worker.error_occurred.connect(self.personaChatErrorOccurred.emit)
-                worker.error_occurred.connect(self._personaChatError.emit)
-                worker.finished.connect(self._personaChatFinished.emit)
-                worker.finished.connect(lambda: setattr(self, "_persona_chat_worker", None))
+                worker.token_received.connect(
+                    lambda token, rid=request_id: self._handle_persona_chat_token(rid, token)
+                )
+                worker.response_completed.connect(
+                    lambda content, rid=request_id: self._handle_persona_chat_completed(rid, content)
+                )
+                worker.error_occurred.connect(
+                    lambda msg, rid=request_id: self._handle_persona_chat_error(rid, msg)
+                )
+                worker.cancelled.connect(
+                    lambda rid=request_id: self._handle_persona_chat_cancelled(rid)
+                )
+                worker.finished.connect(
+                    lambda rid=request_id: self._handle_persona_chat_finished(rid)
+                )
+                worker.finished.connect(lambda w=worker: self._clear_persona_chat_worker(w))
                 worker.start()
             except Exception as e:
                 self._personaChatError.emit(str(e))
                 self._personaChatFinished.emit()
             return
 
+        # 서비스 인스턴스를 메인 스레드에서 미리 확보 (스레드 안전)
+        # _worker 내부에서 생성하면 매 요청마다 enhanced memory 파일 I/O 와
+        # EroticPersonaEngine 재초기화가 발생하므로 여기서 재사용 인스턴스를 넘긴다.
+        service = self._get_or_create_chat_service()
+
         def _worker():
             try:
-                from javstory.persona.persona_chat import PersonaChatService
-
-                service = PersonaChatService()
                 response = service.chat(text, history=history)
                 content = (
                     ((response.get("choices") or [{}])[0].get("message") or {}).get("content")
@@ -506,11 +543,34 @@ class InsightModel(QObject):
     @staticmethod
     def _load_persona_chat_history() -> list[dict[str, str]]:
         try:
-            from javstory.persona.persona_memory import PersonaChatMemory
+            from javstory.persona.persona_chat import ENHANCED_PERSONA_MEMORY_PATH
+            from javstory.persona.persona_memory import EnhancedPersonaMemory, PersonaChatMemory
 
-            return PersonaChatMemory().load_recent_messages()
+            memory = EnhancedPersonaMemory()
+            memory.load_from_json(str(ENHANCED_PERSONA_MEMORY_PATH))
+            messages = memory.load_recent_messages()
+            if messages:
+                return InsightModel._format_loaded_persona_chat_history(messages)
+            return InsightModel._format_loaded_persona_chat_history(PersonaChatMemory().load_recent_messages())
         except Exception:
             return []
+
+    @staticmethod
+    def _format_loaded_persona_chat_history(messages: list[dict[str, str]]) -> list[dict[str, str]]:
+        try:
+            from javstory.persona.persona_chat import _format_chat_response_text
+        except Exception:
+            _format_chat_response_text = None
+
+        out: list[dict[str, str]] = []
+        for item in messages or []:
+            if not isinstance(item, dict):
+                continue
+            msg = dict(item)
+            if msg.get("role") == "assistant" and callable(_format_chat_response_text):
+                msg["content"] = _format_chat_response_text(str(msg.get("content") or ""))
+            out.append(msg)
+        return out
 
     def _sync_persona_chat_messages(self) -> None:
         self._persona_chat_messages = json.dumps(self._persona_chat_history, ensure_ascii=False)
@@ -560,8 +620,77 @@ class InsightModel(QObject):
             self._sync_persona_chat_messages()
 
     def _apply_persona_chat_error(self, msg: str) -> None:
-        self._append_persona_chat_message("assistant", "응답 생성 중 오류가 발생했습니다.", status="error")
+        user_message = "응답 생성 중 오류가 발생했습니다."
+        raw = str(msg or "")
+        if "exceeds the available context size" in raw or "컨텍스트" in raw:
+            user_message = (
+                "요청 컨텍스트가 현재 모델 한도를 넘어 응답을 만들지 못했습니다. "
+                "컨텍스트를 더 줄여 다시 시도합니다."
+            )
+        self._append_persona_chat_message("assistant", user_message, status="error")
         self.logMessage.emit(f"[InsightModel] 페르소나 챗 실패: {msg}")
+
+    def _apply_persona_chat_cancelled(self) -> None:
+        """스트리밍 취소 시 마지막 streaming 메시지를 cancelled 상태로 마킹한다."""
+        if not self._persona_chat_history:
+            return
+        last = self._persona_chat_history[-1]
+        if last.get("role") == "assistant" and last.get("status") == "streaming":
+            last["status"] = "cancelled"
+            content = str(last.get("content") or "").rstrip()
+            last["content"] = (content + "\n_(취소됨)_") if content else "_(취소됨)_"
+            self._sync_persona_chat_messages()
+        elif last.get("role") == "user":
+            self._append_persona_chat_message("assistant", "_(취소됨)_", status="cancelled")
+
+    def _is_current_persona_chat_request(self, request_id: int) -> bool:
+        return int(request_id or 0) == int(self._persona_chat_request_id or 0)
+
+    def _handle_persona_chat_token(self, request_id: int, token: str) -> None:
+        if not self._is_current_persona_chat_request(request_id) or self._persona_chat_cancel_requested:
+            return
+        self.personaChatTokenReceived.emit(token)
+        self._personaChatToken.emit(token)
+
+    def _handle_persona_chat_completed(self, request_id: int, content: str) -> None:
+        if not self._is_current_persona_chat_request(request_id) or self._persona_chat_cancel_requested:
+            return
+        self.personaChatResponseCompleted.emit(content)
+        self._personaChatStreamCompleted.emit(content)
+
+    def _handle_persona_chat_error(self, request_id: int, msg: str) -> None:
+        if not self._is_current_persona_chat_request(request_id) or self._persona_chat_cancel_requested:
+            return
+        self.personaChatErrorOccurred.emit(msg)
+        self._personaChatError.emit(msg)
+
+    def _handle_persona_chat_cancelled(self, request_id: int) -> None:
+        if not self._is_current_persona_chat_request(request_id):
+            return
+        self.personaChatCancelledOccurred.emit()
+        self._personaChatCancelled.emit()
+        self._finish_persona_chat()
+
+    def _handle_persona_chat_finished(self, request_id: int) -> None:
+        if not self._is_current_persona_chat_request(request_id):
+            return
+        self._personaChatFinished.emit()
+
+    def _clear_persona_chat_worker(self, worker: object) -> None:
+        if self._persona_chat_worker is worker:
+            self._persona_chat_worker = None
+
+    @Slot()
+    def cancelPersonaChat(self) -> None:
+        """진행 중인 스트리밍 응답을 취소한다."""
+        if not self._persona_chat_running and self._persona_chat_worker is None:
+            return
+        self._persona_chat_cancel_requested = True
+        if self._persona_chat_worker is not None:
+            self._persona_chat_worker.cancel()
+        self._apply_persona_chat_cancelled()
+        self.personaChatCancelledOccurred.emit()
+        self._finish_persona_chat()
 
     def _finish_persona_chat(self) -> None:
         if self._persona_chat_running:
@@ -645,6 +774,10 @@ class InsightModel(QObject):
             self.batchRunningChanged.emit()
 
     def _on_batch_done(self, result: dict) -> None:
+        if result.get("skipped"):
+            self._batch_running = False
+            self.batchRunningChanged.emit()
+            return
         synced = result.get("synced", 0)
         self.logMessage.emit(f"[InsightModel] 배치 완료 — {synced}건 동기화")
         self._batch_running = False

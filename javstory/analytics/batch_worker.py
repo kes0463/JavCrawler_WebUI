@@ -9,6 +9,8 @@ from __future__ import annotations
 import threading
 from typing import Callable
 
+_batch_lock = threading.Lock()
+
 
 def run_preference_sync(
     progress_callback: Callable[[int, int], None] | None = None
@@ -107,10 +109,17 @@ def run_batch_in_thread(
         실행 중인 Thread 객체
     """
     def _worker():
-        try:
-            result = decay_and_sync()
-        except Exception as e:
-            result = {"synced": 0, "decayed": False, "error": str(e)}
+        acquired = _batch_lock.acquire(blocking=False)
+        if not acquired:
+            result = {"synced": 0, "decayed": False, "skipped": True, "reason": "already_running"}
+        else:
+            try:
+                try:
+                    result = decay_and_sync()
+                except Exception as e:
+                    result = {"synced": 0, "decayed": False, "error": str(e)}
+            finally:
+                _batch_lock.release()
         if done_callback:
             try:
                 done_callback(result)

@@ -98,6 +98,54 @@ class SettingsModel(QObject):
             "qwen/qwen3-235b-a22b-2507",
         )
 
+    @staticmethod
+    def _llamacpp_base_model_id(value: str | None) -> str:
+        raw = (value or "").strip().lower()
+        if raw.startswith("llamacpp:"):
+            raw = raw.split(":", 1)[1].strip()
+        if "gemma" in raw:
+            return "gemma-4-e4b"
+        return "qwen3.5-35b-a3b"
+
+    def _sync_llamacpp_translation_models_to_active(self, *, emit: bool = True) -> None:
+        """Keep llama.cpp translation/correction choices on the selected base model."""
+        base = self._llamacpp_base_model_id(str(getattr(self, "_llamacpp_model", "") or ""))
+        profile = "budget" if base.startswith("gemma") else "qwen35"
+        harvest = f"llamacpp:{base}"
+        correction = f"llamacpp:{base}-uncensored"
+
+        if profile != getattr(self, "_translation_profile", ""):
+            self._translation_profile = profile
+            if emit:
+                self.translationProfileChanged.emit()
+        if harvest != getattr(self, "_harvest_translation_model", ""):
+            self._harvest_translation_model = harvest
+            if emit:
+                self.harvestTranslationModelChanged.emit()
+        if correction != getattr(self, "_correction_profile", ""):
+            self._correction_profile = correction
+            if emit:
+                self.correctionProfileChanged.emit()
+
+    def _apply_llamacpp_model_runtime_defaults(self, *, emit: bool = True) -> None:
+        """Avoid carrying dense-model runtime settings into the 35B MoE preset."""
+        base = self._llamacpp_base_model_id(str(getattr(self, "_llamacpp_model", "") or ""))
+        if not base.startswith("qwen"):
+            return
+        raw_ctx = str(getattr(self, "_llamacpp_ctx", "") or "").strip()
+        try:
+            ctx = int(raw_ctx) if raw_ctx else 0
+        except ValueError:
+            ctx = 0
+        if ctx <= 0 or ctx > 4096:
+            self._llamacpp_ctx = "4096"
+            if emit:
+                self.llamacppCtxChanged.emit()
+        if not str(getattr(self, "_llamacpp_n_cpu_moe", "") or "").strip():
+            self._llamacpp_n_cpu_moe = "24"
+            if emit:
+                self.llamacppNCpuMoeChanged.emit()
+
     def _cache_platform_translation_values(self, platform: str) -> None:
         suffix = self._platform_env_suffix(platform)
         os.environ[f"JAVSTORY_TRANSLATION_PROFILE_{suffix}"] = str(
@@ -153,22 +201,11 @@ class SettingsModel(QObject):
         if platform != "llamacpp":
             return
 
-        combined = " ".join(
-            [
-                str(getattr(self, "_translation_profile", "") or ""),
-                str(getattr(self, "_harvest_translation_model", "") or ""),
-                str(getattr(self, "_correction_profile", "") or ""),
-                str(getattr(self, "_llamacpp_model", "") or ""),
-            ]
-        ).lower()
-        base = "gemma-4-e4b" if ("gemma" in combined or "budget" in combined) else "qwen3.5-35b-a3b"
-        if str(getattr(self, "_translation_profile", "") or "").lower() not in ("qwen35", "budget"):
-            self._translation_profile = "budget" if base.startswith("gemma") else "qwen35"
-        if not str(getattr(self, "_harvest_translation_model", "") or "").lower().startswith("llamacpp:"):
-            self._harvest_translation_model = f"llamacpp:{base}"
-        if not str(getattr(self, "_correction_profile", "") or "").lower().startswith("llamacpp:"):
-            self._correction_profile = f"llamacpp:{base}-uncensored"
-        self._llamacpp_model = base
+        self._llamacpp_model = self._llamacpp_base_model_id(
+            str(getattr(self, "_llamacpp_model", "") or "")
+        )
+        self._sync_llamacpp_translation_models_to_active(emit=False)
+        self._apply_llamacpp_model_runtime_defaults(emit=False)
 
     def _start_theme_listener(self):
         """시스템 테마 변화 감지 시작."""
@@ -446,6 +483,9 @@ class SettingsModel(QObject):
             s = "qwen3.5-35b-a3b"
         if s != getattr(self, "_llamacpp_model", ""):
             self._llamacpp_model = s
+            if str(getattr(self, "_llm_platform", "") or "").lower() == "llamacpp":
+                self._sync_llamacpp_translation_models_to_active()
+                self._apply_llamacpp_model_runtime_defaults()
             self.llamacppModelChanged.emit()
 
     @Property(str, notify=llamacppQwenGgufChanged)
@@ -1056,22 +1096,30 @@ class SettingsModel(QObject):
                 self._correction_profile,
             )
             if platform == "llamacpp":
-                from javstory.llm.llamacpp_backend import resolve_active_llamacpp_preset_id
-
                 set_env_runtime_value("JAVSTORY_TRANSLATION_PROFILE", self._translation_profile)
                 set_env_runtime_value(
                     "JAVSTORY_HARVEST_TRANSLATION_MODEL",
                     str(getattr(self, "_harvest_translation_model", "llamacpp:gemma-4-e4b")),
                 )
                 set_env_runtime_value("JAVSTORY_CORRECTION_PASS2_MODEL", self._correction_profile)
-                unified = resolve_active_llamacpp_preset_id(
-                    llamacpp_model=str(getattr(self, "_llamacpp_model", "") or ""),
-                    correction_pass2=self._correction_profile,
-                    harvest_translation=str(getattr(self, "_harvest_translation_model", "") or ""),
-                    translation_profile=self._translation_profile,
+                self._llamacpp_model = self._llamacpp_base_model_id(
+                    str(getattr(self, "_llamacpp_model", "") or "")
                 )
-                set_env_runtime_value("JAVSTORY_LLAMACPP_MODEL", unified)
-                self._llamacpp_model = unified
+                self._sync_llamacpp_translation_models_to_active()
+                self._apply_llamacpp_model_runtime_defaults()
+                set_env_runtime_value("JAVSTORY_TRANSLATION_PROFILE", self._translation_profile)
+                set_env_runtime_value("JAVSTORY_HARVEST_TRANSLATION_MODEL", self._harvest_translation_model)
+                set_env_runtime_value("JAVSTORY_CORRECTION_PASS2_MODEL", self._correction_profile)
+                set_env_runtime_value(f"JAVSTORY_TRANSLATION_PROFILE_{platform_suffix}", self._translation_profile)
+                set_env_runtime_value(
+                    f"JAVSTORY_HARVEST_TRANSLATION_MODEL_{platform_suffix}",
+                    self._harvest_translation_model,
+                )
+                set_env_runtime_value(
+                    f"JAVSTORY_CORRECTION_PASS2_MODEL_{platform_suffix}",
+                    self._correction_profile,
+                )
+                set_env_runtime_value("JAVSTORY_LLAMACPP_MODEL", self._llamacpp_model)
             else:
                 set_env_runtime_value("JAVSTORY_LLAMACPP_MODEL", str(getattr(self, "_llamacpp_model", "qwen3.5-35b-a3b")))
             if getattr(self, "_llamacpp_qwen_gguf", "").strip():
@@ -1141,16 +1189,24 @@ class SettingsModel(QObject):
             self._correction_profile,
         )
         if platform == "llamacpp":
-            from javstory.llm.llamacpp_backend import resolve_active_llamacpp_preset_id
-
-            unified = resolve_active_llamacpp_preset_id(
-                llamacpp_model=str(getattr(self, "_llamacpp_model", "") or ""),
-                correction_pass2=self._correction_profile,
-                harvest_translation=str(getattr(self, "_harvest_translation_model", "") or ""),
-                translation_profile=self._translation_profile,
+            self._llamacpp_model = self._llamacpp_base_model_id(
+                str(getattr(self, "_llamacpp_model", "") or "")
             )
-            set_env_runtime_value("JAVSTORY_LLAMACPP_MODEL", unified)
-            self._llamacpp_model = unified
+            self._sync_llamacpp_translation_models_to_active()
+            self._apply_llamacpp_model_runtime_defaults()
+            set_env_runtime_value("JAVSTORY_TRANSLATION_PROFILE", self._translation_profile)
+            set_env_runtime_value("JAVSTORY_HARVEST_TRANSLATION_MODEL", self._harvest_translation_model)
+            set_env_runtime_value("JAVSTORY_CORRECTION_PASS2_MODEL", self._correction_profile)
+            set_env_runtime_value(f"JAVSTORY_TRANSLATION_PROFILE_{platform_suffix}", self._translation_profile)
+            set_env_runtime_value(
+                f"JAVSTORY_HARVEST_TRANSLATION_MODEL_{platform_suffix}",
+                self._harvest_translation_model,
+            )
+            set_env_runtime_value(
+                f"JAVSTORY_CORRECTION_PASS2_MODEL_{platform_suffix}",
+                self._correction_profile,
+            )
+            set_env_runtime_value("JAVSTORY_LLAMACPP_MODEL", self._llamacpp_model)
         try:
             from javstory.translation.translation_notes import save_global_note
             save_global_note(str(getattr(self, "_translation_note_global", "") or ""))

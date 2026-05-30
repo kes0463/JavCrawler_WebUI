@@ -179,19 +179,44 @@ ApplicationWindow {
     }
 
     // ── 전역 내비게이션 ─────────────────────────────
+    property string pendingLibraryDetailProductCode: ""
+
+    function ensureViewLoaded(idx) {
+        if (idx === 1)
+            harvestLoader.active = true
+        else if (idx === 2)
+            processingLoader.active = true
+        else if (idx === 3)
+            mosaicImportLoader.active = true
+        else if (idx === 4)
+            libraryLoader.active = true
+        else if (idx === 5)
+            insightLoader.active = true
+        else if (idx === 6)
+            personaChatLoader.active = true
+        else if (idx === 7)
+            settingsLoader.active = true
+    }
+
+    function navigateToIndex(idx) {
+        ensureViewLoaded(idx)
+        viewStack.currentIndex = idx
+    }
+
     function navigateToLibraryDetail(productCode) {
-        // 1. 사이드바 인덱스 라이브러리(4)로 변경
+        pendingLibraryDetailProductCode = productCode || ""
         sidebar.currentIndex = 4
-        // 2. 뷰 스택 인덱스 라이브러리(4)로 변경
-        viewStack.currentIndex = 4
-        // 3. 상세 정보 로드
-        LibraryModel.loadDetail(productCode)
+        navigateToIndex(4)
+        if (libraryLoader.item && pendingLibraryDetailProductCode !== "") {
+            LibraryModel.loadDetail(pendingLibraryDetailProductCode)
+            pendingLibraryDetailProductCode = ""
+        }
     }
 
     function navigateToLibrarySearch(query) {
         LibraryModel.searchQuery = query
         sidebar.currentIndex = 4
-        viewStack.currentIndex = 4
+        navigateToIndex(4)
     }
 
     // ── 전역 플레이어 제어 ───────────────────────────
@@ -214,6 +239,7 @@ ApplicationWindow {
         }
         var resumePath = paths[startIdx] || videoPath
         var resumePos = PlayerModel.getLastPosition(sku, resumePath)
+        var playbackPath = PlayerModel.playbackSourceFor(resumePath)
         playerLoader.active = true
         // Loader가 로드되는 시간을 기다렸다가 속성 설정
         Qt.callLater(function() {
@@ -225,7 +251,7 @@ ApplicationWindow {
                 playerLoader.item.title = title
                 playerLoader.item.startRect = startRect
                 playerLoader.item.resumePosition = resumePos
-                playerLoader.item.videoSource = Theme.pathToUrl(resumePath)
+                playerLoader.item.videoSource = Theme.pathToUrl(playbackPath)
                 // 속성 주입 후 포커스 재확보 (mediaPlayer 로드가 포커스를 빼앗을 수 있음)
                 playerLoader.item.forceActiveFocus()
             }
@@ -318,7 +344,7 @@ ApplicationWindow {
             folderAlertCount: folderBindingInboxModel.count
 
             onNavigate: function(idx) {
-                viewStack.currentIndex = idx;
+                window.navigateToIndex(idx)
             }
             onOpenFolderAlerts: folderBindingInboxDrawer.open()
         }
@@ -333,39 +359,57 @@ ApplicationWindow {
             Loader {
                 source: "views/DashboardView.qml"
                 asynchronous: true
+                active: true
             }
             Loader {
+                id: harvestLoader
                 source: "views/HarvestView.qml"
                 asynchronous: true
+                active: false
             }
             Loader {
+                id: processingLoader
                 source: "views/ProcessingView.qml"
                 asynchronous: true
+                active: false
             }
             Loader {
+                id: mosaicImportLoader
                 source: "views/MosaicImportView.qml"
                 asynchronous: true
+                active: false
             }
             Loader {
                 id: libraryLoader
                 source: "views/LibraryView.qml"
                 asynchronous: true
+                active: false
                 onLoaded: {
-                    if (viewStack.currentIndex === 4 && item)
+                    if (pendingLibraryDetailProductCode !== "") {
+                        LibraryModel.loadDetail(pendingLibraryDetailProductCode)
+                        pendingLibraryDetailProductCode = ""
+                    } else if (viewStack.currentIndex === 4 && item) {
                         item.forceLibraryFocus()
+                    }
                 }
             }
             Loader {
+                id: insightLoader
                 source: "views/InsightView.qml"
                 asynchronous: true
+                active: false
             }
             Loader {
+                id: personaChatLoader
                 source: "views/PersonaChatView.qml"
                 asynchronous: true
+                active: false
             }
             Loader {
+                id: settingsLoader
                 source: "views/SettingsView.qml"
                 asynchronous: true
+                active: false
             }
         }
     }
@@ -373,6 +417,7 @@ ApplicationWindow {
     Connections {
         target: viewStack
         function onCurrentIndexChanged() {
+            window.ensureViewLoaded(viewStack.currentIndex)
             if (viewStack.currentIndex === 4 && libraryLoader.item)
                 libraryLoader.item.forceLibraryFocus()
         }

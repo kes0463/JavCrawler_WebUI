@@ -81,6 +81,7 @@ class HarvestModel(QObject):
     finishedCountChanged = Signal()
     logMessage = Signal(str)
     toastMessage = Signal(str, str)  # message, level
+    productHarvested = Signal(str)
     _plan_done = Signal(str, list, list)  # action, entries, warns
     _fav_codes_ready = Signal(list, str)  # product_codes, 배치 요약 제목(Harvest 탭 태스크)
 
@@ -751,6 +752,7 @@ class HarvestModel(QObject):
         self.logMessage.emit(f"[{sku}] {'성공' if success else '실패'}: {message}")
         self.finishedCountChanged.emit()
         if success and sku:
+            self.productHarvested.emit(sku.strip().upper())
             self._maybe_taste_harvest_toast(sku.strip().upper())
 
     def _maybe_taste_harvest_toast(self, product_code: str) -> None:

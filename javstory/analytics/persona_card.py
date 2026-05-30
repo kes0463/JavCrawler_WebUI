@@ -637,8 +637,15 @@ def get_persona_card(
 
     if cache_only and not force_refresh:
         payload = _read_cache()
-        if payload and _cache_valid(payload):
-            return _normalize_cached_payload(payload)
+        if payload:
+            if _cache_valid(payload):
+                return _normalize_cached_payload(payload)
+            # 캐시가 만료됐어도 빈 페르소나보다 낫다 — stale로 반환하고 호출부에서 판단하게 한다.
+            # source="cache_stale" / stale=True 로 마킹해 UI·호출부가 갱신 유도에 사용할 수 있다.
+            normalized = _normalize_cached_payload(payload)
+            normalized["stale"] = True
+            normalized["source"] = "cache_stale"
+            return normalized
         return _empty_persona_payload()
 
     ctx: Dict[str, Any] | None = None

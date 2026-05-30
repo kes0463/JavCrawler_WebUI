@@ -151,11 +151,18 @@ class HybridLibrarySearch:
         if not docs:
             return []
 
-        ranked_lists = [
-            self._search_bm25(q, docs, top_k=self.top_k),
-            self._search_embedding(q, docs, top_k=self.top_k),
-            self._search_metadata(q, docs, top_k=self.top_k),
-        ]
+        rankers = (
+            self._search_bm25,
+            self._search_embedding,
+            self._search_metadata,
+        )
+        ranked_lists = []
+        for idx, ranker in enumerate(rankers):
+            if idx < len(active_weights) and float(active_weights[idx]) <= 0:
+                ranked_lists.append([])
+                continue
+            ranked = ranker(q, docs, top_k=self.top_k)
+            ranked_lists.append(ranked)
         fused = self._fuse_results(ranked_lists, active_weights)
         return [
             {

@@ -445,6 +445,8 @@ def build_server_argv(
         argv.extend(["-ngl", str(cfg.n_gpu_layers)])
     elif cfg.fit_vram:
         argv.extend(["-fit", "on"])
+    if preset.serve_alias:
+        argv.extend(["--alias", preset.serve_alias])
     if preset.moe:
         # MoE (Qwen3.5-A3B 등): preset.moe 기준 — GGUF 파일명 매칭은 사용하지 않음
         n_cpu_moe = llamacpp_n_cpu_moe_for_spawn(preset_moe=True)
@@ -467,6 +469,36 @@ def _server_health_ok(base_url: str, timeout: float = 2.0) -> bool:
                 return True
         except Exception:
             continue
+    return False
+
+
+def _server_model_ids(base_url: str, timeout: float = 2.0) -> List[str]:
+    try:
+        r = httpx.get(f"{base_url.rstrip('/')}/v1/models", timeout=timeout)
+        r.raise_for_status()
+        payload = r.json()
+    except Exception:
+        return []
+    data = payload.get("data") if isinstance(payload, dict) else []
+    ids: List[str] = []
+    for item in data or []:
+        if isinstance(item, dict):
+            value = str(item.get("id") or item.get("model") or "").strip()
+            if value:
+                ids.append(value)
+    return ids
+
+
+def _server_models_match_preset(model_ids: List[str], preset: LlamaCppModelPreset) -> bool:
+    if not model_ids:
+        return True
+    joined = " ".join(model_ids).lower()
+    if (preset.serve_alias or preset.id).lower() in joined or preset.id.lower() in joined:
+        return True
+    if preset.id.startswith("qwen") and "qwen" in joined:
+        return True
+    if preset.id.startswith("gemma") and "gemma" in joined:
+        return True
     return False
 
 
@@ -645,6 +677,12 @@ def ensure_llamacpp_server_ready(
         preset = resolve_llamacpp_preset(
             (model_cfg or {}).get("llamacpp_preset") or (model_cfg or {}).get("model")
         )
+        model_ids = _server_model_ids(base)
+        if not _server_models_match_preset(model_ids, preset):
+            raise RuntimeError(
+                f"실행 중인 llama-server 모델({', '.join(model_ids)})이 선택한 모델({preset.label})과 다릅니다. "
+                "기존 llama-server를 종료하거나 활성 모델을 맞춘 뒤 다시 시도하세요."
+            )
         return preset.serve_alias or preset.id
 
     preset_id = None
@@ -684,6 +722,18 @@ def ensure_llamacpp_server_ready(
 
     if proc_to_stop is not None:
         _terminate_llamacpp_proc(proc_to_stop, logger_func=log)
+
+    if _server_health_ok(base):
+        model_ids = _server_model_ids(base)
+        if not _server_models_match_preset(model_ids, preset):
+            running = ", ".join(model_ids) if model_ids else "unknown"
+            raise RuntimeError(
+                f"{base}에 이미 다른 llama-server 모델이 실행 중입니다: {running}. "
+                f"선택한 모델은 {preset.label}입니다. 기존 llama-server를 종료한 뒤 다시 시작하세요."
+            )
+        touch_llamacpp_activity()
+        log(f"[llama.cpp] 기존 llama-server 재사용 — {base}/v1")
+        return preset.serve_alias or preset.id
 
     argv = build_server_argv(gguf, cfg, preset)
     proc = _spawn_server(argv, logger_func=log)

@@ -10,11 +10,14 @@ from __future__ import annotations
 import asyncio
 import json
 import math
+import os
+import re
 from dataclasses import dataclass
 from typing import Any, Dict, List
 
 from javstory.analytics.persona_card import get_persona_card
 from javstory.analytics.persona_context import build_persona_context
+from javstory.config.app_config import DATA_ROOT
 from javstory.harvest.database import JAVMetadata, get_db_session_ctx
 from javstory.library.embeddings.pipeline import embeddings_ollama_model_from_env
 from javstory.llm.ollama_embeddings import ollama_embed_texts
@@ -27,11 +30,29 @@ from javstory.persona.library_search import (
     row_to_search_result,
     split_query_terms,
 )
-from javstory.persona.persona_memory import PersonaChatMemory
+from javstory.persona.persona_memory import EnhancedPersonaMemory
 from javstory.search.library_search import HybridLibrarySearch
 
 CONTEXT_SIMILARITY_THRESHOLD = 0.6
 CONTEXT_MAX_ITEMS = 8
+_CHAT_SEARCH_FAST_WEIGHTS = (0.45, 0.0, 0.55)
+_CHAT_SEARCH_EMBEDDING_WEIGHTS = (0.3, 0.5, 0.2)
+ENHANCED_PERSONA_MEMORY_PATH = DATA_ROOT / "cache" / "persona_chat_enhanced_memory.json"
+
+
+# 추천/검색 의도를 명시적으로 부정하는 패턴
+# 이 패턴이 포함된 메시지는 "recommendation" 의도로 분류하지 않는다.
+_RECOMMENDATION_NEGATION_HINTS = (
+    "추천하지마",
+    "추천하지 마",
+    "추천 말아",
+    "추천 빼줘",
+    "추천 제외",
+    "찾지마",
+    "찾지 마",
+    "골라주지마",
+    "골라주지 마",
+)
 
 
 def _split_csv(text: str | None) -> List[str]:
@@ -78,9 +99,18 @@ def _context_value_to_text(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, default=str)
 
 
+def _persona_chat_search_weights() -> tuple[float, float, float]:
+    raw = (os.environ.get("JAVSTORY_PERSONA_CHAT_SEARCH_EMBEDDING", "") or "").strip().lower()
+    if raw in {"1", "true", "yes", "on"}:
+        return _CHAT_SEARCH_EMBEDDING_WEIGHTS
+    return _CHAT_SEARCH_FAST_WEIGHTS
+
+
 def _top_strong_reactions(limit: int = 3) -> List[Dict[str, Any]]:
     try:
-        memory = PersonaChatMemory().prompt_context("", max_items=max(3, limit * 2))
+        store = EnhancedPersonaMemory()
+        store.load_from_json(str(ENHANCED_PERSONA_MEMORY_PATH))
+        memory = store.prompt_context("", max_items=max(3, limit * 2))
     except Exception:
         return []
     notes = [item for item in memory.get("strong_reaction_notes") or [] if isinstance(item, dict)]
@@ -106,13 +136,23 @@ def _strong_reaction_seed_codes(strong_reactions: List[Dict[str, Any]], limit: i
     return out
 
 
+def _strip_product_codes(text: str) -> str:
+    cleaned = str(text or "")
+    for code in extract_product_codes(cleaned, limit=20):
+        if not code:
+            continue
+        variants = {code, code.replace("-", ""), code.replace("-", " ")}
+        for variant in variants:
+            cleaned = re.sub(re.escape(variant), " ", cleaned, flags=re.IGNORECASE)
+    return " ".join(cleaned.split())
+
+
 def _strong_reaction_query_hint(strong_reactions: List[Dict[str, Any]]) -> str:
     parts: List[str] = []
     for note in strong_reactions:
-        text = str(note.get("text") or "").strip()
+        text = _strip_product_codes(str(note.get("text") or "").strip())
         triggers = ", ".join(str(v) for v in note.get("triggers") or [] if str(v).strip())
-        codes = ", ".join(str(v) for v in note.get("product_codes") or [] if str(v).strip())
-        chunk = " ".join(v for v in [codes, triggers, text] if v)
+        chunk = " ".join(v for v in [triggers, text] if v)
         if chunk:
             parts.append(chunk)
     return " / ".join(parts[:3])
@@ -136,11 +176,19 @@ def _summarize_sensual_triggers(turn_ons: List[Any], strong_reactions: List[Dict
 
 def _chat_intent(user_message: str, mentioned_codes: List[str]) -> str:
     text = str(user_message or "").lower()
+
+    # 추천/검색 의도의 명시적 부정 여부를 먼저 확인
+    is_negated = any(hint in text for hint in _RECOMMENDATION_NEGATION_HINTS)
+
     if any(hint in text for hint in ("내 취향", "취향 분석", "페르소나", "성향", "무슨 타입")):
         return "self_analysis"
-    if mentioned_codes or any(hint in text for hint in ("이 작품", "품번", "작품 어때", "어때?", "분석해")):
+    # 명시적 부정("추천하지 마" 등)이 있으면 product/recommendation 양쪽 모두 건너뜀.
+    # 예: "이 작품 추천하지 마", "HBAD-509 추천하지 마" → general
+    if not is_negated and (mentioned_codes or any(hint in text for hint in ("이 작품", "품번", "작품 어때", "어때?", "분석해"))):
         return "product"
-    if any(hint in text for hint in ("추천", "비슷", "찾아", "골라", "볼만", "작품")):
+    # "작품" 단독 힌트 제거: "작품 별로야" 같은 부정 평가를 recommendation으로 오분류하는 문제 방지.
+    # "추천", "비슷", "찾아", "골라", "볼만" 이 추천 의도를 충분히 커버한다.
+    if not is_negated and any(hint in text for hint in ("추천", "비슷", "찾아", "골라", "볼만")):
         return "recommendation"
     if "왜" in text:
         return "self_analysis"
@@ -326,6 +374,10 @@ class EroticPersonaEngine:
     """Builds compact, chat-ready persona context from local JAVSTORY data."""
 
     cache_only: bool = True
+    # skip_context: True 이면 context_snapshot() DB 쿼리를 생략한다.
+    # cache_only(Ollama 합성 스킵)와 독립적으로 제어할 수 있도록 분리.
+    # 기본값 False: cache_only=True 여도 DB 쿼리(top_actors·top_genres 등)는 항상 실행.
+    skip_context: bool = False
     max_context_products: int = 8
     search_limit: int = 8
 
@@ -414,7 +466,9 @@ class EroticPersonaEngine:
 
         intent = _chat_intent(user_message, mentioned)
         persona = self.persona_snapshot()
-        context = self.context_snapshot() if not self.cache_only else {}
+        # cache_only(Ollama 합성 스킵)와 context_snapshot()(DB 쿼리)은 독립적으로 제어한다.
+        # skip_context=True 일 때만 생략; cache_only 단독으로는 DB 쿼리를 막지 않는다.
+        context = {} if self.skip_context else self.context_snapshot()
         products = [self.product_snapshot(pc) for pc in mentioned[:3]]
         products = [p for p in products if p]
         strong_reactions = _top_strong_reactions(3)
@@ -432,7 +486,11 @@ class EroticPersonaEngine:
         #     product_codes=mentioned,
         #     fallback_seed_codes=seed_product_codes,
         # )
-        hybrid_results = HybridLibrarySearch(top_k=20).search_with_fusion(hybrid_query)
+        search_weights = _persona_chat_search_weights()
+        hybrid_results = HybridLibrarySearch(
+            top_k=20,
+            weights=search_weights,
+        ).search_with_fusion(hybrid_query)
         library_search = _adapt_hybrid_search_results(
             user_message,
             hybrid_results,

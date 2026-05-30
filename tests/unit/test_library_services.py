@@ -58,6 +58,67 @@ def test_library_sort_filter_rebuild_groups_by_base():
     assert items[0]["part_count"] == 2
 
 
+def test_library_sort_filter_rebuild_sorts_by_preference(monkeypatch):
+    monkeypatch.setattr(
+        "gui.models.library.sort_filter.build_watch_feedback_by_base",
+        lambda: {
+            "USER-001": {"liked": True, "rating": 2},
+            "RATE-001": {"liked": False, "rating": 5},
+        },
+    )
+    monkeypatch.setattr(
+        "gui.models.library.sort_filter.preview_path_for",
+        lambda *_args, **_kwargs: "",
+    )
+    rows = [
+        _Summary(
+            product_code="SITE-001",
+            title_ko="site",
+            release_date="2026-01-01",
+            scene_count=0,
+            pipeline_stage="none",
+            favorite_score=10_000,
+        ),
+        _Summary(
+            product_code="USER-001",
+            title_ko="liked",
+            release_date="2026-01-01",
+            scene_count=0,
+            pipeline_stage="none",
+            favorite_score=0,
+        ),
+        _Summary(
+            product_code="RATE-001",
+            title_ko="rated",
+            release_date="2026-01-01",
+            scene_count=0,
+            pipeline_stage="none",
+            favorite_score=0,
+        ),
+    ]
+
+    items = LibrarySortFilter.rebuild(
+        ListRebuildOptions(all_summaries=rows, sort_mode=15)
+    )
+
+    assert [it["product_code"] for it in items] == ["USER-001", "RATE-001", "SITE-001"]
+    assert items[0]["preference_score"] > items[1]["preference_score"]
+
+
+def test_work_list_model_refresh_appends_when_prefix_matches():
+    from gui.models.library_model import WorkListModel
+
+    model = WorkListModel()
+    model.refresh([{"product_code": "AAA-001", "title_ko": "A"}])
+    model.refresh([
+        {"product_code": "AAA-001", "title_ko": "A"},
+        {"product_code": "BBB-002", "title_ko": "B"},
+    ])
+
+    assert model.rowCount() == 2
+    assert model.productCodeAt(1) == "BBB-002"
+
+
 def test_library_detail_service_build_minimal():
     s = _Summary(
         product_code="TST-1",

@@ -8,6 +8,9 @@ def test_build_chat_context_emphasizes_sensual_priority(monkeypatch):
     captured = {}
 
     class DummyMemory:
+        def load_from_json(self, *_args, **_kwargs):
+            return None
+
         def prompt_context(self, *_args, **_kwargs):
             return {
                 "strong_reaction_notes": [
@@ -18,7 +21,7 @@ def test_build_chat_context_emphasizes_sensual_priority(monkeypatch):
                 ]
             }
 
-    monkeypatch.setattr(engine_mod, "PersonaChatMemory", lambda: DummyMemory())
+    monkeypatch.setattr(engine_mod, "EnhancedPersonaMemory", lambda: DummyMemory())
     monkeypatch.setattr(
         engine_mod.HybridLibrarySearch,
         "search_with_fusion",
@@ -65,10 +68,13 @@ def test_build_chat_context_selects_persona_fields_by_intent(monkeypatch):
     from javstory.persona.erotic_persona_engine import EroticPersonaEngine
 
     class DummyMemory:
+        def load_from_json(self, *_args, **_kwargs):
+            return None
+
         def prompt_context(self, *_args, **_kwargs):
             return {"strong_reaction_notes": []}
 
-    monkeypatch.setattr(engine_mod, "PersonaChatMemory", lambda: DummyMemory())
+    monkeypatch.setattr(engine_mod, "EnhancedPersonaMemory", lambda: DummyMemory())
     monkeypatch.setattr(engine_mod.HybridLibrarySearch, "search_with_fusion", lambda self, query: [])
 
     engine = EroticPersonaEngine()

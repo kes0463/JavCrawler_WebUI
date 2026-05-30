@@ -122,7 +122,8 @@ def _clip(text: str, limit: int, *, preserve_lines: bool = True) -> str:
     raw = str(text or "").replace("\r\n", "\n").replace("\r", "\n")
     if preserve_lines:
         lines = [" ".join(line.split()) for line in raw.split("\n")]
-        cleaned = "\n".join(line for line in lines if line)
+        cleaned = "\n".join(lines).strip()
+        cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
     else:
         cleaned = " ".join(raw.split())
     if len(cleaned) <= limit:
@@ -179,7 +180,11 @@ def _looks_like_reasoning_leak(text: str) -> bool:
 
 @dataclass
 class PersonaChatMemory:
-    """Persist compact Persona Chat memory under ``data/cache``."""
+    """[Deprecated] 단순 플랫 메모리 스토어.
+
+    EnhancedPersonaMemory 로 통합됨. 하위 호환을 위해 유지하며 직접 사용하지 않는다.
+    신규 코드에서는 EnhancedPersonaMemory 를 사용할 것.
+    """
 
     path: Path = field(default_factory=lambda: DATA_ROOT / "cache" / "persona_chat_memory.json")
     max_recent_messages: int = 40
@@ -385,7 +390,7 @@ class PersonaChatMemory:
         self.save(payload)
 
 
-_ENHANCED_SCHEMA_VERSION = 1
+_ENHANCED_SCHEMA_VERSION = 2  # v2: note 필드(product_mentions, strong_reaction_notes 등) 통합
 
 
 def _tokenize_memory_text(text: str) -> List[str]:
@@ -428,23 +433,43 @@ def _episode_text(episode: Mapping[str, Any]) -> str:
 
 @dataclass
 class EnhancedPersonaMemory:
-    """Three-tier Persona Chat memory store.
+    """통합 Persona Chat 메모리 스토어.
 
-    - working_memory: recent conversational turns.
-    - episodic_memory: compressed session summaries.
-    - semantic_memory: preference facts mapped to weights.
+    PersonaChatMemory 의 note 분류·저장 기능을 흡수해 단일 클래스·단일 파일로 관리한다.
+
+    계층 구조:
+    - working_memory  : 최근 대화 턴 (raw turns)
+    - episodic_memory : 세션 압축 요약
+    - semantic_memory : 취향 키워드 → 가중치 매핑
+
+    note 필드 (PersonaChatMemory 에서 흡수):
+    - turn_count, product_mentions
+    - preference_notes, strong_reaction_notes, negative_feedback_notes
+    - correction_notes, style_notes
     """
 
+    # ── 3계층 메모리 ────────────────────────────────────────────────────────
     working_memory: List[Dict[str, Any]] = field(default_factory=list)
     episodic_memory: List[Dict[str, Any]] = field(default_factory=list)
     semantic_memory: Dict[str, float] = field(default_factory=dict)
     max_working_turns: int = 12
     similarity_threshold: float = 0.7
 
+    # ── note 필드 (PersonaChatMemory 통합) ──────────────────────────────────
+    turn_count: int = 0
+    product_mentions: Dict[str, Any] = field(default_factory=dict)
+    preference_notes: List[Dict[str, Any]] = field(default_factory=list)
+    strong_reaction_notes: List[Dict[str, Any]] = field(default_factory=list)
+    negative_feedback_notes: List[Dict[str, Any]] = field(default_factory=list)
+    correction_notes: List[Dict[str, Any]] = field(default_factory=list)
+    style_notes: List[Dict[str, Any]] = field(default_factory=list)
+    max_notes: int = 24
+    max_products: int = 80
+
     def add_turn(self, user_msg: str, assistant_msg: str) -> None:
         """Add a recent turn and keep only the latest 8-12 turns."""
         user_text = _clip_inline(user_msg, 1600)
-        assistant_text = _clip_inline(assistant_msg, 2400)
+        assistant_text = _clip(assistant_msg, 2400)
         if not user_text and not assistant_text:
             return
         self.working_memory.append(
@@ -456,6 +481,149 @@ class EnhancedPersonaMemory:
         )
         del self.working_memory[:-max(8, min(12, int(self.max_working_turns or 12)))]
         self._update_semantic_memory(user_text)
+
+    def record_turn(self, user_message: str, assistant_message: str) -> None:
+        """대화 턴을 기록한다.
+
+        working_memory 추가(add_turn) + note 분류(preference/reaction/negative/correction/style)
+        를 단일 호출로 처리한다. PersonaChatMemory.record_turn()을 대체한다.
+        파일 저장은 포함하지 않음 — 호출부에서 save_to_json()을 별도 호출할 것.
+        """
+        if not _memory_enabled():
+            return
+        user_text = _clip(user_message, 1200)
+        assistant_text = _clip(assistant_message, 8000)
+        if not user_text or not assistant_text or _looks_like_reasoning_leak(assistant_text):
+            return
+
+        # ① working memory 추가
+        self.add_turn(user_text, assistant_text)
+
+        # ② turn_count 증가
+        self.turn_count += 1
+        now = _now_iso()
+
+        # ③ product_mentions 업데이트
+        user_codes = [normalize_product_code(c) for c in extract_product_codes(user_text)]
+        assistant_codes = [normalize_product_code(c) for c in extract_product_codes(assistant_text)]
+        for code in [c for c in user_codes + assistant_codes if c]:
+            item = dict(self.product_mentions.get(code) or {})
+            item["count"] = int(item.get("count") or 0) + 1
+            item["last_seen_at"] = now
+            if code in user_codes:
+                item["last_user_message"] = _clip_inline(user_text, 240)
+            item["last_assistant_reply"] = _clip_inline(assistant_text, 240)
+            self.product_mentions[code] = item
+        if len(self.product_mentions) > self.max_products:
+            ordered = sorted(
+                self.product_mentions.items(),
+                key=lambda pair: (int((pair[1] or {}).get("count") or 0), str((pair[1] or {}).get("last_seen_at") or "")),
+                reverse=True,
+            )
+            self.product_mentions = dict(ordered[: self.max_products])
+
+        # ④ note 분류
+        reaction_hits = _matched_hints(user_text, _STRONG_REACTION_HINTS)
+        negative_hits = _matched_hints(user_text, _NEGATIVE_FEEDBACK_HINTS)
+        strong_reaction_codes = list(dict.fromkeys([c for c in user_codes + assistant_codes if c]))
+
+        if user_codes or reaction_hits or _has_any(user_text, _PREFERENCE_HINTS):
+            _append_unique(
+                self.preference_notes,
+                {"text": f"사용자 취향 단서: {_clip_inline(user_text, 220)}", "created_at": now},
+                max_items=self.max_notes,
+            )
+        if reaction_hits:
+            _append_unique(
+                self.strong_reaction_notes,
+                {
+                    "text": f"사용자 강렬 반응: {_clip_inline(user_text, 220)}",
+                    "triggers": reaction_hits[:5],
+                    "product_codes": strong_reaction_codes[:5],
+                    "intensity": min(10, 5 + len(reaction_hits) + (2 if strong_reaction_codes else 0)),
+                    "created_at": now,
+                },
+                max_items=self.max_notes,
+            )
+        if negative_hits:
+            _append_unique(
+                self.negative_feedback_notes,
+                {
+                    "text": f"사용자 부정 피드백: {_clip_inline(user_text, 220)}",
+                    "triggers": negative_hits[:5],
+                    "product_codes": user_codes[:5],
+                    "created_at": now,
+                },
+                max_items=self.max_notes,
+            )
+        if _has_any(user_text, _CORRECTION_HINTS):
+            _append_unique(
+                self.correction_notes,
+                {"text": f"사용자 교정/불만: {_clip_inline(user_text, 220)}", "created_at": now},
+                max_items=self.max_notes,
+            )
+        if _has_any(user_text, _STYLE_HINTS):
+            _append_unique(
+                self.style_notes,
+                {"text": f"선호 답변 방식: {_clip_inline(user_text, 180)}", "created_at": now},
+                max_items=self.max_notes,
+            )
+
+    def load_recent_messages(self) -> List[Dict[str, str]]:
+        """working_memory를 recent_messages 형식으로 반환.
+
+        PersonaChatMemory.load_recent_messages()와 동등한 인터페이스.
+        """
+        out: List[Dict[str, str]] = []
+        for item in self._working_memory_as_recent_messages():
+            role = str(item.get("role") or "").strip()
+            content = str(item.get("content") or "").strip()
+            status = str(item.get("status") or "ok").strip() or "ok"
+            if role == "assistant" and _looks_like_reasoning_leak(content):
+                continue
+            if role in {"user", "assistant"} and content:
+                out.append({"role": role, "content": content, "status": status})
+        return out
+
+    def prompt_context(self, query: str, *, max_items: int = 10) -> Dict[str, Any]:
+        """PersonaChatMemory.prompt_context()와 동등한 인터페이스.
+
+        note 필드 + episodic 관련 컨텍스트를 합산해 반환한다.
+        """
+        query_codes = [normalize_product_code(c) for c in extract_product_codes(query or "")]
+        related_products: List[Dict[str, Any]] = []
+        for code in query_codes:
+            item = self.product_mentions.get(code)
+            if isinstance(item, dict):
+                related_products.append({"product_code": code, **item})
+
+        remaining = [
+            {"product_code": code, **item}
+            for code, item in self.product_mentions.items()
+            if code not in query_codes and isinstance(item, dict)
+        ]
+        remaining.sort(
+            key=lambda item: (int(item.get("count") or 0), str(item.get("last_seen_at") or "")),
+            reverse=True,
+        )
+
+        strong_reactions = list(self.strong_reaction_notes)
+        if query_codes:
+            query_code_set = set(query_codes)
+            related_reactions = [r for r in strong_reactions if query_code_set.intersection(set(r.get("product_codes") or []))]
+            other_reactions = [r for r in strong_reactions if r not in related_reactions]
+            strong_reactions = related_reactions + other_reactions
+        strong_reactions = strong_reactions[:max_items] if query_codes else strong_reactions[-max_items:]
+
+        return {
+            "turn_count": self.turn_count,
+            "related_products": (related_products + remaining)[:max_items],
+            "preference_notes": self.preference_notes[-max_items:],
+            "strong_reaction_notes": strong_reactions,
+            "negative_feedback_notes": self.negative_feedback_notes[-max_items:],
+            "correction_notes": self.correction_notes[-max_items:],
+            "style_notes": self.style_notes[-max_items:],
+        }
 
     def compress_session_to_episode(self, session_turns: list) -> dict:
         """Summarize turns into an episodic memory entry and store it."""
@@ -507,29 +675,47 @@ class EnhancedPersonaMemory:
             )
         return "\n".join(lines)
 
+    def clear_all(self) -> None:
+        """모든 메모리 필드를 초기화한다. (파일 저장은 포함하지 않음)"""
+        self.working_memory = []
+        self.episodic_memory = []
+        self.semantic_memory = {}
+        self.turn_count = 0
+        self.product_mentions = {}
+        self.preference_notes = []
+        self.strong_reaction_notes = []
+        self.negative_feedback_notes = []
+        self.correction_notes = []
+        self.style_notes = []
+
     def save_to_json(self, path: str) -> None:
-        """Save enhanced memory while keeping legacy JSON keys readable."""
+        """통합 메모리를 단일 파일로 저장한다."""
         target = Path(path)
         target.parent.mkdir(parents=True, exist_ok=True)
         payload = {
             "schema_version": _ENHANCED_SCHEMA_VERSION,
             "updated_at": _now_iso(),
+            # ── 3계층 메모리 ──
             "working_memory": self.working_memory,
             "episodic_memory": self.episodic_memory,
             "semantic_memory": self.semantic_memory,
-            # Legacy-compatible keys for older PersonaChatMemory consumers.
+            # ── note 필드 ──
+            "turn_count": self.turn_count,
+            "product_mentions": self.product_mentions,
+            "preference_notes": self.preference_notes,
+            "strong_reaction_notes": self.strong_reaction_notes,
+            "negative_feedback_notes": self.negative_feedback_notes,
+            "correction_notes": self.correction_notes,
+            "style_notes": self.style_notes,
+            # ── 레거시 호환 ──
             "recent_messages": self._working_memory_as_recent_messages(),
-            "preference_notes": [
-                {"text": key, "weight": weight}
-                for key, weight in sorted(self.semantic_memory.items(), key=lambda item: item[1], reverse=True)
-            ],
         }
         tmp = target.with_suffix(target.suffix + ".tmp")
         tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
         tmp.replace(target)
 
     def load_from_json(self, path: str) -> None:
-        """Load enhanced memory, accepting the existing PersonaChatMemory JSON shape."""
+        """통합 메모리 파일 로드. 구버전 PersonaChatMemory JSON 포맷도 수용한다."""
         source = Path(path)
         if not source.exists():
             return
@@ -540,6 +726,7 @@ class EnhancedPersonaMemory:
         if not isinstance(payload, dict):
             return
 
+        # ── working_memory ──
         if isinstance(payload.get("working_memory"), list):
             self.working_memory = [
                 dict(item)
@@ -549,26 +736,44 @@ class EnhancedPersonaMemory:
         else:
             self.working_memory = self._recent_messages_to_working_memory(payload.get("recent_messages") or [])
 
+        # ── episodic_memory ──
         self.episodic_memory = [
             dict(item)
             for item in payload.get("episodic_memory") or []
             if isinstance(item, Mapping)
         ]
 
+        # ── semantic_memory ──
         semantic = payload.get("semantic_memory")
         if isinstance(semantic, Mapping):
-            self.semantic_memory = {
-                str(k): float(v)
-                for k, v in semantic.items()
-                if str(k).strip()
-            }
+            # v2 통합 포맷: semantic_memory 직접 저장
+            self.semantic_memory = {str(k): float(v) for k, v in semantic.items() if str(k).strip()}
+            # preference_notes 는 PersonaChatMemory 스타일 note 리스트 (weight 키 없음)
+            self.preference_notes = [
+                dict(item)
+                for item in payload.get("preference_notes") or []
+                if isinstance(item, Mapping)
+            ][-self.max_notes :]
         else:
+            # 구버전 EnhancedPersonaMemory: preference_notes{text,weight} → semantic_memory 로 복원
             self.semantic_memory = {}
             for note in payload.get("preference_notes") or []:
                 if isinstance(note, Mapping):
                     text = str(note.get("text") or "").strip()
                     if text:
                         self.semantic_memory[text] = float(note.get("weight") or 1.0)
+            self.preference_notes = []
+
+        # ── note 필드 (v2 포맷) ──
+        self.turn_count = int(payload.get("turn_count") or 0)
+        product_mentions = payload.get("product_mentions")
+        self.product_mentions = dict(product_mentions) if isinstance(product_mentions, Mapping) else {}
+        for attr in ("strong_reaction_notes", "negative_feedback_notes", "correction_notes", "style_notes"):
+            setattr(
+                self,
+                attr,
+                [dict(item) for item in payload.get(attr) or [] if isinstance(item, Mapping)][-self.max_notes :],
+            )
 
     def _summarize_session_with_llm(self, turns: List[Mapping[str, Any]]) -> Dict[str, Any]:
         if not turns:

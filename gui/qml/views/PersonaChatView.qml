@@ -58,6 +58,7 @@ Item {
                 InsightModel.sendPersonaChatMessage(message, true)
             }
             onClearRequested: InsightModel.clearPersonaChat()
+            onCancelRequested: InsightModel.cancelPersonaChat()
         }
     }
 }

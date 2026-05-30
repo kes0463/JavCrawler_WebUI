@@ -13,6 +13,7 @@ from gui.models.library.search import (
     preview_path_for,
     release_month_key,
 )
+from gui.library_data import preference_score
 
 
 @dataclass
@@ -189,6 +190,11 @@ class LibrarySortFilter:
                     ),
                 }
             )
+            merged_items[-1]["preference_score"] = preference_score(
+                merged_items[-1].get("favorite_score"),
+                liked=bool(merged_items[-1].get("user_liked")),
+                rating=int(merged_items[-1].get("user_rating") or 0),
+            )
 
         if fm == 5:
             merged_items = [
@@ -273,6 +279,15 @@ class LibrarySortFilter:
                 key=lambda it: (
                     bool(it.get("watch_later")),
                     str(it.get("watch_later_added_iso") or ""),
+                    it.get("product_code", ""),
+                ),
+                reverse=True,
+            )
+        elif mode == 15:
+            merged_items.sort(
+                key=lambda it: (
+                    float(it.get("preference_score") or 0.0),
+                    str(it.get("updated_at_iso") or ""),
                     it.get("product_code", ""),
                 ),
                 reverse=True,

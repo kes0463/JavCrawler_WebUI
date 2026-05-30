@@ -193,6 +193,19 @@ Item {
         osdAnim.restart()
     }
 
+    function _tryResumeSeek(trigger) {
+        if (!mediaPlayer.seekable || playerRoot.resumePosition <= 5000 || playerRoot._seekDone)
+            return
+        var status = mediaPlayer.mediaStatus
+        var ready = status === MediaPlayer.LoadedMedia
+            || status === MediaPlayer.BufferedMedia
+            || status === MediaPlayer.BufferingMedia
+        if (!ready || mediaPlayer.duration <= 0)
+            return
+        playerRoot._seekDone = true
+        mediaPlayer.setPosition(playerRoot.resumePosition)
+    }
+
     // ── 자막 헬퍼 ────────────────────────────────────────────
     function loadSubtitle(idx) {
         playerRoot.activeSubtitleIdx = idx
@@ -266,6 +279,7 @@ Item {
                         || mediaPlayer.mediaStatus === MediaPlayer.BufferedMedia)) {
                 mediaPlayer.play()
             }
+            playerRoot._tryResumeSeek("mediaStatusChanged")
             if (mediaPlayer.mediaStatus === MediaPlayer.EndOfMedia) {
                 // 마지막 프레임에서 멈춤 — 컨트롤 표시 유지
                 playerRoot.showControls = true
@@ -285,7 +299,7 @@ Item {
                     playerRoot._seekDone = false
                     playerRoot._prevPosition = 0
                     playerRoot._autoPlayPending = true
-                    playerRoot.videoSource = Theme.pathToUrl(nextPath)
+                    playerRoot.videoSource = Theme.pathToUrl(PlayerModel.playbackSourceFor(nextPath))
                     showOsd("▶ 다음 파트 (" + (playerRoot.playlistIndex + 1) + "/"
                         + playerRoot.videoPlaylist.length + ")")
                 }
@@ -300,10 +314,7 @@ Item {
 
         // seekable 상태가 되면 이어보기 seek 실행 (1회)
         onSeekableChanged: {
-            if (mediaPlayer.seekable && playerRoot.resumePosition > 5000 && !playerRoot._seekDone) {
-                playerRoot._seekDone = true
-                mediaPlayer.setPosition(playerRoot.resumePosition)
-            }
+            playerRoot._tryResumeSeek("seekableChanged")
         }
 
         onPositionChanged: {
@@ -318,6 +329,7 @@ Item {
             }
             playerRoot._prevPosition = pos
         }
+
     }
 
     // 소스가 늦게 주입되는 구조(Loader + Qt.callLater)라서,
@@ -1354,7 +1366,7 @@ Item {
     function reloadSubtitleTracks() {
         playerRoot.loadSubtitle(-1)
         playerRoot.subtitleTracks = []
-        var vidStr = playerRoot.videoLocalPathFromSource()
+        var vidStr = playerRoot.currentVideoFilePath || playerRoot.videoLocalPathFromSource()
         if (!vidStr)
             return
         var tracksJson = PlayerModel.findSubtitleFiles(vidStr)
@@ -1403,5 +1415,17 @@ Item {
         target: PlayerModel
         function onRatingChanged(r) { ratingWidget.rating = r }
         function onLikeStateChanged(liked, disliked) {}
+        function onPlaybackProxyReady(originalPath, proxyPath) {
+            if (!originalPath || originalPath !== playerRoot.currentVideoFilePath)
+                return
+            var pos = mediaPlayer.position
+            if (pos > 0)
+                playerRoot.resumePosition = pos
+            playerRoot._seekDone = false
+            playerRoot._prevPosition = 0
+            playerRoot._autoPlayPending = true
+            playerRoot.videoSource = Theme.pathToUrl(proxyPath)
+            showOsd("재생용 MP4 프록시로 전환")
+        }
     }
 }

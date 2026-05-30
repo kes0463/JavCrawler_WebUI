@@ -8,6 +8,7 @@ Button {
 
     property bool primary: true
     property bool neonGlow: false
+    property bool danger: false   // true 이면 error(red) 계열 색상으로 표시
     property string iconSource: ""
     // 대시보드 헤더처럼 폭을 고정해야 하는 경우 사용
     property bool fixedWidthMode: false
@@ -24,20 +25,21 @@ Button {
     scale: root.pressed ? 0.96 : 1.0
     Behavior on scale { NumberAnimation { duration: 80; easing.type: Easing.OutCubic } }
 
-    // primary 버튼 네온 글로우
+    // primary/danger 버튼 글로우
+    readonly property color _activeColor: root.danger ? Theme.error : Theme.accentNeon
     property real _glowR: root.hovered ? 14 : 7
-    property real _glowA: root.primary && root.enabled ? (root.hovered ? 0.32 : 0.16) : 0
+    property real _glowA: (root.primary || root.danger) && root.enabled ? (root.hovered ? 0.32 : 0.16) : 0
     Behavior on _glowR { NumberAnimation { duration: Theme.animFast } }
     Behavior on _glowA { NumberAnimation { duration: Theme.animFast } }
 
-    layer.enabled: root.primary && root.enabled
+    layer.enabled: (root.primary || root.danger) && root.enabled
     layer.effect: DropShadow {
         transparentBorder: true
         horizontalOffset: 0
         verticalOffset: root.pressed ? 1 : (root.hovered ? 4 : 2)
         radius: root._glowR
         samples: 17
-        color: Qt.rgba(Theme.accentNeon.r, Theme.accentNeon.g, Theme.accentNeon.b, root._glowA)
+        color: Qt.rgba(root._activeColor.r, root._activeColor.g, root._activeColor.b, root._glowA)
     }
 
     implicitWidth: (root.fixedWidthMode && root.fixedWidth > 0)
@@ -59,7 +61,7 @@ Button {
                 id: iconText
                 text: root.iconSource
                 font.pixelSize: Theme.fontBody + 2
-                color: root.primary ? (Theme.isDark ? "#0A0E1A" : "#FFFFFF") : Theme.textPrimary
+                color: (root.primary || root.danger) ? (Theme.isDark ? "#0A0E1A" : "#FFFFFF") : Theme.textPrimary
                 visible: root.iconSource !== ""
                 anchors.verticalCenter: parent.verticalCenter
                 verticalAlignment: Text.AlignVCenter
@@ -71,7 +73,7 @@ Button {
                 id: labelText
                 text: root.text
                 font: root.font
-                color: root.primary ? (Theme.isDark ? "#0A0E1A" : "#FFFFFF") : Theme.textPrimary
+                color: (root.primary || root.danger) ? (Theme.isDark ? "#0A0E1A" : "#FFFFFF") : Theme.textPrimary
                 anchors.verticalCenter: parent.verticalCenter
                 verticalAlignment: Text.AlignVCenter
                 lineHeightMode: Text.ProportionalHeight
@@ -97,6 +99,11 @@ Button {
         color: {
             if (!root.enabled)
                 return Theme.surfaceLight;
+            if (root.danger) {
+                if (root.pressed) return Qt.darker(root._activeColor, 1.3);
+                if (root.hovered) return Qt.lighter(root._activeColor, 1.15);
+                return root._activeColor;
+            }
             if (root.pressed)
                 return root.primary ? Qt.darker(Theme.accentNeon, 1.3) : Theme.surfaceLight;
             if (root.hovered)
@@ -108,7 +115,9 @@ Button {
         border.color: {
             if (root.neonGlow && root.hovered) return Theme.accentNeon;
             if (root.activeFocus && root.enabled)
-                return root.primary ? Qt.lighter(Theme.accentNeon, 1.35) : Theme.accentNeon;
+                return root.danger ? Qt.lighter(root._activeColor, 1.35)
+                     : root.primary ? Qt.lighter(Theme.accentNeon, 1.35) : Theme.accentNeon;
+            if (root.danger) return "transparent";
             if (!root.primary) return Theme.glassBorderHover;
             return "transparent";
         }

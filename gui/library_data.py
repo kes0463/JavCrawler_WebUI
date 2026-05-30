@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 from dataclasses import dataclass
 from datetime import datetime
@@ -86,6 +87,34 @@ def _read_json(path: Path) -> dict[str, Any]:
 # - key: product_code(upper)
 # - value: (mtime_ns, size, (has, scene_count, still_total, preview))
 _CANON_QUICK_CACHE: dict[str, tuple[int, int, tuple[bool, int, int, str]]] = {}
+
+
+def preference_score(
+    favorite_score: int | float | None,
+    *,
+    liked: bool = False,
+    rating: int | float | None = 0,
+) -> float:
+    """사이트 좋아요, 사용자 하트, 별점을 합친 라이브러리 선표시 점수."""
+    try:
+        fav = max(0.0, float(favorite_score or 0))
+    except Exception:
+        fav = 0.0
+    try:
+        rate = max(0.0, min(5.0, float(rating or 0)))
+    except Exception:
+        rate = 0.0
+    return (math.log1p(fav) * 120.0) + (1800.0 if liked else 0.0) + (rate * 350.0)
+
+
+def _base_product_code(product_code: str) -> str:
+    try:
+        from javstory.utils.product_code import strip_split_suffixes
+
+        pc = (product_code or "").strip().upper()
+        return strip_split_suffixes(pc) or pc
+    except Exception:
+        return (product_code or "").strip().upper()
 
 
 def canonical_quick_stats(product_code: str, *, fast: bool = False) -> tuple[bool, int, int, str]:
@@ -479,6 +508,89 @@ def load_library_summaries_fast_paged(
     else:
         rows = q.limit(int(max(1, limit))).all()
     return [row_to_summary_fast(r) for r in rows]
+
+
+def load_library_summaries_fast_priority_paged(
+    session,
+    *,
+    limit: int = 400,
+    offset: int = 0,
+    exclude_product_codes: set[str] | list[str] | tuple[str, ...] | None = None,
+) -> list[LibraryWorkSummary]:
+    """선호도 점수순으로 가벼운 우선순위 페이지를 만든 뒤 해당 행만 요약화한다."""
+    from javstory.harvest.database import JAVMetadata, WatchHistory
+
+    excl_raw = {
+        str(pc or "").strip().upper()
+        for pc in (exclude_product_codes or [])
+        if str(pc or "").strip()
+    }
+    excl_base = {_base_product_code(pc) for pc in excl_raw}
+
+    watch_by_base: dict[str, dict[str, Any]] = {}
+    try:
+        watch_rows = session.query(
+            WatchHistory.product_code,
+            WatchHistory.liked,
+            WatchHistory.rating,
+            WatchHistory.updated_at,
+        ).all()
+        for pc, liked, rating, updated_at in watch_rows:
+            base = _base_product_code(str(pc or ""))
+            if not base:
+                continue
+            rec = watch_by_base.get(base)
+            rating_i = int(rating or 0)
+            liked_b = bool(liked)
+            if not rec:
+                watch_by_base[base] = {
+                    "liked": liked_b,
+                    "rating": rating_i,
+                    "updated_at": updated_at,
+                }
+                continue
+            rec["liked"] = bool(rec.get("liked")) or liked_b
+            rec["rating"] = max(int(rec.get("rating") or 0), rating_i)
+            if updated_at and (not rec.get("updated_at") or updated_at > rec.get("updated_at")):
+                rec["updated_at"] = updated_at
+    except Exception:
+        watch_by_base = {}
+
+    meta_rows = session.query(
+        JAVMetadata.product_code,
+        JAVMetadata.favorite_score,
+        JAVMetadata.updated_at,
+    ).all()
+
+    ranked: list[tuple[float, Any, str]] = []
+    for pc_raw, fav, updated_at in meta_rows:
+        pc = str(pc_raw or "").strip().upper()
+        if not pc:
+            continue
+        base = _base_product_code(pc)
+        if pc in excl_raw or base in excl_base:
+            continue
+        wm = watch_by_base.get(base) or {}
+        score = preference_score(
+            fav,
+            liked=bool(wm.get("liked")),
+            rating=int(wm.get("rating") or 0),
+        )
+        ranked.append((score, updated_at, pc))
+
+    ranked.sort(key=lambda it: (it[0], it[1] or datetime.min, it[2]), reverse=True)
+    start = int(max(0, offset))
+    end = start + int(max(1, limit))
+    page_codes = [pc for _, _, pc in ranked[start:end]]
+    if not page_codes:
+        return []
+
+    rows = session.query(JAVMetadata).filter(JAVMetadata.product_code.in_(page_codes)).all()
+    by_code = {
+        str(getattr(row, "product_code", "") or "").strip().upper(): row
+        for row in rows
+    }
+    return [row_to_summary_fast(by_code[pc]) for pc in page_codes if pc in by_code]
 
 
 SortKey = Literal["updated", "product_code", "release_date", "scene_count"]

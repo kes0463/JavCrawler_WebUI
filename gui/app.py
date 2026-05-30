@@ -421,6 +421,11 @@ def create_engine(app) -> QQmlApplicationEngine:
     except Exception:
         pass
 
+    try:
+        harvest.productHarvested.connect(library.refreshAddedProduct)
+    except Exception:
+        pass
+
     from gui.folder_watch_service import FolderMoveWatchService
 
     folder_watch = FolderMoveWatchService(library, parent=app)
@@ -525,7 +530,7 @@ def create_engine(app) -> QQmlApplicationEngine:
             from javstory.analytics.batch_worker import run_batch_in_thread
             run_batch_in_thread(done_callback=lambda r: print(
                 f"[Analytics] 배치 동기화 완료: {r.get('synced', 0)}건"
-            ))
+            ) if not r.get("skipped") else None)
         except Exception as e:
             print(f"[Analytics] 배치 실패: {e}")
 

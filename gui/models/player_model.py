@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import datetime
+import hashlib
 import json
 import os
 import re
+import subprocess
+import threading
 from pathlib import Path
 
 from PySide6.QtCore import QObject, Property, Signal, Slot
@@ -26,6 +29,7 @@ class PlayerModel(QObject):
     ratingChanged = Signal(int)         # 별점 변경 알림 (QML 초기값 표시용)
     likeStateChanged = Signal(bool, bool)  # (liked, disliked) 변경 알림
     closePlayerRequested = Signal()     # Python 이벤트 필터 → QML 플레이어 닫기
+    playbackProxyReady = Signal(str, str)  # original_path, proxy_path
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -35,6 +39,93 @@ class PlayerModel(QObject):
         self._is_liked = False
         self._is_disliked = False
         self._player_open = False
+        self._proxy_jobs: set[str] = set()
+
+    def _playback_proxy_path(self, video_path: Path) -> Path:
+        try:
+            stat = video_path.stat()
+            key = f"{video_path.resolve()}|{stat.st_size}|{int(stat.st_mtime)}"
+        except OSError:
+            key = str(video_path)
+        digest = hashlib.sha256(key.encode("utf-8", errors="ignore")).hexdigest()[:24]
+        return Path(__file__).resolve().parents[2] / "data" / "cache" / "playback_proxy" / f"{digest}.mp4"
+
+    @Slot(str, result=str)
+    def playbackSourceFor(self, video_path: str) -> str:
+        """Return a stable playback source; generate AVI/H264 repair proxy in background."""
+        raw = str(video_path or "").strip()
+        if not raw:
+            return raw
+        path = Path(raw)
+        if path.suffix.lower() != ".avi" or not path.is_file():
+            return raw
+        proxy = self._playback_proxy_path(path)
+        if proxy.is_file():
+            return str(proxy)
+        self._start_playback_proxy_job(path, proxy)
+        return raw
+
+    def _start_playback_proxy_job(self, source: Path, proxy: Path) -> None:
+        key = str(source.resolve())
+        if key in self._proxy_jobs:
+            return
+        self._proxy_jobs.add(key)
+
+        def _worker() -> None:
+            tmp = proxy.with_name(f"{proxy.stem}.tmp{proxy.suffix}")
+            try:
+                from javstory.utils.ffmpeg_path import get_ffmpeg
+
+                proxy.parent.mkdir(parents=True, exist_ok=True)
+                cmd = [
+                    get_ffmpeg(),
+                    "-hide_banner",
+                    "-y",
+                    "-i",
+                    str(source),
+                    "-map",
+                    "0:v:0",
+                    "-map",
+                    "0:a:0?",
+                    "-c:v",
+                    "libx264",
+                    "-preset",
+                    "ultrafast",
+                    "-crf",
+                    "20",
+                    "-pix_fmt",
+                    "yuv420p",
+                    "-c:a",
+                    "copy",
+                    "-movflags",
+                    "+faststart",
+                    str(tmp),
+                ]
+                proc = subprocess.run(
+                    cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    errors="replace",
+                    check=False,
+                )
+                if proc.returncode == 0 and tmp.is_file() and tmp.stat().st_size > 0:
+                    tmp.replace(proxy)
+                    self.playbackProxyReady.emit(str(source), str(proxy))
+                else:
+                    try:
+                        tmp.unlink(missing_ok=True)
+                    except OSError:
+                        pass
+            except Exception:
+                try:
+                    tmp.unlink(missing_ok=True)
+                except OSError:
+                    pass
+            finally:
+                self._proxy_jobs.discard(key)
+
+        threading.Thread(target=_worker, daemon=True, name="playback-proxy").start()
 
     @Slot(bool)
     def setPlayerOpen(self, is_open: bool):

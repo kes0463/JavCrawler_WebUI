@@ -182,6 +182,29 @@ def test_stop_llamacpp_server_terminates_registered_loading_process(monkeypatch)
     assert backend._active_requests == 0
 
 
+def test_ensure_llamacpp_reuses_existing_healthy_server(monkeypatch, tmp_path):
+    from javstory.llm import llamacpp_backend as backend
+
+    gguf = tmp_path / "gemma.gguf"
+    gguf.write_bytes(b"x")
+    monkeypatch.setenv("JAVSTORY_LLAMACPP_MODEL", "gemma-4-e4b")
+    monkeypatch.setenv("JAVSTORY_LLAMACPP_GEMMA4_GGUF", str(gguf))
+    monkeypatch.setenv("JAVSTORY_LLAMACPP_AUTO_START", "1")
+    monkeypatch.setattr(backend, "_server_proc", None)
+    monkeypatch.setattr(backend, "_active_preset_id", None)
+    monkeypatch.setattr(backend, "_server_health_ok", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(backend, "_server_model_ids", lambda *_args, **_kwargs: ["gemma-4-e4b"])
+    monkeypatch.setattr(
+        backend,
+        "_spawn_server",
+        lambda *_args, **_kwargs: pytest.fail("healthy existing server should be reused"),
+    )
+
+    alias = backend.ensure_llamacpp_server_ready({"model": "gemma-4-e4b"}, logger_func=lambda _msg: None)
+
+    assert alias == "gemma-4-e4b"
+
+
 def test_resolve_active_llamacpp_preset_unifies_correction_over_model(monkeypatch):
     monkeypatch.setenv(
         "JAVSTORY_CORRECTION_PASS2_MODEL",
@@ -235,8 +258,49 @@ def test_build_server_argv_moe_has_n_cpu_moe(monkeypatch, tmp_path):
     argv = build_server_argv(gguf, cfg, preset)
     assert "--n-cpu-moe" in argv
     assert argv[argv.index("--n-cpu-moe") + 1] == str(LLAMACPP_DEFAULT_N_CPU_MOE)
+    assert "--alias" in argv
+    assert argv[argv.index("--alias") + 1] == "qwen3.5-35b-a3b-uncensored"
     assert "--ctx-size" not in argv
     assert argv[argv.index("-c") + 1] == "4096"
+
+
+def test_ensure_llamacpp_server_rejects_mismatched_external_model(monkeypatch, tmp_path):
+    import javstory.llm.llamacpp_backend as backend
+
+    gguf = tmp_path / "Qwen3.5-35B-A3B.gguf"
+    gguf.write_bytes(b"x")
+    bin_p = tmp_path / "llama-server.exe"
+    bin_p.touch()
+    monkeypatch.setenv("JAVSTORY_LLAMACPP_BIN", str(bin_p))
+    monkeypatch.setenv("JAVSTORY_LLAMACPP_QWEN35_GGUF", str(gguf))
+    monkeypatch.setenv("JAVSTORY_LLAMACPP_MODEL", "qwen3.5-35b-a3b")
+    monkeypatch.setenv("JAVSTORY_LLAMACPP_AUTO_START", "1")
+    backend._server_proc = None
+    backend._active_preset_id = None
+
+    class Resp:
+        status_code = 200
+
+        def __init__(self, payload=None):
+            self._payload = payload or {}
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return self._payload
+
+    def fake_get(url, timeout=2.0):
+        if str(url).endswith("/v1/models"):
+            return Resp({"data": [{"id": "gemma-4-e4b"}]})
+        return Resp()
+
+    monkeypatch.setattr(backend.httpx, "get", fake_get)
+
+    import pytest
+
+    with pytest.raises(RuntimeError, match="다른 llama-server 모델"):
+        backend.ensure_llamacpp_server_ready({"model": "qwen3.5-35b-a3b"})
 
 
 def test_build_server_argv_gemma_no_n_cpu_moe(monkeypatch, tmp_path):

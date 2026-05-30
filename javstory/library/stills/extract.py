@@ -340,13 +340,48 @@ def suggest_snapshot_target_count(duration_sec: float) -> int:
 
 
 def probe_video_duration_seconds(video_path: Path | str) -> float:
-    """cv2로 대략 duration(sec) 계산. 실패 시 ffprobe로 시도."""
-    _require_cv2()
+    """ffprobe로 duration(sec)을 구하고, 실패 시에만 cv2로 폴백한다."""
     vp = Path(video_path)
     if not vp.is_file():
         return 0.0
-    
-    # 1. OpenCV 시도
+
+    # 1. ffprobe first: ``-v error`` suppresses common MP4/AAC metadata warnings.
+    import subprocess
+    import os
+    try:
+        cmd = [
+            get_ffprobe(),
+            "-v",
+            "error",
+            "-show_entries",
+            "format=duration",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
+            str(vp),
+        ]
+        startupinfo = None
+        if os.name == 'nt':
+            startupinfo = subprocess.STARTUPINFO()
+            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        cp = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            startupinfo=startupinfo,
+            timeout=5,
+        )
+        v = (cp.stdout or "").strip()
+        if v:
+            d = float(v)
+            if d > 0:
+                return d
+    except:
+        pass
+
+    # 2. OpenCV fallback. This can emit codec warnings from FFmpeg on damaged files.
+    _require_cv2()
     cap = cv2.VideoCapture(str(vp))
     if cap.isOpened():
         fps = cap.get(cv2.CAP_PROP_FPS)
@@ -354,25 +389,8 @@ def probe_video_duration_seconds(video_path: Path | str) -> float:
         cap.release()
         if fps and fps > 0:
             d = float(frame_count) / float(fps)
-            if d > 0: return d
-
-    # 2. ffprobe fallback
-    import subprocess
-    import os
-    try:
-        cmd = [
-            get_ffprobe(), "-v", "error", "-show_entries", "format=duration",
-            "-of", "default=noprint_wrappers=1:nokey=1", str(vp)
-        ]
-        startupinfo = None
-        if os.name == 'nt':
-            startupinfo = subprocess.STARTUPINFO()
-            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-        cp = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", startupinfo=startupinfo, timeout=5)
-        v = (cp.stdout or "").strip()
-        if v: return float(v)
-    except:
-        pass
+            if d > 0:
+                return d
 
     return 0.0
 

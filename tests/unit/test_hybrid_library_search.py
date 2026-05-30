@@ -72,6 +72,29 @@ def test_hybrid_library_search_returns_configured_top_k(monkeypatch):
     assert len(results) == 8
 
 
+def test_hybrid_library_search_skips_zero_weight_rankers(monkeypatch):
+    from javstory.search.library_search import HybridLibrarySearch, _LibraryDoc
+
+    docs = [_LibraryDoc("AAA-111", "마사지 작품", "마사지 긴장감", "마사지 배우")]
+    search = HybridLibrarySearch(weights=(1.0, 0.0, 0.0), top_k=5)
+    monkeypatch.setattr(search, "_load_docs", lambda: docs)
+    monkeypatch.setattr(
+        search,
+        "_search_embedding",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("embedding ranker should be skipped")),
+    )
+    monkeypatch.setattr(
+        search,
+        "_search_metadata",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("metadata ranker should be skipped")),
+    )
+
+    results = search.search_with_fusion("마사지")
+
+    assert results
+    assert results[0]["id"] == "AAA-111"
+
+
 def test_hybrid_results_adapter_matches_persona_schema():
     from javstory.persona.erotic_persona_engine import _adapt_hybrid_search_results
 

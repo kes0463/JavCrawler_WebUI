@@ -7,6 +7,7 @@ import json
 import os
 import re
 import threading
+import time
 from pathlib import Path
 from typing import Any
 
@@ -211,9 +212,56 @@ class WorkListModel(QAbstractListModel):
         return None
 
     def refresh(self, items: list[dict]):
+        if self._append_if_prefix(items):
+            return
         self.beginResetModel()
         self._items = items
         self.endResetModel()
+
+    def replace(self, items: list[dict]):
+        self.beginResetModel()
+        self._items = list(items or [])
+        self.endResetModel()
+
+    def _append_if_prefix(self, items: list[dict]) -> bool:
+        new_items = list(items or [])
+        old_len = len(self._items)
+        if old_len <= 0 or len(new_items) < old_len:
+            return False
+        for i in range(old_len):
+            if (self._items[i].get("product_code") or "") != (new_items[i].get("product_code") or ""):
+                return False
+        for i in range(old_len):
+            if self._items[i] != new_items[i]:
+                self._items[i] = new_items[i]
+                idx = self.index(i, 0)
+                self.dataChanged.emit(idx, idx)
+        if len(new_items) > old_len:
+            self.beginInsertRows(QModelIndex(), old_len, len(new_items) - 1)
+            self._items.extend(new_items[old_len:])
+            self.endInsertRows()
+        return True
+
+    def upsertOrAppend(self, items: list[dict]):
+        for item in list(items or []):
+            pc = str((item or {}).get("product_code") or "").strip().upper()
+            if not pc:
+                continue
+            row = -1
+            for i, existing in enumerate(self._items):
+                if str(existing.get("product_code") or "").strip().upper() == pc:
+                    row = i
+                    break
+            if row >= 0:
+                if self._items[row] != item:
+                    self._items[row] = item
+                    idx = self.index(row, 0)
+                    self.dataChanged.emit(idx, idx)
+            else:
+                pos = len(self._items)
+                self.beginInsertRows(QModelIndex(), pos, pos)
+                self._items.append(item)
+                self.endInsertRows()
 
     @Slot(int, result=str)
     def productCodeAt(self, idx: int) -> str:
@@ -358,10 +406,22 @@ class LibraryReloadWorker(QThread):
     finished = Signal(list)
     error = Signal(str)
 
-    def __init__(self, *, limit: int = 600, offset: int = 0, parent=None):
+    def __init__(
+        self,
+        *,
+        limit: int = 600,
+        offset: int = 0,
+        exclude_product_codes: list[str] | set[str] | None = None,
+        parent=None,
+    ):
         super().__init__(parent)
         self._limit = int(limit)
         self._offset = int(offset)
+        self._exclude_product_codes = {
+            str(pc or "").strip().upper()
+            for pc in (exclude_product_codes or [])
+            if str(pc or "").strip()
+        }
         self._cancelled = False
 
     def stop(self) -> None:
@@ -374,12 +434,22 @@ class LibraryReloadWorker(QThread):
     def run(self):
         if self.is_cancelled():
             return
+        t0 = time.perf_counter()
         try:
             from javstory.harvest.database import get_db_session
-            from gui.library_data import load_library_summaries_fast_paged
+            from gui.library_data import load_library_summaries_fast_priority_paged
+            from javstory.utils.common import log_ts
             with get_db_session() as session:
-                summaries = load_library_summaries_fast_paged(
-                    session, limit=self._limit, offset=self._offset
+                summaries = load_library_summaries_fast_priority_paged(
+                    session,
+                    limit=self._limit,
+                    offset=self._offset,
+                    exclude_product_codes=self._exclude_product_codes,
+                )
+                log_ts(
+                    f"priority page offset={self._offset} limit={self._limit} "
+                    f"rows={len(summaries)} elapsed={time.perf_counter() - t0:.3f}s",
+                    tag="LibraryLoad",
                 )
                 self.finished.emit(summaries)
         except Exception as e:
@@ -694,7 +764,7 @@ class LibraryModel(QObject):
         LibraryModel._instance = self
         self._search_query = ""
         self._filter_mode = 0  # 0:All, 1:Analyzed, 2:Pending, 3:Linked, 4:Subtitled, 5:내 평가, 6:하트만, 7:스토리컨텍스트
-        self._sort_mode = 0
+        self._sort_mode = 15
         self._favorite_delta_days = 0  # 0:기간 ♥ 증감 표시 안 함, 7/30/90
         self._month_filter = ""  # ""=전체, "YYYY-MM"=특정 월, "unknown"=출시일 미상
         self._month_filter_input = ""
@@ -720,12 +790,15 @@ class LibraryModel(QObject):
         self._note_gen_worker = None
         self._is_loading = False
         self._reload_worker = None
-        # 전체 라이브러리를 한 번에 표시(페이지네이션 비활성)
-        # gui.library_data.load_library_summaries_fast_paged 에서 limit<=0이면 q.all()로 전체 로드한다.
-        self._page_size = 0
+        # 첫 진입은 선호도 상위 카드만 빠르게 표시하고 나머지는 유휴 시간에 배치 로드한다.
+        self._page_size = 420
         self._page_offset = 0
         self._can_load_more = False
         self._is_loading_more = False
+        self._load_more_worker = None
+        self._added_only_worker = None
+        self._known_db_codes: set[str] = set()
+        self._reload_started_at = 0.0
         # (base_pc -> preview_path) 캐시: `_rebuild()`에서 per-item disk stat 폭탄 방지용
         self._preview_path_cache: dict[str, str] = {}
         self._detail_history: list[str] = []
@@ -738,6 +811,11 @@ class LibraryModel(QObject):
         self._debounce.setSingleShot(True)
         self._debounce.setInterval(180)
         self._debounce.timeout.connect(self._rebuild)
+
+        self._idle_load_timer = QTimer(self)
+        self._idle_load_timer.setSingleShot(True)
+        self._idle_load_timer.setInterval(750)
+        self._idle_load_timer.timeout.connect(self._idle_load_more)
 
     @Property(QObject, constant=True)
     def works(self): return self._works
@@ -950,27 +1028,41 @@ class LibraryModel(QObject):
 
         self._page_offset = 0
         self._can_load_more = True
+        self._idle_load_timer.stop()
         self.canLoadMoreChanged.emit()
         self.loadedCountChanged.emit()
 
         self._reload_worker = LibraryReloadWorker(limit=self._page_size, offset=self._page_offset, parent=self)
         self._reload_worker.finished.connect(self._on_reload_finished)
         self._reload_worker.error.connect(self._on_reload_error)
+        self._reload_started_at = time.perf_counter()
         self._reload_worker.start()
 
     def _on_reload_finished(self, summaries):
+        elapsed = time.perf_counter() - float(getattr(self, "_reload_started_at", time.perf_counter()))
         self._all_summaries = list(summaries or [])
         self._page_offset = len(self._all_summaries)
-        self._can_load_more = False
+        self._can_load_more = len(self._all_summaries) >= self._page_size
         self._is_loading = False
         self.isLoadingChanged.emit()
         self.canLoadMoreChanged.emit()
         self.loadedCountChanged.emit()
         # 로드 결과가 바뀌면 preview cache도 초기화
         self._preview_path_cache.clear()
+        self._snapshot_known_db_codes()
         self._rebuild()
         self.summariesReloaded.emit()
-        self.toastMessage.emit(f"{len(self._all_summaries)}건 로드 완료", "success")
+        self.toastMessage.emit(f"{len(self._all_summaries)}건 우선 로드 완료", "success")
+        try:
+            from javstory.utils.common import log_ts
+            log_ts(
+                f"initial visible={self._works.rowCount()} summaries={len(self._all_summaries)} "
+                f"elapsed={elapsed:.3f}s can_more={self._can_load_more}",
+                tag="LibraryLoad",
+            )
+        except Exception:
+            pass
+        self._schedule_idle_load_more()
 
     def _on_reload_error(self, err_msg):
         self._is_loading = False
@@ -978,7 +1070,7 @@ class LibraryModel(QObject):
         self._all_summaries = []
         self._preview_path_cache.clear()
         self._page_offset = 0
-        self._can_load_more = True
+        self._can_load_more = False
         self.canLoadMoreChanged.emit()
         self.loadedCountChanged.emit()
         self._rebuild()
@@ -996,21 +1088,44 @@ class LibraryModel(QObject):
         self.canLoadMoreChanged.emit()
 
         w = LibraryReloadWorker(limit=self._page_size, offset=self._page_offset, parent=self)
+        self._load_more_worker = w
+        load_more_started_at = time.perf_counter()
 
         def _done(new_items):
             try:
-                items = list(new_items or [])
+                raw_items = list(new_items or [])
+                existing = {
+                    str(getattr(s, "product_code", "") or "").strip().upper()
+                    for s in (self._all_summaries or [])
+                }
+                items = [
+                    it for it in raw_items
+                    if str(getattr(it, "product_code", "") or "").strip().upper() not in existing
+                ]
+                if raw_items:
+                    self._page_offset += len(raw_items)
                 if items:
                     self._all_summaries.extend(items)
-                    self._page_offset = len(self._all_summaries)
                 # 페이지가 가득 안 찼으면 더 이상 없음
-                self._can_load_more = bool(len(items) >= self._page_size)
+                self._can_load_more = bool(len(raw_items) >= self._page_size)
             finally:
                 self._is_loading_more = False
+                if self._load_more_worker is w:
+                    self._load_more_worker = None
                 self.canLoadMoreChanged.emit()
                 self.loadedCountChanged.emit()
-                self._rebuild()
+                self._rebuild(prefer_append=True)
                 self.summariesReloaded.emit()
+                try:
+                    from javstory.utils.common import log_ts
+                    log_ts(
+                        f"append raw={len(raw_items)} new={len(items)} visible={self._works.rowCount()} "
+                        f"elapsed={time.perf_counter() - load_more_started_at:.3f}s can_more={self._can_load_more}",
+                        tag="LibraryLoad",
+                    )
+                except Exception:
+                    pass
+                self._schedule_idle_load_more()
                 try:
                     w.deleteLater()
                 except Exception:
@@ -1018,6 +1133,8 @@ class LibraryModel(QObject):
 
         def _err(msg):
             self._is_loading_more = False
+            if self._load_more_worker is w:
+                self._load_more_worker = None
             self.canLoadMoreChanged.emit()
             self.toastMessage.emit(f"추가 로드 실패: {msg}", "error")
             try:
@@ -1028,6 +1145,43 @@ class LibraryModel(QObject):
         w.finished.connect(_done)
         w.error.connect(_err)
         w.start()
+
+    def _snapshot_known_db_codes(self) -> None:
+        try:
+            from javstory.harvest.database import JAVMetadata, get_db_session
+
+            session = get_db_session()
+            try:
+                self._known_db_codes = {
+                    str(pc or "").strip().upper()
+                    for (pc,) in session.query(JAVMetadata.product_code).all()
+                    if str(pc or "").strip()
+                }
+            finally:
+                session.close()
+        except Exception:
+            self._known_db_codes = self._loaded_raw_codes()
+
+    def _should_idle_prefetch(self) -> bool:
+        return (
+            not self._search_query
+            and int(self._filter_mode or 0) == 0
+            and not self._month_filter
+            and not self._unknown_only
+            and int(self._sort_mode or 0) == 15
+        )
+
+    def _schedule_idle_load_more(self) -> None:
+        if not self._should_idle_prefetch():
+            return
+        if self._can_load_more and not self._is_loading and not self._is_loading_more:
+            self._idle_load_timer.start()
+
+    def _idle_load_more(self) -> None:
+        if not self._should_idle_prefetch():
+            return
+        if self.canLoadMore:
+            self.loadMore()
 
     @Slot(str)
     def loadDetail(self, product_code: str):
@@ -1377,6 +1531,191 @@ class LibraryModel(QObject):
                 self._rebuild()
         except Exception as e:
             _ = e
+
+    def _loaded_raw_codes(self) -> set[str]:
+        return {
+            str(getattr(s, "product_code", "") or "").strip().upper()
+            for s in (self._all_summaries or [])
+            if str(getattr(s, "product_code", "") or "").strip()
+        }
+
+    def _loaded_base_codes(self) -> set[str]:
+        return {
+            LibrarySortFilter.base_product_code(pc)
+            for pc in self._loaded_raw_codes()
+            if pc
+        }
+
+    def _ensure_search_product_codes_loaded(self) -> None:
+        query = (self._search_query or "").strip()
+        if not query or not self._all_summaries:
+            return
+        try:
+            from javstory.persona.library_search import extract_product_codes
+            from gui.library_data import row_to_summary_fast
+            from javstory.harvest.database import JAVMetadata, get_db_session
+
+            requested = [
+                str(code or "").strip().upper()
+                for code in extract_product_codes(query, limit=8)
+                if str(code or "").strip()
+            ]
+            if not requested:
+                return
+            loaded_raw = self._loaded_raw_codes()
+            loaded_base = self._loaded_base_codes()
+            missing = [
+                code
+                for code in requested
+                if code not in loaded_raw and LibrarySortFilter.base_product_code(code) not in loaded_base
+            ]
+            if not missing:
+                return
+            session = get_db_session()
+            try:
+                rows = session.query(JAVMetadata).filter(JAVMetadata.product_code.in_(missing)).all()
+                if not rows:
+                    return
+                summaries = [row_to_summary_fast(row) for row in rows]
+            finally:
+                session.close()
+            existing_raw = self._loaded_raw_codes()
+            existing_base = self._loaded_base_codes()
+            for summary in summaries:
+                pc = str(getattr(summary, "product_code", "") or "").strip().upper()
+                base = LibrarySortFilter.base_product_code(pc)
+                if not pc or pc in existing_raw or base in existing_base:
+                    continue
+                self._all_summaries.append(summary)
+                self._known_db_codes.add(pc)
+                existing_raw.add(pc)
+                existing_base.add(base)
+        except Exception:
+            return
+
+    def _append_new_summaries(self, summaries: list) -> int:
+        existing_raw = self._loaded_raw_codes()
+        existing_base = self._loaded_base_codes()
+        new_summaries = []
+        for s in list(summaries or []):
+            pc = str(getattr(s, "product_code", "") or "").strip().upper()
+            base = LibrarySortFilter.base_product_code(pc)
+            if not pc or pc in existing_raw or base in existing_base:
+                continue
+            new_summaries.append(s)
+            existing_raw.add(pc)
+            existing_base.add(base)
+
+        if not new_summaries:
+            return 0
+
+        self._all_summaries.extend(new_summaries)
+        for s in new_summaries:
+            pc = str(getattr(s, "product_code", "") or "").strip().upper()
+            if pc:
+                self._known_db_codes.add(pc)
+        visible_items = LibrarySortFilter.rebuild(
+            ListRebuildOptions(
+                all_summaries=new_summaries,
+                search_query=self._search_query,
+                filter_mode=self._filter_mode,
+                month_filter=self._month_filter,
+                unknown_only=self._unknown_only,
+                sort_mode=self._sort_mode,
+                favorite_delta_days=self._favorite_delta_days,
+                preview_path_cache=self._preview_path_cache,
+            )
+        )
+        self._works.upsertOrAppend(visible_items)
+        self.loadedCountChanged.emit()
+        self.workCountChanged.emit()
+        self.summariesReloaded.emit()
+        return len(new_summaries)
+
+    @Slot(str)
+    def refreshAddedProduct(self, product_code: str) -> None:
+        pc = (product_code or "").strip().upper()
+        if not pc or not self._all_summaries:
+            return
+        base = LibrarySortFilter.base_product_code(pc)
+        raw_codes = self._loaded_raw_codes()
+        if pc in raw_codes:
+            self.refreshProduct(pc)
+            return
+        if self._known_db_codes and pc in self._known_db_codes:
+            return
+        try:
+            from gui.library_data import row_to_summary_fast
+            from javstory.harvest.database import JAVMetadata, get_db_session
+
+            session = get_db_session()
+            try:
+                row = session.query(JAVMetadata).filter_by(product_code=pc).first()
+                if not row:
+                    return
+                summary = row_to_summary_fast(row)
+                if base in self._loaded_base_codes():
+                    self._all_summaries.append(summary)
+                    self._known_db_codes.add(pc)
+                    self._rebuild(prefer_append=True)
+                    self.loadedCountChanged.emit()
+                    self.summariesReloaded.emit()
+                    return
+                added = self._append_new_summaries([summary])
+                if added:
+                    self.toastMessage.emit(f"{pc}: 새 작품을 라이브러리에 추가했습니다.", "success")
+            finally:
+                session.close()
+        except Exception:
+            return
+
+    @Slot()
+    def refreshAddedOnly(self) -> None:
+        if self._is_loading or self._is_loading_more:
+            self.toastMessage.emit("라이브러리 로드 중입니다.", "info")
+            return
+        if not self._all_summaries:
+            self.reload()
+            return
+        if self._added_only_worker and self._added_only_worker.isRunning():
+            return
+
+        exclude = self._known_db_codes or self._loaded_raw_codes()
+        w = LibraryReloadWorker(
+            limit=self._page_size,
+            offset=0,
+            exclude_product_codes=exclude,
+            parent=self,
+        )
+        self._added_only_worker = w
+
+        def _done(items):
+            try:
+                added = self._append_new_summaries(list(items or []))
+                if added:
+                    self.toastMessage.emit(f"새 작품 {added}건을 추가했습니다.", "success")
+                else:
+                    self.toastMessage.emit("추가된 새 작품이 없습니다.", "info")
+            finally:
+                if self._added_only_worker is w:
+                    self._added_only_worker = None
+                try:
+                    w.deleteLater()
+                except Exception:
+                    pass
+
+        def _err(msg):
+            if self._added_only_worker is w:
+                self._added_only_worker = None
+            self.toastMessage.emit(f"새 작품 확인 실패: {msg}", "error")
+            try:
+                w.deleteLater()
+            except Exception:
+                pass
+
+        w.finished.connect(_done)
+        w.error.connect(_err)
+        w.start()
 
     @Slot(str, result=bool)
     def toggleWatchLater(self, product_code: str) -> bool:
@@ -2586,7 +2925,8 @@ class LibraryModel(QObject):
             out.append({"key": "unknown", "label": "미상", "count": unk})
         return out
 
-    def _rebuild(self):
+    def _rebuild(self, *, prefer_append: bool = False):
+        self._ensure_search_product_codes_loaded()
         merged_items = LibrarySortFilter.rebuild(
             ListRebuildOptions(
                 all_summaries=self._all_summaries,
@@ -2599,5 +2939,8 @@ class LibraryModel(QObject):
                 preview_path_cache=self._preview_path_cache,
             )
         )
-        self._works.refresh(merged_items)
+        if prefer_append:
+            self._works.refresh(merged_items)
+        else:
+            self._works.replace(merged_items)
         self.workCountChanged.emit()
