@@ -13,7 +13,7 @@ from javstory.translation.correction_chunk import (
 
 
 def test_llamacpp_ignores_global_correction_chunk_env(monkeypatch):
-    monkeypatch.setenv("JAVSTORY_CORRECTION_PASS2_MODEL", "llamacpp:qwen3.5-35b-a3b-uncensored")
+    monkeypatch.setenv("JAVSTORY_CORRECTION_PASS2_MODEL", "llamacpp:qwen3-14b-uncensored")
     monkeypatch.setenv("JAVSTORY_CORRECTION_CHUNK_TARGET_SEC", "80")
     monkeypatch.setenv("JAVSTORY_CORRECTION_CHUNK_OVERLAP_SEC", "20")
     tier = correction_llm_tier(2)
@@ -32,9 +32,10 @@ def test_llamacpp_pass2_concurrency_clamped(monkeypatch):
 def test_correction_llamacpp_max_tokens_default(monkeypatch):
     monkeypatch.setenv(
         "JAVSTORY_CORRECTION_PASS2_MODEL",
-        "llamacpp:qwen3.5-35b-a3b-uncensored",
+        "llamacpp:qwen3-14b-uncensored",
     )
     monkeypatch.delenv("JAVSTORY_CORRECTION_LLAMACPP_MAX_TOKENS", raising=False)
+    monkeypatch.delenv("JAVSTORY_TRANSLATION_LLAMACPP_MAX_TOKENS", raising=False)
     tier = correction_llm_tier(2)
     assert tier["max_tokens"] == 3072
-    assert tier["max_ctx"] == 4096
+    assert tier["max_ctx"] == 8192

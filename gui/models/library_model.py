@@ -456,6 +456,40 @@ class LibraryReloadWorker(QThread):
             self.error.emit(str(e))
 
 
+class FileFlagRebuildWorker(QThread):
+    """jav_metadata 전체를 대상으로 file_flag_cache를 병렬 재스캔 후 DB에 저장."""
+
+    progress = Signal(int, int)   # (done, total)
+    finished = Signal(int)        # 저장된 건수
+    error = Signal(str)
+
+    def run(self):
+        try:
+            from javstory.harvest.database import get_db_session, JAVMetadata
+            from javstory.library.file_flag_scanner import bulk_scan_and_save
+
+            with get_db_session() as session:
+                rows = session.query(
+                    JAVMetadata.product_code,
+                    JAVMetadata.folder_path,
+                    JAVMetadata.is_hardcoded,
+                ).all()
+
+            items = [
+                (str(pc or "").strip().upper(), fp, bool(hc))
+                for pc, fp, hc in rows
+                if (pc or "").strip()
+            ]
+
+            saved = bulk_scan_and_save(
+                items,
+                on_progress=lambda done, total: self.progress.emit(done, total),
+            )
+            self.finished.emit(saved)
+        except Exception as e:
+            self.error.emit(str(e))
+
+
 class MetadataResyncWorker(QThread):
     """마스터 테이블 매핑(장르/배우/메이커)을 기준으로 jav_metadata의 ko/레거시 필드를 일괄 재동기화."""
 
@@ -797,6 +831,7 @@ class LibraryModel(QObject):
         self._is_loading_more = False
         self._load_more_worker = None
         self._added_only_worker = None
+        self._flag_rebuild_worker = None
         self._known_db_codes: set[str] = set()
         self._reload_started_at = 0.0
         # (base_pc -> preview_path) 캐시: `_rebuild()`에서 per-item disk stat 폭탄 방지용
@@ -807,6 +842,13 @@ class LibraryModel(QObject):
         self._genres_cache: list[dict] = []
 
 
+        # WatchHistory 캐시 — _rebuild는 이 캐시를 읽기만 하므로 메인 스레드 DB 접근 없음
+        self._watch_map: dict = {}
+        self._watch_map_dirty = True
+        # favorite delta 캐시 — 정렬 11·12 또는 favoriteDeltaDays > 0 시 사용
+        self._deltas_map: dict = {}
+        self._deltas_cache_days: int = -1  # 캐시된 period_days, 다르면 재로드
+
         self._debounce = QTimer(self)
         self._debounce.setSingleShot(True)
         self._debounce.setInterval(180)
@@ -816,6 +858,9 @@ class LibraryModel(QObject):
         self._idle_load_timer.setSingleShot(True)
         self._idle_load_timer.setInterval(750)
         self._idle_load_timer.timeout.connect(self._idle_load_more)
+
+        # 앱 시작 즉시 watch_map 비동기 로드 → 첫 _rebuild 시 동기 I/O 없음
+        self._refresh_watch_map()
 
     @Property(QObject, constant=True)
     def works(self): return self._works
@@ -876,6 +921,9 @@ class LibraryModel(QObject):
         if v != self._sort_mode:
             self._sort_mode = v
             self.sortModeChanged.emit()
+            # 정렬 11·12(♥ 증감)로 전환 시 deltas 캐시가 없으면 미리 비동기 갱신
+            if v in (11, 12) and self._deltas_cache_days <= 0:
+                self._refresh_deltas_map(int(self._favorite_delta_days or 0) or 7)
             self._rebuild()
 
     @Property(int, notify=favoriteDeltaDaysChanged)
@@ -894,6 +942,12 @@ class LibraryModel(QObject):
         if nv != self._favorite_delta_days:
             self._favorite_delta_days = nv
             self.favoriteDeltaDaysChanged.emit()
+            # period가 바뀌면 미리 비동기 갱신 시작 → _rebuild에서 캐시 히트 가능성 높임
+            if nv > 0:
+                self._refresh_deltas_map(nv)
+            else:
+                self._deltas_map = {}
+                self._deltas_cache_days = 0
             self._rebuild()
 
     @Property(str, notify=monthFilterChanged)
@@ -1063,6 +1117,43 @@ class LibraryModel(QObject):
         except Exception:
             pass
         self._schedule_idle_load_more()
+        self._maybe_start_flag_rebuild(summaries)
+        self._refresh_watch_map()
+        self._warmup_preview_cache()
+        eff_days = int(self._favorite_delta_days or 0)
+        if eff_days > 0 or int(self._sort_mode or 0) in (11, 12):
+            self._refresh_deltas_map(eff_days if eff_days > 0 else 7)
+
+    def _maybe_start_flag_rebuild(self, summaries) -> None:
+        """file_flag_cache가 jav_metadata 전체 건수 대비 95% 미만이면 백그라운드 재스캔."""
+        if self._flag_rebuild_worker and self._flag_rebuild_worker.isRunning():
+            return
+        try:
+            from javstory.harvest.database import get_db_session, FileFlagCache, JAVMetadata
+            with get_db_session() as session:
+                cached_count = session.query(FileFlagCache).count()
+                total_count = session.query(JAVMetadata).count()
+            if total_count > 0 and cached_count < total_count * 0.95:
+                self._start_flag_rebuild()
+        except Exception:
+            pass
+
+    def _start_flag_rebuild(self) -> None:
+        """file_flag_cache 전체 재스캔 워커를 백그라운드로 시작한다."""
+        if self._flag_rebuild_worker and self._flag_rebuild_worker.isRunning():
+            return
+        w = FileFlagRebuildWorker(parent=self)
+        self._flag_rebuild_worker = w
+
+        def _done(saved: int):
+            try:
+                from javstory.utils.common import log_ts
+                log_ts(f"file_flag_cache 재스캔 완료: {saved}건 저장", tag="FileFlagCache")
+            except Exception:
+                pass
+
+        w.finished.connect(_done)
+        w.start()
 
     def _on_reload_error(self, err_msg):
         self._is_loading = False
@@ -1116,6 +1207,7 @@ class LibraryModel(QObject):
                 self.loadedCountChanged.emit()
                 self._rebuild(prefer_append=True)
                 self.summariesReloaded.emit()
+                self._warmup_preview_cache()
                 try:
                     from javstory.utils.common import log_ts
                     log_ts(
@@ -1147,20 +1239,26 @@ class LibraryModel(QObject):
         w.start()
 
     def _snapshot_known_db_codes(self) -> None:
-        try:
-            from javstory.harvest.database import JAVMetadata, get_db_session
+        import threading
 
-            session = get_db_session()
+        def _job():
             try:
-                self._known_db_codes = {
-                    str(pc or "").strip().upper()
-                    for (pc,) in session.query(JAVMetadata.product_code).all()
-                    if str(pc or "").strip()
-                }
-            finally:
-                session.close()
-        except Exception:
-            self._known_db_codes = self._loaded_raw_codes()
+                from javstory.harvest.database import JAVMetadata, get_db_session
+
+                session = get_db_session()
+                try:
+                    codes = {
+                        str(pc or "").strip().upper()
+                        for (pc,) in session.query(JAVMetadata.product_code).all()
+                        if str(pc or "").strip()
+                    }
+                finally:
+                    session.close()
+                self._known_db_codes = codes
+            except Exception:
+                self._known_db_codes = self._loaded_raw_codes()
+
+        threading.Thread(target=_job, daemon=True).start()
 
     def _should_idle_prefetch(self) -> bool:
         return (
@@ -1168,7 +1266,6 @@ class LibraryModel(QObject):
             and int(self._filter_mode or 0) == 0
             and not self._month_filter
             and not self._unknown_only
-            and int(self._sort_mode or 0) == 15
         )
 
     def _schedule_idle_load_more(self) -> None:
@@ -1517,6 +1614,16 @@ class LibraryModel(QObject):
                     try:
                         row = session.query(JAVMetadata).filter_by(product_code=pc).first()
                         if row:
+                            # 파일 플래그 캐시도 해당 작품만 갱신
+                            try:
+                                from javstory.library.file_flag_scanner import upsert_one_flag
+                                upsert_one_flag(
+                                    pc,
+                                    (row.folder_path or "").strip() or None,
+                                    bool(row.is_hardcoded),
+                                )
+                            except Exception:
+                                pass
                             new_s = row_to_summary(row)
                             self._all_summaries[i] = new_s
                             found = True
@@ -1749,6 +1856,7 @@ class LibraryModel(QObject):
             if current_pc and current_base == pc:
                 self.loadDetail(current_pc)
 
+            self._watch_map_dirty = True  # 다음 _rebuild 시 watch_map 재로드
             self._rebuild()
             self.toastMessage.emit(
                 f"{pc}: 나중에 볼에 추가했습니다." if new_value else f"{pc}: 나중에 볼에서 해제했습니다.",
@@ -2925,7 +3033,120 @@ class LibraryModel(QObject):
             out.append({"key": "unknown", "label": "미상", "count": unk})
         return out
 
+    def _refresh_watch_map(self) -> None:
+        """WatchHistory를 백그라운드에서 읽어 _watch_map 갱신."""
+        import threading
+        from gui.models.library.search import build_watch_feedback_by_base
+
+        def _job():
+            m = build_watch_feedback_by_base()
+            self._watch_map = m
+            self._watch_map_dirty = False
+
+        threading.Thread(target=_job, daemon=True).start()
+
+    def _warmup_preview_cache(self) -> None:
+        """reload 완료 직후 백그라운드에서 preview 경로를 미리 계산해 캐시 채움.
+        _rebuild 시 is_file()+stat() 를 메인 스레드에서 수행하지 않도록 한다."""
+        import threading
+        from gui.models.library.search import preview_path_for
+
+        summaries = list(self._all_summaries or [])
+        if not summaries:
+            return
+
+        try:
+            from javstory.config.app_config import DATA_ROOT, E_MEDIA_ROOT
+            from pathlib import Path as _Path
+
+            e_root = _Path(E_MEDIA_ROOT)
+            legacy_root = _Path(DATA_ROOT) / "media"
+        except Exception:
+            return
+
+        try:
+            from javstory.utils.product_code import strip_split_suffixes
+        except Exception:
+            strip_split_suffixes = None
+
+        def _base(pc: str) -> str:
+            try:
+                u = (pc or "").strip().upper()
+                return (strip_split_suffixes(u) if strip_split_suffixes else None) or u
+            except Exception:
+                return (pc or "").strip().upper()
+
+        base_codes = list({
+            _base(getattr(s, "product_code", "") or "")
+            for s in summaries
+            if (getattr(s, "product_code", "") or "").strip()
+        })
+
+        cache = self._preview_path_cache
+
+        def _job():
+            for pc in base_codes:
+                if pc in cache:
+                    continue
+                try:
+                    cache[pc] = preview_path_for(pc, e_root, legacy_root)
+                except Exception:
+                    cache[pc] = ""
+
+        threading.Thread(target=_job, daemon=True).start()
+
+    def _refresh_deltas_map(self, period_days: int) -> None:
+        """favorite_score_deltas_for_period를 백그라운드에서 로드해 _deltas_map 갱신."""
+        import threading
+
+        if period_days <= 0:
+            self._deltas_map = {}
+            self._deltas_cache_days = 0
+            return
+
+        def _job():
+            try:
+                from javstory.harvest.database import favorite_score_deltas_for_period
+                from javstory.harvest.database import JAVMetadata, get_db_session
+
+                session = get_db_session()
+                try:
+                    meta_by_code = {
+                        str(pc or "").strip().upper(): int(fav or 0)
+                        for pc, fav in session.query(
+                            JAVMetadata.product_code, JAVMetadata.favorite_score
+                        ).all()
+                        if (pc or "").strip()
+                    }
+                finally:
+                    session.close()
+                m = favorite_score_deltas_for_period(
+                    meta_scores_by_code=meta_by_code,
+                    period_days=period_days,
+                )
+                self._deltas_map = m
+                self._deltas_cache_days = period_days
+            except Exception:
+                self._deltas_map = {}
+                self._deltas_cache_days = period_days
+
+        threading.Thread(target=_job, daemon=True).start()
+
     def _rebuild(self, *, prefer_append: bool = False):
+        if self._watch_map_dirty:
+            # 처음 한 번은 동기로 로드하여 빈 watch_map으로 _rebuild가 실행되지 않도록 한다.
+            # 이후에는 비동기 갱신이므로 항상 캐시가 존재한다.
+            from gui.models.library.search import build_watch_feedback_by_base
+            self._watch_map = build_watch_feedback_by_base()
+            self._watch_map_dirty = False
+
+        eff_days = int(self._favorite_delta_days or 0)
+        if eff_days <= 0 and int(self._sort_mode or 0) in (11, 12):
+            eff_days = 7
+        if eff_days > 0 and self._deltas_cache_days != eff_days:
+            # 캐시된 period_days가 다르면 비동기 갱신 시작 후, 이번 _rebuild는 빈 deltas로 실행
+            self._refresh_deltas_map(eff_days)
+
         self._ensure_search_product_codes_loaded()
         merged_items = LibrarySortFilter.rebuild(
             ListRebuildOptions(
@@ -2937,6 +3158,8 @@ class LibraryModel(QObject):
                 sort_mode=self._sort_mode,
                 favorite_delta_days=self._favorite_delta_days,
                 preview_path_cache=self._preview_path_cache,
+                watch_map=self._watch_map,
+                deltas_map=self._deltas_map,
             )
         )
         if prefer_append:

@@ -59,14 +59,16 @@ GlassCard {
     function completeStreamingResponse(content) {
         root.streamingActive = false
         var next = root.messages.slice()
+        var finalContent = content || "응답이 비어 있어서 표시할 내용이 없었어요. 같은 질문을 한 번만 다시 보내주세요."
         if (next.length > 0 && next[next.length - 1].role === "assistant") {
             var last = Object.assign({}, next[next.length - 1])
-            if (content)
-                last.content = content
+            last.content = finalContent
             last.status = "ok"
             next[next.length - 1] = last
-            root.messages = next
+        } else {
+            next.push({ "role": "assistant", "content": finalContent, "status": "ok" })
         }
+        root.messages = next
         Qt.callLater(function() {
             chatList.positionViewAtEnd()
         })
@@ -168,7 +170,7 @@ GlassCard {
 
             delegate: Item {
                 width: chatList.width
-                height: bubble.implicitHeight
+                height: bubble.height + Theme.spacingXs
 
                 readonly property bool userMessage: modelData.role === "user"
                 readonly property bool errorMessage: modelData.status === "error"
@@ -184,6 +186,7 @@ GlassCard {
                     readonly property int bubblePadding: Theme.spacingSm
                     width: Math.min(parent.width * 0.82, Math.max(180, messageMetrics.width + bubblePadding * 2))
                     implicitHeight: copyRow.implicitHeight + messageText.contentHeight + bubbleContent.spacing + bubblePadding * 2 + 4
+                    height: implicitHeight
                     anchors.right: userMessage ? parent.right : undefined
                     anchors.left: userMessage ? undefined : parent.left
                     radius: Theme.radiusMd
@@ -236,7 +239,7 @@ GlassCard {
                         TextEdit {
                             id: messageText
                             width: parent.width
-                            height: contentHeight + 2
+                            height: contentHeight + 6
                             text: modelData.content || ""
                             readOnly: true
                             selectByMouse: true

@@ -273,10 +273,10 @@ def correction_llm_tier(pass_n: int) -> dict:
             }
 
         if vlow.startswith("llamacpp:"):
-            preset_id = raw.split(":", 1)[1].strip() if ":" in raw else "qwen3.5-35b-a3b-uncensored"
+            preset_id = raw.split(":", 1)[1].strip() if ":" in raw else "qwen3-14b-uncensored"
             from javstory.llm.llamacpp_backend import resolve_llamacpp_preset
 
-            preset = resolve_llamacpp_preset(preset_id or "qwen3.5-35b-a3b-uncensored")
+            preset = resolve_llamacpp_preset(preset_id or "qwen3-14b-uncensored")
             from javstory.llm.llamacpp_backend import llamacpp_max_tokens_from_env
 
             max_tokens = llamacpp_max_tokens_from_env(correction=True)

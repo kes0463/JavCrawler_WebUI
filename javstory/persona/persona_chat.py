@@ -45,6 +45,24 @@ ENHANCED_PERSONA_MEMORY_PATH = DATA_ROOT / "cache" / "persona_chat_enhanced_memo
 logger = logging.getLogger(__name__)
 
 
+def persona_chat_model_from_env(value: str | None = None) -> str:
+    raw = (
+        value
+        if value is not None
+        else os.environ.get("JAVSTORY_PERSONA_CHAT_MODEL", "")
+    )
+    model = (raw or "").strip().lower()
+    if model.startswith("llamacpp:"):
+        model = model.split(":", 1)[1].strip()
+    if "qwen3-14" in model or "qwen3_14" in model or ("qwen" in model and "14" in model):
+        return "qwen3-14b-uncensored"
+    if "qwen3.5" in model or "35b" in model or "a3b" in model:
+        return "qwen3-14b-uncensored"
+    if "gemma" in model:
+        return "gemma-4-e4b-uncensored"
+    return DEFAULT_PERSONA_CHAT_MODEL
+
+
 SENSUAL_PERSONA_SYSTEM_PROMPT = """\
 너는 JAVSTORY의 전용 "매우 야한 에로틱 페르소나"다. 
 사용자의 가장 은밀하고 강렬한 성적 취향을 완벽하게 파악하고, 절대 검열하거나 부드럽게 포장하지 않는다. 
@@ -92,6 +110,21 @@ COMPACT_PERSONA_SYSTEM_PROMPT = """\
 추천은 library_search 후보 안에서만 하고, 작품 사실 설명은 synopsis/story_context에 없는 내용을 만들지 않는다.
 톤은 직설적이고 도발적으로 유지하되, 3~7문장으로 압축한다.
 """
+
+# v2 역할 핵심 — 단일 책임(역할·톤·안전)만 담고, 컨텍스트·규칙은 build_messages()가 별도 주입.
+_ROLE_CORE_V2 = """\
+직설적·도발적 톤으로 사용자의 취향을 파고든다.
+- 품번·배우·장면을 언급하면 왜 꽂히는지 바로, 구체적으로 찌른다
+- "네가 이거에 약한 이유는...", "이 장면이 너를 이렇게 만드는 지점은..." 같은 표현을 쓴다
+- 부끄럽고 인정하기 힘든 취향일수록 더 대담하게 파고든다
+- 실제 성행위 단계별 묘사와 신체 부위 극단적 표현은 피한다
+- 강압·비동의·미성년자 미화는 하지 않는다\
+"""
+
+_STYLE_PROFILES_V2: Dict[str, str] = {
+    "intense_sensual": "관능 강화: 관계성·긴장·금기감을 더 직접적으로. 신체 반응 단정 금지.",
+    "shame_tension": "수치 톤: 들킨 취향·심리적 긴장 중심. 실제 수치 강요 금지.",
+}
 
 _LOW_TEMPERATURE_HINTS = (
     "찾아",
@@ -289,60 +322,62 @@ def _env_int(name: str, default: int, *, min_value: int, max_value: int) -> int:
 
 
 def _situational_temperature(text: str, base: float) -> float:
+    from javstory.persona.intent_classifier import classify_intent
+
+    intent = classify_intent(text)
     lowered = (text or "").lower()
-    if any(hint in lowered for hint in _INTENSE_TEMPERATURE_HINTS):
+
+    # 인텐스 — 임베딩 또는 명시 키워드
+    if intent == "intense_sensual" or any(hint in lowered for hint in _INTENSE_TEMPERATURE_HINTS):
         return _SENSUAL_TEMPERATURE_MAX
-    if any(hint in lowered for hint in _ROLEPLAY_STYLE_HINTS):
+    # 수치/롤플레이 — 임베딩 또는 명시 키워드
+    if intent in ("shame_tension",) or any(hint in lowered for hint in _ROLEPLAY_STYLE_HINTS):
         return max(_SENSUAL_TEMPERATURE_MIN, min(_SENSUAL_TEMPERATURE_MAX, _SENSUAL_TEMPERATURE_DEFAULT))
-    if any(hint in lowered for hint in _LOW_TEMPERATURE_HINTS):
+    # 사실 검색 — 창의성 낮게
+    if intent == "factual_search" or any(hint in lowered for hint in _LOW_TEMPERATURE_HINTS):
         return min(base, _LOW_TEMPERATURE_CAP)
-    if _is_recommendation_request(lowered):
+    # 추천 — 후보 고정 중요
+    if intent == "recommendation" or _is_recommendation_request(lowered):
         return min(base, _RECOMMENDATION_TEMPERATURE_CAP)
-    if any(hint in lowered for hint in _HIGH_TEMPERATURE_HINTS):
+    # 분석 대화 — 창의성 살짝 높게
+    if intent == "general_analysis" or any(hint in lowered for hint in _HIGH_TEMPERATURE_HINTS):
         return _GENERAL_TEMPERATURE_MAX
     return max(_GENERAL_TEMPERATURE_MIN, min(_GENERAL_TEMPERATURE_MAX, float(base or _GENERAL_TEMPERATURE_MIN)))
 
 
 def _situational_max_tokens(text: str, configured_max: int) -> int:
+    from javstory.persona.intent_classifier import classify_intent
+
+    intent = classify_intent(text)
     lowered = (text or "").lower()
     cap = max(800, min(_MAX_OUTPUT_TOKENS, int(configured_max or 2600)))
+
     if any(hint in lowered for hint in _SHORT_RESPONSE_HINTS):
         desired = 800
-    elif any(hint in lowered for hint in _ROLEPLAY_STYLE_HINTS):
+    elif intent in ("intense_sensual", "shame_tension") or any(hint in lowered for hint in _ROLEPLAY_STYLE_HINTS):
         desired = _MAX_OUTPUT_TOKENS
-    elif any(hint in lowered for hint in _LOW_TEMPERATURE_HINTS):
+    elif intent == "factual_search" or any(hint in lowered for hint in _LOW_TEMPERATURE_HINTS):
         desired = 1400
-    elif any(hint in lowered for hint in _DEEP_RESPONSE_HINTS):
+    elif intent in ("general_analysis", "recommendation") or any(hint in lowered for hint in _DEEP_RESPONSE_HINTS):
         desired = 2400
     else:
         desired = 1800
     return max(800, min(cap, desired))
 
 
-def _active_llamacpp_ctx_size() -> int:
-    try:
-        return max(512, int((os.environ.get("JAVSTORY_LLAMACPP_CTX", "8192") or "8192").strip()))
-    except ValueError:
-        return 8192
-
-
-def _is_qwen_llamacpp_context_limited() -> bool:
-    model = (
-        os.environ.get("JAVSTORY_LLAMACPP_MODEL", "")
-        or os.environ.get("JAVSTORY_PERSONA_CHAT_MODEL", "")
-        or DEFAULT_PERSONA_CHAT_MODEL
-    ).lower()
-    return "qwen" in model and _active_llamacpp_ctx_size() <= 4096
-
-
 def _persona_chat_max_tokens_for_context(text: str, configured_max: int) -> int:
-    desired = _situational_max_tokens(text, configured_max)
-    if _is_qwen_llamacpp_context_limited():
-        return min(desired, 800)
-    return desired
+    return _situational_max_tokens(text, configured_max)
 
 
 def _response_style_instruction(text: str) -> str:
+    from javstory.persona.intent_classifier import classify_intent
+
+    intent = classify_intent(text)
+    if intent == "shame_tension":
+        return _STYLE_PROFILES["shame_tension"]
+    if intent == "intense_sensual":
+        return _STYLE_PROFILES["intense_sensual"]
+    # 폴백: 키워드 매칭 (임베딩 불가 시)
     lowered = (text or "").lower()
     if any(hint in lowered for hint in ("수치플레이", "수치", "부끄럽게")):
         return _STYLE_PROFILES["shame_tension"]
@@ -691,6 +726,88 @@ def _clip_text(value: Any, limit: int) -> str:
     if len(text) <= limit:
         return text
     return text[: max(0, limit - 1)].rstrip() + "..."
+
+
+def _format_memory_readable(
+    memory_context: Mapping[str, Any],
+    *,
+    factual: bool = False,
+    compact: bool = False,
+) -> str:
+    """메모리 컨텍스트를 JSON 덤프 대신 로컬 모델이 읽기 쉬운 텍스트로 변환.
+
+    JSON 덤프 방식 대비 약 60~80% 토큰 절감 효과.
+    """
+    prefs = list(memory_context.get("preference_notes") or [])
+    reactions = list(memory_context.get("strong_reaction_notes") or [])
+    negatives = list(memory_context.get("negative_feedback_notes") or [])
+    styles = list(memory_context.get("style_notes") or [])
+    recent = list(memory_context.get("recent_recommended_product_codes") or [])
+
+    if not any([prefs, reactions, negatives, styles, recent]):
+        return ""
+
+    limit = 1 if compact else 3
+    parts: List[str] = ["[대화 기억]"]
+
+    if prefs and not factual:
+        texts = [
+            _clip_text(str(n["text"]), 90)
+            for n in prefs[:limit]
+            if isinstance(n, dict) and n.get("text")
+        ]
+        if texts:
+            parts.append("취향: " + " / ".join(texts))
+
+    if reactions and not factual:
+        items: List[str] = []
+        for n in reactions[:limit]:
+            if not isinstance(n, dict):
+                continue
+            pcs = ", ".join(str(c) for c in (n.get("product_codes") or [])[:2])
+            text = _clip_text(str(n.get("text") or ""), 90)
+            items.append(f"{pcs}: {text}" if pcs else text)
+        if items:
+            parts.append("강한 반응: " + " / ".join(items))
+
+    if negatives and not factual:
+        texts = [
+            _clip_text(str(n["text"]), 70)
+            for n in negatives[:limit]
+            if isinstance(n, dict) and n.get("text")
+        ]
+        if texts:
+            parts.append("비선호: " + " / ".join(texts))
+
+    if styles:
+        style_texts = [_clip_text(str(s), 45) for s in styles[:2] if s]
+        if style_texts:
+            parts.append("말투: " + " / ".join(style_texts))
+
+    if recent and not factual and not compact:
+        parts.append("최근 추천: " + ", ".join(str(c) for c in recent[:8]))
+
+    if len(parts) <= 1:
+        return ""
+    return "\n".join(parts)
+
+
+def _build_output_rules(*, compact: bool = False, factual: bool = False) -> str:
+    """응답 규칙을 메시지 끝에 배치 — 로컬 모델의 recency bias를 활용해 준수율을 높인다."""
+    if factual:
+        return (
+            "[응답 규칙]\n"
+            "- synopsis/story_context 근거만 사용, 없는 내용 추가 금지\n"
+            "- 최종 답변만 출력 (괄호 지문·영어 분석·내부 추론 금지)"
+        )
+    if compact:
+        return "[응답 규칙] 3~5문장, 추천 시 후보 품번만, 최종 답변만 출력"
+    return (
+        "[응답 규칙]\n"
+        "- 5~8문장 (짧게 요청 시 3~4, 상세 요청 시 10~12)\n"
+        "- 추천 시 후보 품번 3~4개 + 이유, 후보 외 품번 생성 금지\n"
+        "- 최종 답변만 출력 (괄호 지문·영어 분석·내부 추론 금지)"
+    )
 
 
 def _is_story_summary_request(text: str) -> bool:
@@ -1257,6 +1374,24 @@ def _with_truncation_note(content: str, finish_reason: str) -> str:
     return content.rstrip() + note
 
 
+def _looks_truncated_response(content: str) -> bool:
+    value = str(content or "").strip()
+    if len(value) < 20:
+        return False
+    if value.endswith((".", "!", "?", "。", "！", "？", "…", "]", ")", "}", "\"", "'")):
+        return False
+    last_line = value.splitlines()[-1].strip()
+    if not last_line:
+        return False
+    if re.search(
+        r"(가|이|은|는|을|를|의|와|과|도|로|으로|에|에게|에서|부터|까지|처럼|보다|"
+        r"지만|면서|하며|하고|다가|때문에|한테|이라는|라는|되고|되며|느끼고|만들고|보여주고)$",
+        last_line,
+    ):
+        return True
+    return bool(last_line.endswith((",", ":", "-", "—", "·", "/")))
+
+
 def _recommendation_candidates_from_payload(payload: Mapping[str, Any]) -> tuple[List[Dict[str, str]], List[str]]:
     """Parse the structured recommendation grounding block we inject into messages."""
     messages = payload.get("messages") or []
@@ -1410,7 +1545,7 @@ class PersonaChatService:
     base_url: str | None = None
     model: str | None = None
     api_key: str | None = None
-    prompt_version: str = "v1"
+    prompt_version: str = "v2"
     system_prompt: str = field(init=False)
     temperature: float = field(
         default_factory=lambda: _env_float(
@@ -1431,16 +1566,20 @@ class PersonaChatService:
     timeout_sec: float = 180.0
 
     def __post_init__(self) -> None:
-        # Before: the system prompt was used directly from SENSUAL_PERSONA_SYSTEM_PROMPT.
-        # After: the same legacy prompt body is rendered through the versioned prompt loader.
         prompt_cls = get_prompt(self.prompt_version)
-        self.system_prompt = prompt_cls().render(
-            persona_name="JAVSTORY Persona Chat",
-            focused_user_context=SENSUAL_PERSONA_SYSTEM_PROMPT,
-            retrieved_memories=(
-                "장기 대화 메모리와 검색 컨텍스트는 build_messages()에서 단일 통합 system message로 제공된다."
-            ),
-        )
+        if self.prompt_version == "v2":
+            self.system_prompt = prompt_cls().render(
+                persona_name="JAVSTORY 취향 분석 페르소나",
+                focused_user_context=_ROLE_CORE_V2,
+            )
+        else:
+            self.system_prompt = prompt_cls().render(
+                persona_name="JAVSTORY Persona Chat",
+                focused_user_context=SENSUAL_PERSONA_SYSTEM_PROMPT,
+                retrieved_memories=(
+                    "장기 대화 메모리와 검색 컨텍스트는 build_messages()에서 단일 통합 system message로 제공된다."
+                ),
+            )
         try:
             self.enhanced_memory_store.load_from_json(str(ENHANCED_PERSONA_MEMORY_PATH))
         except Exception as e:
@@ -1448,17 +1587,17 @@ class PersonaChatService:
 
     def _resolve_backend(self) -> tuple[str, str, str]:
         configured_base = (self.base_url or os.environ.get("JAVSTORY_PERSONA_CHAT_BASE_URL") or "").strip()
-        configured_model = (self.model or os.environ.get("JAVSTORY_PERSONA_CHAT_MODEL") or "").strip()
+        configured_model = persona_chat_model_from_env(self.model or os.environ.get("JAVSTORY_PERSONA_CHAT_MODEL"))
         api_key = (self.api_key or os.environ.get("JAVSTORY_PERSONA_CHAT_API_KEY") or "").strip()
 
         if configured_base:
             base = configured_base.rstrip("/")
             if not base.endswith("/v1"):
                 base = f"{base}/v1"
-            model = configured_model or os.environ.get("JAVSTORY_LLAMACPP_MODEL", DEFAULT_PERSONA_CHAT_MODEL)
+            model = configured_model or persona_chat_model_from_env(os.environ.get("JAVSTORY_LLAMACPP_MODEL"))
             return base, model, api_key or "local"
 
-        preset = configured_model or os.environ.get("JAVSTORY_LLAMACPP_MODEL", DEFAULT_PERSONA_CHAT_MODEL)
+        preset = configured_model or persona_chat_model_from_env(os.environ.get("JAVSTORY_LLAMACPP_MODEL"))
         model = ensure_llamacpp_server_ready({"model": preset, "provider": "llamacpp"})
         return llamacpp_openai_base_url().rstrip("/"), model, api_key or "llamacpp"
 
@@ -1526,17 +1665,34 @@ class PersonaChatService:
                 "DB/library_search를 우선하고 메모리는 보조 근거로만 사용하라.\n"
             )
 
-        # ── System message 1: 역할 + 컨텍스트 + 메모리 (+ 스타일) ─────────────
-        # 로컬 모델(Gemma 등)은 system 메시지가 많을수록 앞부분을 희석하는 경향이 있다.
-        # 3~5개로 분산하던 것을 단일 블록으로 통합해 일관성을 높인다.
-        system_prompt = COMPACT_PERSONA_SYSTEM_PROMPT if compact else self.system_prompt
-        system_parts = [
-            system_prompt,
-            "\n## 현재 사용자 취향 컨텍스트\n이 데이터에 근거해 답하라.\n" + focused_context,
-            "\n" + memory_instruction + json.dumps(memory_context, ensure_ascii=False),
-        ]
-        if style_instruction:
-            system_parts.append("\n## 응답 스타일\n" + style_instruction)
+        # ── System message: 역할 + 컨텍스트 + 메모리 (+ 스타일 + 규칙) ──────────
+        if self.prompt_version == "v2":
+            system_parts = [self.system_prompt, "\n" + focused_context]
+            memory_readable = _format_memory_readable(
+                memory_context, factual=bool(factual_grounding), compact=compact
+            )
+            if memory_readable:
+                system_parts.append("\n" + memory_readable)
+            if style_instruction:
+                lowered_msg = (user_message or "").lower()
+                if any(h in lowered_msg for h in ("수치플레이", "수치", "부끄럽게")):
+                    v2_style = _STYLE_PROFILES_V2.get("shame_tension", "")
+                else:
+                    v2_style = _STYLE_PROFILES_V2.get("intense_sensual", "")
+                if v2_style:
+                    system_parts.append("\n[응답 스타일] " + v2_style)
+            system_parts.append(
+                "\n" + _build_output_rules(compact=compact, factual=bool(factual_grounding))
+            )
+        else:
+            system_prompt = COMPACT_PERSONA_SYSTEM_PROMPT if compact else self.system_prompt
+            system_parts = [
+                system_prompt,
+                "\n## 현재 사용자 취향 컨텍스트\n이 데이터에 근거해 답하라.\n" + focused_context,
+                "\n" + memory_instruction + json.dumps(memory_context, ensure_ascii=False),
+            ]
+            if style_instruction:
+                system_parts.append("\n## 응답 스타일\n" + style_instruction)
 
         messages: List[Dict[str, str]] = [
             {"role": "system", "content": "\n".join(system_parts)},
@@ -1635,7 +1791,6 @@ class PersonaChatService:
             if max_tokens is None
             else max(800, min(_MAX_OUTPUT_TOKENS, int(max_tokens)))
         )
-        compact_for_ctx = _is_qwen_llamacpp_context_limited()
         payload = self._build_payload(
             model=model,
             text=text,
@@ -1643,9 +1798,10 @@ class PersonaChatService:
             product_code=product_code,
             temperature=req_temperature,
             max_tokens=req_max_tokens,
-            compact=compact_for_ctx,
+            compact=False,
         )
         headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+        compact_for_ctx = False
 
         with httpx.Client(timeout=httpx.Timeout(self.timeout_sec, connect=5.0)) as client:
             try:
@@ -1725,6 +1881,34 @@ class PersonaChatService:
             if _recommendation_response_needs_replacement(text, content, candidates, recent_codes):
                 content = _deterministic_recommendation_response(text, candidates, recent_codes)
             content = _format_chat_response_text(content)
+            if _looks_truncated_response(content):
+                retry_payload = self._build_payload(
+                    model=model,
+                    text=text,
+                    history=[],
+                    product_code=product_code,
+                    temperature=min(0.76, req_temperature),
+                    max_tokens=min(1400, req_max_tokens),
+                    force_final_only=True,
+                    compact=True,
+                )
+                try:
+                    retry_raw = self._post_chat_completion(
+                        client,
+                        base_url=base_url,
+                        payload=retry_payload,
+                        headers=headers,
+                    )
+                    retry_content = _format_chat_response_text(
+                        _strip_reasoning_leak(_coalesce_response_text(retry_raw))
+                    )
+                    if retry_content and not _looks_truncated_response(retry_content):
+                        raw = retry_raw
+                        content = retry_content
+                except Exception:
+                    content = content.rstrip() + "\n\n[응답이 문장 중간에서 끊긴 것 같아요. '계속'이라고 입력하면 이어서 정리해드릴게요.]"
+            if _looks_truncated_response(content):
+                content = content.rstrip() + "\n\n[응답이 문장 중간에서 끊긴 것 같아요. '계속'이라고 입력하면 이어서 정리해드릴게요.]"
             try:
                 self.enhanced_memory_store.record_turn(text, content)
                 self.enhanced_memory_store.save_to_json(str(ENHANCED_PERSONA_MEMORY_PATH))

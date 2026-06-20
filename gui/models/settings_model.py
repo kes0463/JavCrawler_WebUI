@@ -22,16 +22,18 @@ class SettingsModel(QObject):
     llamacppBinChanged = Signal()
     llamacppModelsDirChanged = Signal()
     llamacppModelChanged = Signal()
-    llamacppQwenGgufChanged = Signal()
     llamacppGemmaGgufChanged = Signal()
+    llamacppQwen14bGgufChanged = Signal()
+    llamacppQwen14bUncGgufChanged = Signal()
     llamacppCacheTypeKChanged = Signal()
     llamacppCacheTypeVChanged = Signal()
     llamacppCtxChanged = Signal()
     llamacppMaxTokensChanged = Signal()
     llamacppStopAfterJobChanged = Signal()
     llamacppPromptCacheChanged = Signal()
-    llamacppNCpuMoeChanged = Signal()
     llamacppAutoStartChanged = Signal()
+    personaCardPresetChanged = Signal()
+    personaChatModelChanged = Signal()
     mediaRootChanged = Signal()
     whisperModelChanged = Signal()
     translationProfileChanged = Signal()
@@ -86,9 +88,9 @@ class SettingsModel(QObject):
         p = (platform or "openai").strip().lower()
         if p == "llamacpp":
             return (
-                "qwen35",
-                "llamacpp:qwen3.5-35b-a3b",
-                "llamacpp:qwen3.5-35b-a3b-uncensored",
+                "budget",
+                "llamacpp:gemma-4-e4b",
+                "llamacpp:gemma-4-e4b-uncensored",
             )
         if p == "ollama":
             return ("budget", "ollama:gemma4:e4b", "ollama:gemma4:e4b")
@@ -103,14 +105,35 @@ class SettingsModel(QObject):
         raw = (value or "").strip().lower()
         if raw.startswith("llamacpp:"):
             raw = raw.split(":", 1)[1].strip()
+        if "qwen3-14" in raw or "qwen3_14" in raw or ("qwen" in raw and "14" in raw):
+            return "qwen3-14b"
+        if "qwen3.5" in raw or "35b" in raw or "a3b" in raw:
+            return "qwen3-14b"
         if "gemma" in raw:
             return "gemma-4-e4b"
-        return "qwen3.5-35b-a3b"
+        return "gemma-4-e4b"
+
+    @staticmethod
+    def _persona_card_preset_id(value: str | None) -> str:
+        return SettingsModel._llamacpp_base_model_id(value)
+
+    @staticmethod
+    def _persona_chat_model_id(value: str | None) -> str:
+        raw = (value or "").strip().lower()
+        if raw.startswith("llamacpp:"):
+            raw = raw.split(":", 1)[1].strip()
+        if "qwen3-14" in raw or "qwen3_14" in raw or ("qwen" in raw and "14" in raw):
+            return "qwen3-14b-uncensored"
+        if "qwen3.5" in raw or "35b" in raw or "a3b" in raw:
+            return "qwen3-14b-uncensored"
+        if "gemma" in raw:
+            return "gemma-4-e4b-uncensored"
+        return "gemma-4-e4b-uncensored"
 
     def _sync_llamacpp_translation_models_to_active(self, *, emit: bool = True) -> None:
         """Keep llama.cpp translation/correction choices on the selected base model."""
         base = self._llamacpp_base_model_id(str(getattr(self, "_llamacpp_model", "") or ""))
-        profile = "budget" if base.startswith("gemma") else "qwen35"
+        profile = "qwen3_14" if base == "qwen3-14b" else "budget"
         harvest = f"llamacpp:{base}"
         correction = f"llamacpp:{base}-uncensored"
 
@@ -128,23 +151,8 @@ class SettingsModel(QObject):
                 self.correctionProfileChanged.emit()
 
     def _apply_llamacpp_model_runtime_defaults(self, *, emit: bool = True) -> None:
-        """Avoid carrying dense-model runtime settings into the 35B MoE preset."""
-        base = self._llamacpp_base_model_id(str(getattr(self, "_llamacpp_model", "") or ""))
-        if not base.startswith("qwen"):
-            return
-        raw_ctx = str(getattr(self, "_llamacpp_ctx", "") or "").strip()
-        try:
-            ctx = int(raw_ctx) if raw_ctx else 0
-        except ValueError:
-            ctx = 0
-        if ctx <= 0 or ctx > 4096:
-            self._llamacpp_ctx = "4096"
-            if emit:
-                self.llamacppCtxChanged.emit()
-        if not str(getattr(self, "_llamacpp_n_cpu_moe", "") or "").strip():
-            self._llamacpp_n_cpu_moe = "24"
-            if emit:
-                self.llamacppNCpuMoeChanged.emit()
+        """Dense Gemma/Qwen3-14B presets share the generic runtime fields."""
+        return
 
     def _cache_platform_translation_values(self, platform: str) -> None:
         suffix = self._platform_env_suffix(platform)
@@ -243,9 +251,8 @@ class SettingsModel(QObject):
         # 1. API 및 미디어
         from javstory.config.app_config import LLAMACPP_BASE_URL, llm_platform_from_env
         from javstory.llm.llamacpp_backend import (
-            LLAMACPP_DEFAULT_CTX_MOE,
+            LLAMACPP_DEFAULT_CTX_DENSE,
             LLAMACPP_DEFAULT_MAX_TOKENS,
-            LLAMACPP_DEFAULT_N_CPU_MOE,
             LLAMACPP_DEFAULT_PROMPT_CACHE_MIB,
             LLAMACPP_SERVER_DEFAULT_PROMPT_CACHE_MIB,
         )
@@ -255,14 +262,26 @@ class SettingsModel(QObject):
         self._llamacpp_url = os.environ.get("JAVSTORY_LLAMACPP_URL", LLAMACPP_BASE_URL)
         self._llamacpp_bin = os.environ.get("JAVSTORY_LLAMACPP_BIN", "")
         self._llamacpp_models_dir = os.environ.get("JAVSTORY_LLAMACPP_MODELS_DIR", "")
-        self._llamacpp_model = os.environ.get("JAVSTORY_LLAMACPP_MODEL", "qwen3.5-35b-a3b")
-        self._llamacpp_qwen_gguf = os.environ.get("JAVSTORY_LLAMACPP_QWEN35_GGUF", "")
+        self._llamacpp_model = self._llamacpp_base_model_id(
+            os.environ.get("JAVSTORY_LLAMACPP_MODEL", "gemma-4-e4b")
+        )
+        self._persona_card_preset = self._persona_card_preset_id(
+            os.environ.get(
+                "JAVSTORY_PERSONA_CARD_PRESET",
+                os.environ.get("JAVSTORY_LLAMACPP_PRESET", self._llamacpp_model),
+            )
+        )
+        self._persona_chat_model = self._persona_chat_model_id(
+            os.environ.get("JAVSTORY_PERSONA_CHAT_MODEL", "gemma-4-e4b-uncensored")
+        )
         self._llamacpp_gemma_gguf = os.environ.get("JAVSTORY_LLAMACPP_GEMMA4_GGUF", "")
+        self._llamacpp_qwen14b_gguf = os.environ.get("JAVSTORY_LLAMACPP_QWEN3_14B_GGUF", "")
+        self._llamacpp_qwen14b_unc_gguf = os.environ.get("JAVSTORY_LLAMACPP_QWEN3_14B_UNC_GGUF", "")
         self._llamacpp_cache_type_k = os.environ.get("JAVSTORY_LLAMACPP_CACHE_TYPE_K", "turbo3")
         self._llamacpp_cache_type_v = os.environ.get("JAVSTORY_LLAMACPP_CACHE_TYPE_V", "q8_0")
         self._llamacpp_auto_start = _env_bool("JAVSTORY_LLAMACPP_AUTO_START", True)
         _ctx_raw = (os.environ.get("JAVSTORY_LLAMACPP_CTX", "") or "").strip()
-        self._llamacpp_ctx = _ctx_raw or str(LLAMACPP_DEFAULT_CTX_MOE)
+        self._llamacpp_ctx = _ctx_raw or str(LLAMACPP_DEFAULT_CTX_DENSE)
         _mt_raw = (
             (os.environ.get("JAVSTORY_TRANSLATION_LLAMACPP_MAX_TOKENS", "") or "").strip()
             or (os.environ.get("JAVSTORY_CORRECTION_LLAMACPP_MAX_TOKENS", "") or "").strip()
@@ -281,8 +300,6 @@ class SettingsModel(QObject):
         self._llamacpp_prompt_cache_mib = (
             LLAMACPP_SERVER_DEFAULT_PROMPT_CACHE_MIB if self._llamacpp_prompt_cache else 0
         )
-        _ncm = (os.environ.get("JAVSTORY_LLAMACPP_N_CPU_MOE", "") or "").strip()
-        self._llamacpp_n_cpu_moe = _ncm or str(LLAMACPP_DEFAULT_N_CPU_MOE)
         self._media_root = os.environ.get("JAVSTORY_MEDIA_ROOT", str(E_MEDIA_ROOT))
         
         # 2. 모델 및 번역
@@ -474,30 +491,17 @@ class SettingsModel(QObject):
 
     @Property(str, notify=llamacppModelChanged)
     def llamacppModel(self) -> str:
-        return str(getattr(self, "_llamacpp_model", "qwen3.5-35b-a3b") or "qwen3.5-35b-a3b")
+        return str(getattr(self, "_llamacpp_model", "gemma-4-e4b") or "gemma-4-e4b")
 
     @llamacppModel.setter  # type: ignore[attr-defined]
     def llamacppModel(self, v: str):
-        s = (v or "qwen3.5-35b-a3b").strip().lower()
-        if s not in ("qwen3.5-35b-a3b", "gemma-4-e4b"):
-            s = "qwen3.5-35b-a3b"
+        s = self._llamacpp_base_model_id(v)
         if s != getattr(self, "_llamacpp_model", ""):
             self._llamacpp_model = s
             if str(getattr(self, "_llm_platform", "") or "").lower() == "llamacpp":
                 self._sync_llamacpp_translation_models_to_active()
                 self._apply_llamacpp_model_runtime_defaults()
             self.llamacppModelChanged.emit()
-
-    @Property(str, notify=llamacppQwenGgufChanged)
-    def llamacppQwenGguf(self) -> str:
-        return str(getattr(self, "_llamacpp_qwen_gguf", "") or "")
-
-    @llamacppQwenGguf.setter  # type: ignore[attr-defined]
-    def llamacppQwenGguf(self, v: str):
-        s = str(v or "")
-        if s != getattr(self, "_llamacpp_qwen_gguf", ""):
-            self._llamacpp_qwen_gguf = s
-            self.llamacppQwenGgufChanged.emit()
 
     @Property(str, notify=llamacppGemmaGgufChanged)
     def llamacppGemmaGguf(self) -> str:
@@ -509,6 +513,64 @@ class SettingsModel(QObject):
         if s != getattr(self, "_llamacpp_gemma_gguf", ""):
             self._llamacpp_gemma_gguf = s
             self.llamacppGemmaGgufChanged.emit()
+
+    @Property(str, notify=llamacppQwen14bGgufChanged)
+    def llamacppQwen14bGguf(self) -> str:
+        return str(getattr(self, "_llamacpp_qwen14b_gguf", "") or "")
+
+    @llamacppQwen14bGguf.setter  # type: ignore[attr-defined]
+    def llamacppQwen14bGguf(self, v: str):
+        s = str(v or "")
+        if s != getattr(self, "_llamacpp_qwen14b_gguf", ""):
+            self._llamacpp_qwen14b_gguf = s
+            self.llamacppQwen14bGgufChanged.emit()
+
+    @Property(str, notify=llamacppQwen14bUncGgufChanged)
+    def llamacppQwen14bUncGguf(self) -> str:
+        return str(getattr(self, "_llamacpp_qwen14b_unc_gguf", "") or "")
+
+    @llamacppQwen14bUncGguf.setter  # type: ignore[attr-defined]
+    def llamacppQwen14bUncGguf(self, v: str):
+        s = str(v or "")
+        if s != getattr(self, "_llamacpp_qwen14b_unc_gguf", ""):
+            self._llamacpp_qwen14b_unc_gguf = s
+            self.llamacppQwen14bUncGgufChanged.emit()
+
+    @Property(str, notify=personaCardPresetChanged)
+    def personaCardPreset(self) -> str:
+        return str(getattr(self, "_persona_card_preset", "gemma-4-e4b") or "gemma-4-e4b")
+
+    @personaCardPreset.setter  # type: ignore[attr-defined]
+    def personaCardPreset(self, v: str):
+        s = self._persona_card_preset_id(v)
+        if s != getattr(self, "_persona_card_preset", ""):
+            self._persona_card_preset = s
+            self.personaCardPresetChanged.emit()
+
+    @Property(str, notify=personaChatModelChanged)
+    def personaChatModel(self) -> str:
+        return str(getattr(self, "_persona_chat_model", "gemma-4-e4b-uncensored") or "gemma-4-e4b-uncensored")
+
+    @personaChatModel.setter  # type: ignore[attr-defined]
+    def personaChatModel(self, v: str):
+        s = self._persona_chat_model_id(v)
+        if s != getattr(self, "_persona_chat_model", ""):
+            self._persona_chat_model = s
+            self.personaChatModelChanged.emit()
+
+    @Property("QVariantList", notify=personaCardPresetChanged)
+    def availablePersonaCardPresets(self):
+        return [
+            {"id": "gemma-4-e4b", "label": "Gemma-4-E4B"},
+            {"id": "qwen3-14b", "label": "Qwen3-14B"},
+        ]
+
+    @Property("QVariantList", notify=personaChatModelChanged)
+    def availablePersonaChatModels(self):
+        return [
+            {"id": "gemma-4-e4b-uncensored", "label": "Gemma-4-E4B Uncensored"},
+            {"id": "qwen3-14b-uncensored", "label": "Qwen3-14B Uncensored"},
+        ]
 
     @Property(str, notify=llamacppCacheTypeKChanged)
     def llamacppCacheTypeK(self) -> str:
@@ -591,17 +653,6 @@ class SettingsModel(QObject):
                 LLAMACPP_SERVER_DEFAULT_PROMPT_CACHE_MIB if b else 0
             )
             self.llamacppPromptCacheChanged.emit()
-
-    @Property(str, notify=llamacppNCpuMoeChanged)
-    def llamacppNCpuMoe(self) -> str:
-        return str(getattr(self, "_llamacpp_n_cpu_moe", "24") or "24")
-
-    @llamacppNCpuMoe.setter  # type: ignore[attr-defined]
-    def llamacppNCpuMoe(self, v: str):
-        s = (v or "").strip()
-        if s != getattr(self, "_llamacpp_n_cpu_moe", ""):
-            self._llamacpp_n_cpu_moe = s
-            self.llamacppNCpuMoeChanged.emit()
 
     @Property(str, notify=mediaRootChanged)
     def mediaRoot(self): return self._media_root
@@ -1121,11 +1172,15 @@ class SettingsModel(QObject):
                 )
                 set_env_runtime_value("JAVSTORY_LLAMACPP_MODEL", self._llamacpp_model)
             else:
-                set_env_runtime_value("JAVSTORY_LLAMACPP_MODEL", str(getattr(self, "_llamacpp_model", "qwen3.5-35b-a3b")))
-            if getattr(self, "_llamacpp_qwen_gguf", "").strip():
-                set_env_runtime_value("JAVSTORY_LLAMACPP_QWEN35_GGUF", self._llamacpp_qwen_gguf.strip())
+                set_env_runtime_value("JAVSTORY_LLAMACPP_MODEL", str(getattr(self, "_llamacpp_model", "gemma-4-e4b")))
+            set_env_runtime_value("JAVSTORY_PERSONA_CARD_PRESET", self._persona_card_preset)
+            set_env_runtime_value("JAVSTORY_PERSONA_CHAT_MODEL", self._persona_chat_model)
             if getattr(self, "_llamacpp_gemma_gguf", "").strip():
                 set_env_runtime_value("JAVSTORY_LLAMACPP_GEMMA4_GGUF", self._llamacpp_gemma_gguf.strip())
+            if getattr(self, "_llamacpp_qwen14b_gguf", "").strip():
+                set_env_runtime_value("JAVSTORY_LLAMACPP_QWEN3_14B_GGUF", self._llamacpp_qwen14b_gguf.strip())
+            if getattr(self, "_llamacpp_qwen14b_unc_gguf", "").strip():
+                set_env_runtime_value("JAVSTORY_LLAMACPP_QWEN3_14B_UNC_GGUF", self._llamacpp_qwen14b_unc_gguf.strip())
             set_env_runtime_value("JAVSTORY_LLAMACPP_CACHE_TYPE_K", str(getattr(self, "_llamacpp_cache_type_k", "turbo3")))
             set_env_runtime_value("JAVSTORY_LLAMACPP_CACHE_TYPE_V", str(getattr(self, "_llamacpp_cache_type_v", "q8_0")))
             set_env_runtime_value(
@@ -1149,9 +1204,6 @@ class SettingsModel(QObject):
 
                 pcm = LLAMACPP_SERVER_DEFAULT_PROMPT_CACHE_MIB
             set_env_runtime_value("JAVSTORY_LLAMACPP_PROMPT_CACHE_MB", str(pcm))
-            ncm = str(getattr(self, "_llamacpp_n_cpu_moe", "") or "").strip()
-            if ncm:
-                set_env_runtime_value("JAVSTORY_LLAMACPP_N_CPU_MOE", ncm)
 
             self.toastMessage.emit("API 키 저장 완료", "success")
         except Exception as e:
@@ -1207,6 +1259,8 @@ class SettingsModel(QObject):
                 self._correction_profile,
             )
             set_env_runtime_value("JAVSTORY_LLAMACPP_MODEL", self._llamacpp_model)
+        set_env_runtime_value("JAVSTORY_PERSONA_CARD_PRESET", self._persona_card_preset)
+        set_env_runtime_value("JAVSTORY_PERSONA_CHAT_MODEL", self._persona_chat_model)
         try:
             from javstory.translation.translation_notes import save_global_note
             save_global_note(str(getattr(self, "_translation_note_global", "") or ""))

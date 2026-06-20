@@ -6,10 +6,12 @@ from typing import Type
 
 from javstory.persona.prompts.base_system_prompt import BaseSystemPrompt
 from javstory.persona.prompts.v1_cot_prompt import V1CoTPrompt
+from javstory.persona.prompts.v2_compact_prompt import V2CompactPrompt
 
 _PROMPT_REGISTRY: dict[str, Type[BaseSystemPrompt]] = {
     "base": BaseSystemPrompt,
     "v1": V1CoTPrompt,
+    "v2": V2CompactPrompt,
 }
 
 

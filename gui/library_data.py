@@ -364,17 +364,18 @@ def row_to_summary(row: Any) -> LibraryWorkSummary:
     return _row_to_summary_impl(row, fast=False)
 
 
-def row_to_summary_fast(row: Any) -> LibraryWorkSummary:
-    """I/O를 최소화한 고속 버전 (그리드 목록용)."""
-    return _row_to_summary_impl(row, fast=True)
+def row_to_summary_fast(row: Any, *, flags: dict | None = None) -> LibraryWorkSummary:
+    """I/O를 최소화한 고속 버전 (그리드 목록용).
+
+    flags가 제공되면 file_flag_cache에서 읽은 값을 사용해 HDD I/O를 완전히 생략한다.
+    flags가 None이면 기존 방식(파일 시스템 직접 확인)으로 fallback.
+    """
+    return _row_to_summary_impl(row, fast=True, flags=flags)
 
 
-def _row_to_summary_impl(row: Any, fast: bool = False) -> LibraryWorkSummary:
+def _row_to_summary_impl(row: Any, fast: bool = False, flags: dict | None = None) -> LibraryWorkSummary:
     """SQLAlchemy JAVMetadata 행 → LibraryWorkSummary."""
     pc = (getattr(row, "product_code", None) or "").strip()
-    
-    # 목록(그리드)에서는 canonical JSON 파싱 비용을 생략하고 존재 여부만 사용한다.
-    has_c, n_sc, n_st, prev = canonical_quick_stats(pc, fast=fast)
 
     title_ko = (getattr(row, "title_ko", None) or getattr(row, "title", None) or "").strip()
     title_ja = (getattr(row, "title_ja", None) or getattr(row, "original_title", None) or "").strip()
@@ -384,42 +385,56 @@ def _row_to_summary_impl(row: Any, fast: bool = False) -> LibraryWorkSummary:
     cover_url = getattr(row, "cover_image_url", None)
     folder_path_raw = getattr(row, "folder_path", None)
     folder_path = (folder_path_raw or "").strip() or None
-
-    has_transcription = False
-    has_translation = False
-    has_ja_srt = False
-    has_ko_srt = False
-    lamp_hardcoded = False
+    db_hardcoded = bool(getattr(row, "is_hardcoded", False))
     lamp_mopa = bool(getattr(row, "is_mopa", False))
 
-    # [핵심 최적화] 목록(그리드)에서는 전체 탐색을 피한다.
-    # 다만 폴더가 연결돼 있는 경우에는 "연결 폴더 내부만" 빠르게 확인하여
-    # 사이드카 자막(.ja.srt/.ko.srt/.srt) 존재에 따른 램프/STT·Subtitle 트리거가 동작하도록 한다.
-    if fast:
-        vp = guess_video_path_for_product_fast(pc, folder_path) if folder_path else None
-    else:
-        vp = guess_video_path_for_product(pc, folder_path)
-    db_hardcoded = bool(getattr(row, "is_hardcoded", False))
-    
-    try:
-        lamp_stt, lamp_sub, lamp_hardcoded = compute_library_lamp_flags(
-            product_code=pc,
-            video_path=vp,
-            folder_path=folder_path,
-            db_is_hardcoded=db_hardcoded,
-            fast=fast,
-            has_harvest=has_harvest,
-        )
+    if flags is not None:
+        # ── 캐시 경로: HDD I/O 없이 DB에서 읽은 플래그 사용 ──────────────
+        has_c = bool(flags.get("has_canonical", 0))
+        n_sc, n_st, prev = 0, 0, ""
+        vp_str = flags.get("video_path")
+        vp = Path(vp_str) if vp_str else None
+        lamp_stt = bool(flags.get("lamp_stt", 0))
+        lamp_sub = bool(flags.get("lamp_sub", 0))
+        lamp_hardcoded = db_hardcoded
         has_ja_srt = lamp_stt
         has_ko_srt = lamp_sub
         has_transcription = lamp_stt
         has_translation = lamp_sub
-    except Exception:
-        has_transcription = False
-        has_translation = False
+        has_story_context = bool(flags.get("has_story", 0))
+    else:
+        # ── Fallback: 기존 방식 (캐시 미스 시 파일 시스템 직접 확인) ────────
+        has_c, n_sc, n_st, prev = canonical_quick_stats(pc, fast=fast)
+        if fast:
+            vp = guess_video_path_for_product_fast(pc, folder_path) if folder_path else None
+        else:
+            vp = guess_video_path_for_product(pc, folder_path)
+        lamp_hardcoded = False
         has_ja_srt = False
         has_ko_srt = False
-        lamp_hardcoded = db_hardcoded
+        has_transcription = False
+        has_translation = False
+        try:
+            lamp_stt, lamp_sub, lamp_hardcoded = compute_library_lamp_flags(
+                product_code=pc,
+                video_path=vp,
+                folder_path=folder_path,
+                db_is_hardcoded=db_hardcoded,
+                fast=fast,
+                has_harvest=has_harvest,
+            )
+            has_ja_srt = lamp_stt
+            has_ko_srt = lamp_sub
+            has_transcription = lamp_stt
+            has_translation = lamp_sub
+        except Exception:
+            lamp_hardcoded = db_hardcoded
+        has_story_context = False
+        try:
+            from javstory.translation.story_grok_module import has_disk_grok_story_cache
+            has_story_context = bool(has_disk_grok_story_cache(pc))
+        except Exception:
+            pass
 
     stage = _pipeline_stage(
         has_harvest=has_harvest,
@@ -430,17 +445,8 @@ def _row_to_summary_impl(row: Any, fast: bool = False) -> LibraryWorkSummary:
 
     eff = resolve_cover_path(pc, cover_local)
     eff_s = str(eff) if eff else None
-    
-    # 커버 다운로드 필요 여부도 fast 모드에서는 생략 가능 (UI에서 처리)
+
     need_dl = False if fast else cover_needs_download(pc, cover_url, cover_local)
-
-    has_story_context = False
-    try:
-        from javstory.translation.story_grok_module import has_disk_grok_story_cache
-
-        has_story_context = bool(has_disk_grok_story_cache(pc))
-    except Exception:
-        has_story_context = False
 
     return LibraryWorkSummary(
         product_code=pc,
@@ -590,7 +596,20 @@ def load_library_summaries_fast_priority_paged(
         str(getattr(row, "product_code", "") or "").strip().upper(): row
         for row in rows
     }
-    return [row_to_summary_fast(by_code[pc]) for pc in page_codes if pc in by_code]
+
+    # 파일 플래그 캐시 일괄 로드 (단일 쿼리, HDD I/O 없음)
+    flags_by_code: dict[str, dict] = {}
+    try:
+        from javstory.library.file_flag_scanner import load_flags_for_codes
+        flags_by_code = load_flags_for_codes(session, page_codes)
+    except Exception:
+        pass
+
+    return [
+        row_to_summary_fast(by_code[pc], flags=flags_by_code.get(pc))
+        for pc in page_codes
+        if pc in by_code
+    ]
 
 
 SortKey = Literal["updated", "product_code", "release_date", "scene_count"]

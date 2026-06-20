@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import os
 import hashlib
+import threading
+import time
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, List
@@ -21,6 +23,67 @@ _CACHE_PATH = Path(__file__).resolve().parents[2] / "data" / "cache" / "persona_
 _CACHE_TTL_DAYS = 7
 _SCHEMA_VERSION = 3
 
+# llama.cpp GBNF — 루트를 JSON object로 강제, 여분 텍스트 원천 차단
+_JSON_OBJECT_GRAMMAR = r"""root   ::= object
+value  ::= object | array | string | number | ("true" | "false" | "null") ws
+
+object ::=
+  "{" ws (
+            string ws ":" ws value
+    ("," ws string ws ":" ws value)*
+  )? "}" ws
+
+array  ::=
+  "[" ws (
+            value
+    ("," ws value)*
+  )? "]" ws
+
+string ::=
+  "\"" (
+    [^"\\\x7F\x00-\x1F] |
+    "\\" (["\\/bfnrt] | "u" [0-9a-fA-F] [0-9a-fA-F] [0-9a-fA-F] [0-9a-fA-F])
+  )* "\"" ws
+
+number ::= ("-"? ([0-9] | [1-9] [0-9]*)) ("." [0-9]+)? (([eE] [-+]? [0-9]+))? ws
+
+ws ::= ([ \t\n] ws)?"""
+
+# 컨텍스트 프리웜 캐시 — 앱 시작 시 미리 계산해 재생성 대기를 줄인다
+_ctx_cache_lock = threading.Lock()
+_ctx_cache: Dict[str, Any] | None = None
+_ctx_cache_ts: float = 0.0
+_CTX_CACHE_MAX_AGE = 300.0  # 5분 이내면 재사용
+
+
+def prewarm_persona_context() -> None:
+    """백그라운드에서 persona context를 미리 계산해 두는 함수. app.py에서 호출."""
+    global _ctx_cache, _ctx_cache_ts
+    try:
+        ctx = _augment_context_with_interaction_signals(build_persona_context())
+        with _ctx_cache_lock:
+            _ctx_cache = ctx
+            _ctx_cache_ts = time.monotonic()
+        print("[PersonaCard] 컨텍스트 프리웜 완료")
+    except Exception as exc:
+        print(f"[PersonaCard] 컨텍스트 프리웜 실패 (무시): {exc}")
+
+
+def _pop_prewarmed_context() -> Dict[str, Any] | None:
+    """프리웜된 컨텍스트를 소비해 반환. 5분 초과 또는 없으면 None."""
+    global _ctx_cache, _ctx_cache_ts
+    with _ctx_cache_lock:
+        if _ctx_cache is None:
+            return None
+        age = time.monotonic() - _ctx_cache_ts
+        if age > _CTX_CACHE_MAX_AGE:
+            _ctx_cache = None
+            return None
+        ctx = _ctx_cache
+        _ctx_cache = None  # 소비 후 비움
+    print(f"[PersonaCard] 프리웜 컨텍스트 재사용 (age={age:.0f}s)")
+    return ctx
+
 
 def _env_int(name: str, default: int, min_value: int, max_value: int) -> int:
     try:
@@ -36,6 +99,23 @@ def _cache_ttl_days() -> int:
 
 def _cache_watch_delta_threshold() -> int:
     return _env_int("JAVSTORY_PERSONA_CACHE_WATCH_DELTA", 10, 1, 200)
+
+
+def persona_card_model_from_env() -> str:
+    raw = (
+        (os.environ.get("JAVSTORY_PERSONA_CARD_PRESET", "") or "").strip()
+        or (os.environ.get("JAVSTORY_LLAMACPP_PRESET", "") or "").strip()
+        or (os.environ.get("JAVSTORY_LLAMACPP_MODEL", "") or "").strip()
+    ).lower()
+    if raw.startswith("llamacpp:"):
+        raw = raw.split(":", 1)[1].strip()
+    if "qwen3-14" in raw or "qwen3_14" in raw or ("qwen" in raw and "14" in raw):
+        return "qwen3-14b"
+    if "qwen3.5" in raw or "35b" in raw or "a3b" in raw:
+        return "qwen3-14b"
+    if "gemma" in raw:
+        return "gemma-4-e4b"
+    return "gemma-4-e4b"
 
 
 def _context_cache_metrics(ctx: Dict[str, Any]) -> Dict[str, Any]:
@@ -72,6 +152,9 @@ def _cache_valid(payload: Dict[str, Any], ctx: Dict[str, Any] | None = None) -> 
         return has_body if ctx is None else False
     if not has_body:
         return False
+    cached_model = str(payload.get("model") or "").strip()
+    if cached_model and persona_card_model_from_env() != persona_card_model_from_env_value(cached_model):
+        return False
     if ctx is None:
         return True
 
@@ -86,6 +169,7 @@ def _cache_valid(payload: Dict[str, Any], ctx: Dict[str, Any] | None = None) -> 
 
 def _context_fingerprint(ctx: Dict[str, Any]) -> str:
     basis = {
+        "persona_card_model": persona_card_model_from_env(),
         "stats": ctx.get("stats") or {},
         "sample_groups": ctx.get("sample_groups") or {},
         "top_genres": ctx.get("top_genres") or [],
@@ -98,6 +182,19 @@ def _context_fingerprint(ctx: Dict[str, Any]) -> str:
     }
     raw = json.dumps(basis, ensure_ascii=False, sort_keys=True, default=str)
     return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:16]
+
+
+def persona_card_model_from_env_value(value: str | None) -> str:
+    raw = (value or "").strip().lower()
+    if raw.startswith("llamacpp:"):
+        raw = raw.split(":", 1)[1].strip()
+    if "qwen3-14" in raw or "qwen3_14" in raw or ("qwen" in raw and "14" in raw):
+        return "qwen3-14b"
+    if "qwen3.5" in raw or "35b" in raw or "a3b" in raw:
+        return "legacy-qwen35-a3b"
+    if "gemma" in raw:
+        return "gemma-4-e4b"
+    return "gemma-4-e4b"
 
 
 def _semantic_fingerprint(ctx: Dict[str, Any]) -> str:
@@ -371,6 +468,7 @@ def _fallback_v2(ctx: Dict[str, Any] | None = None) -> Dict[str, Any]:
             "input_fingerprint": _context_fingerprint(ctx or {}),
             "semantic_fingerprint": _semantic_fingerprint(ctx or {}),
             "cache_metrics": _context_cache_metrics(ctx or {}),
+            "model": persona_card_model_from_env(),
             "embedding_model": ((ctx or {}).get("semantic_profile") or {}).get("model", ""),
             "generated_reason": "fallback",
         },
@@ -422,21 +520,22 @@ def _context_for_prompt(ctx: Dict[str, Any]) -> str:
 
 
 def synthesize_persona_v3(ctx: Dict[str, Any]) -> Dict[str, Any]:
-    """Ollama JSON 합성 → v3 payload."""
-    from javstory.translation.story_context_prompts import parse_grok_story_json
+    """llama.cpp JSON 합성 → v3 payload (GBNF grammar로 JSON 출력 보장)."""
+    from javstory.llm.llamacpp_backend import ensure_llamacpp_server_ready, llamacpp_openai_base_url
 
-    model = (os.environ.get("JAVSTORY_OLLAMA_MODEL", "") or "").strip() or "qwen3:8b"
+    model = persona_card_model_from_env()
     embedding_model = ((ctx.get("semantic_profile") or {}).get("model") or "").strip()
     fingerprint = _context_fingerprint(ctx)
     semantic_fingerprint = _semantic_fingerprint(ctx)
     cache_metrics = _context_cache_metrics(ctx)
-    prompt = (
-        "당신은 성인 미디어 라이브러리의 취향 분석가입니다. 아래 JSON 통계·샘플을 바탕으로 "
-        "사용자 페르소나를 한국어로 작성하세요. 장르명 중 유통/화질/프로모션/포맷 속성은 취향으로 해석하지 마세요. "
-        "표현은 관능적이고 직설적으로 하되 비속어와 과장된 농담은 피하고, 실제로 끌리는 장면 분위기·관계성·텐션·상황 취향을 짚으세요. "
-        "interaction_signals의 챗 메모리와 카드 피드백은 최신 사용자 교정 신호이므로, 통계와 충돌하지 않는 범위에서 우선 반영하세요. "
-        "negative 피드백이 많으면 기존 페르소나 문구를 반복하지 말고 더 조심스럽게 수정하세요. "
-        "반드시 유효한 JSON 객체 하나만 출력하세요.\n\n"
+    system_msg = (
+        "당신은 성인 미디어 라이브러리의 취향 분석가입니다. "
+        "장르명 중 유통/화질/프로모션/포맷 속성은 취향으로 해석하지 마세요. "
+        "표현은 관능적이고 직설적으로 하되 비속어와 과장된 농담은 피하세요. "
+        "interaction_signals의 챗 메모리와 카드 피드백은 최신 교정 신호이므로 우선 반영하세요."
+    )
+    user_msg = (
+        "아래 JSON 통계·샘플을 바탕으로 사용자 페르소나를 한국어로 작성하세요.\n\n"
         "스키마:\n"
         '{"persona_type":"짧은 유형명 예: 텐션 몰입형 감상자",'
         '"summary":"2~4문장 본문",'
@@ -452,17 +551,34 @@ def synthesize_persona_v3(ctx: Dict[str, Any]) -> Dict[str, Any]:
 
     try:
         import httpx
-        from javstory.config.app_config import OLLAMA_BASE_URL
+
+        ensure_llamacpp_server_ready({"model": model})
+        base_url = llamacpp_openai_base_url()
 
         r = httpx.post(
-            f"{OLLAMA_BASE_URL.rstrip('/')}/api/generate",
-            json={"model": model, "prompt": prompt, "stream": False},
+            f"{base_url.rstrip('/')}/chat/completions",
+            json={
+                "model": model,
+                "messages": [
+                    {"role": "system", "content": system_msg},
+                    {"role": "user", "content": user_msg},
+                ],
+                "grammar": _JSON_OBJECT_GRAMMAR,
+                "stream": False,
+            },
             timeout=120.0,
         )
         r.raise_for_status()
-        raw_text = (r.json().get("response") or "").strip()
-        parsed = parse_grok_story_json(raw_text)
-        if parsed:
+        raw_text = ((r.json().get("choices") or [{}])[0].get("message", {}).get("content") or "").strip()
+
+        # grammar가 JSON을 보장하므로 json.loads() 직접 사용, parse_grok_story_json은 폴백
+        try:
+            parsed = json.loads(raw_text)
+        except json.JSONDecodeError:
+            from javstory.translation.story_context_prompts import parse_grok_story_json
+            parsed = parse_grok_story_json(raw_text)
+
+        if parsed and isinstance(parsed, dict):
             parsed["coverage"] = ctx.get("coverage") or {}
             parsed["coverage_detail"] = ctx.get("coverage") or {}
             parsed["sample_groups"] = ctx.get("sample_groups") or {}
@@ -473,8 +589,8 @@ def synthesize_persona_v3(ctx: Dict[str, Any]) -> Dict[str, Any]:
             parsed["cache_metrics"] = cache_metrics
             parsed["model"] = model
             parsed["embedding_model"] = embedding_model
-            parsed["generated_reason"] = "ollama_deep"
-            return _normalize_v2_payload(parsed, "ollama")
+            parsed["generated_reason"] = "llamacpp_deep"
+            return _normalize_v2_payload(parsed, "llamacpp")
     except Exception:
         pass
 
@@ -502,22 +618,28 @@ def _synthesize_v1_light() -> Dict[str, Any]:
     source = "fallback"
     try:
         import httpx
-        from javstory.config.app_config import OLLAMA_BASE_URL
+        from javstory.llm.llamacpp_backend import ensure_llamacpp_server_ready, llamacpp_openai_base_url
 
+        model = persona_card_model_from_env()
         prompt = (
             "다음 통계로 성인 취향을 관능적이지만 깔끔한 한국어 2~3문장으로 요약. 이모지 1개 이내.\n\n"
             + "\n".join(lines)
         )
-        model = (os.environ.get("JAVSTORY_OLLAMA_MODEL", "") or "").strip() or "qwen3:8b"
+        ensure_llamacpp_server_ready({"model": model})
+        base_url = llamacpp_openai_base_url()
         r = httpx.post(
-            f"{OLLAMA_BASE_URL.rstrip('/')}/api/generate",
-            json={"model": model, "prompt": prompt, "stream": False},
+            f"{base_url.rstrip('/')}/chat/completions",
+            json={
+                "model": model,
+                "messages": [{"role": "user", "content": prompt}],
+                "stream": False,
+            },
             timeout=90.0,
         )
         r.raise_for_status()
-        body = (r.json().get("response") or "").strip()
+        body = (((r.json().get("choices") or [{}])[0].get("message", {}).get("content")) or "").strip()
         if body:
-            source = "ollama"
+            source = "llamacpp"
     except Exception:
         body = ""
 
@@ -541,6 +663,7 @@ def _synthesize_v1_light() -> Dict[str, Any]:
                 "completed": int(stats.get("completed") or 0),
                 "sample_codes": [],
             },
+            "model": model,
             "generated_reason": "light",
         },
         source,
@@ -661,7 +784,8 @@ def get_persona_card(
 
     if persona_deep_enabled():
         if ctx is None:
-            ctx = _augment_context_with_interaction_signals(build_persona_context())
+            # 프리웜된 컨텍스트가 있으면 재사용, 없으면 새로 계산
+            ctx = _pop_prewarmed_context() or _augment_context_with_interaction_signals(build_persona_context())
         payload = synthesize_persona_v3(ctx)
     else:
         payload = _synthesize_v1_light()

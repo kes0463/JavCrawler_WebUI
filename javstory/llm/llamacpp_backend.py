@@ -5,16 +5,15 @@ llama.cpp + TurboQuant KV 캐시 — subprocess ``llama-server`` + OpenAI 호환
   JAVSTORY_LLAMACPP_BIN          llama-server 실행 파일 경로
   JAVSTORY_LLAMACPP_URL          OpenAI 호환 base (기본 http://127.0.0.1:8081)
   JAVSTORY_LLAMACPP_HOST / PORT
-  JAVSTORY_LLAMACPP_MODEL        프리셋 id (qwen3.5-35b-a3b | gemma-4-e4b)
+  JAVSTORY_LLAMACPP_MODEL        프리셋 id (gemma-4-e4b | qwen3-14b)
   JAVSTORY_LLAMACPP_*_GGUF       프리셋별 GGUF 경로
   JAVSTORY_LLAMACPP_CACHE_TYPE_K / _V   TurboQuant (예: turbo3, q8_0)
   JAVSTORY_LLAMACPP_N_GPU_LAYERS (-ngl, 미설정 시 -fit on 으로 VRAM 자동 맞춤)
   JAVSTORY_LLAMACPP_FIT          on|off (기본 on, N_GPU 미설정 시)
-  JAVSTORY_LLAMACPP_CTX          (-c, MoE 12GB VRAM 권장 4096)
+  JAVSTORY_LLAMACPP_CTX          (-c, 기본 8192)
   JAVSTORY_TRANSLATION_LLAMACPP_MAX_TOKENS / JAVSTORY_CORRECTION_LLAMACPP_MAX_TOKENS (기본 3072)
   JAVSTORY_LLAMACPP_STOP_AFTER_JOB  1|0 (파이프라인 후 llama-server 종료)
   JAVSTORY_LLAMACPP_PROMPT_CACHE_MB  프롬프트 캐시 RAM 상한 MiB (0=비활성, 기본 0)
-  JAVSTORY_LLAMACPP_N_CPU_MOE      MoE 프리셋만: --n-cpu-moe (기본 24, 0/off=미전달)
   JAVSTORY_LLAMACPP_AUTO_START   1|0
 """
 
@@ -22,6 +21,7 @@ from __future__ import annotations
 
 import atexit
 import os
+import socket
 import subprocess
 import sys
 import threading
@@ -37,6 +37,7 @@ import httpx
 _lock = threading.Lock()
 _server_proc: subprocess.Popen | None = None
 _active_preset_id: Optional[str] = None
+_active_base_url: Optional[str] = None
 _log_path: Optional[Path] = None
 _last_activity_at: float = time.time()
 _active_requests: int = 0
@@ -46,15 +47,65 @@ _idle_shutdown_logged = False
 
 LoggerFunc = Callable[[str], Any]
 
-# 12GB VRAM + 32GB RAM 환경 권장 (35B MoE Q4)
+# 12GB VRAM + 32GB RAM 환경 권장
 LLAMACPP_DEFAULT_MAX_TOKENS = 3072
-LLAMACPP_DEFAULT_CTX_MOE = 4096
 LLAMACPP_DEFAULT_CTX_DENSE = 8192
 # llama-server 기본 prompt cache 상한(약 8GB). JAVSTORY 기본은 0(비활성).
 LLAMACPP_DEFAULT_PROMPT_CACHE_MIB = 0
 LLAMACPP_SERVER_DEFAULT_PROMPT_CACHE_MIB = 8192
-# Qwen3.5-A3B MoE: VRAM 여유 확보용 CPU expert 레이어 수 (preset.moe 일 때만)
-LLAMACPP_DEFAULT_N_CPU_MOE = 24
+
+
+def _port_bind_probe(host: str, port: int) -> Dict[str, Any]:
+    """Probe whether this process can bind host:port without keeping it open."""
+    family = socket.AF_INET6 if ":" in host else socket.AF_INET
+    with socket.socket(family, socket.SOCK_STREAM) as s:
+        try:
+            s.bind((host, port))
+            return {"bind_ok": True, "host": host, "port": port}
+        except OSError as exc:
+            return {
+                "bind_ok": False,
+                "host": host,
+                "port": port,
+                "errno": exc.errno,
+                "winerror": getattr(exc, "winerror", None),
+                "strerror": str(exc),
+            }
+
+
+def _llamacpp_port_is_user_pinned(host: str, port: int) -> bool:
+    """Return True when env points to a non-default endpoint we should not rewrite."""
+    raw_url = (os.environ.get("JAVSTORY_LLAMACPP_URL", "") or "").strip()
+    raw_port = (os.environ.get("JAVSTORY_LLAMACPP_PORT", "") or "").strip()
+    default_hosts = {"127.0.0.1", "localhost", "::1"}
+    if raw_url:
+        parsed = urlparse(raw_url)
+        url_host = (parsed.hostname or host or "").strip().lower()
+        url_port = int(parsed.port or port)
+        # SettingsModel persists the default local URL into the environment, so
+        # localhost:8081 still needs automatic recovery when Windows reserves it.
+        return not (url_host in default_hosts and url_port == 8081)
+    if raw_port:
+        try:
+            return int(raw_port) != 8081
+        except ValueError:
+            return True
+    return False
+
+
+def _find_bindable_llamacpp_port(host: str, preferred_port: int) -> tuple[int, Dict[str, Any]] | None:
+    candidates = [preferred_port] + list(range(preferred_port + 1, preferred_port + 41)) + [18081, 18082, 28081]
+    seen: set[int] = set()
+    for port in candidates:
+        if port in seen or port <= 0 or port > 65535:
+            continue
+        seen.add(port)
+        if sys.platform == "win32" and _port_is_listening_netstat(port):
+            continue
+        probe = _port_bind_probe(host, port)
+        if probe.get("bind_ok"):
+            return port, probe
+    return None
 
 
 def llamacpp_max_tokens_from_env(
@@ -87,22 +138,6 @@ def llamacpp_idle_shutdown_enabled() -> bool:
 
 def llamacpp_idle_timeout_sec_from_env() -> int:
     return max(30, _env_int("JAVSTORY_LLAMACPP_IDLE_TIMEOUT_SEC", 300))
-
-
-def llamacpp_n_cpu_moe_for_spawn(*, preset_moe: bool) -> int | None:
-    """MoE 프리셋일 때 ``--n-cpu-moe`` 값. None이면 플래그 생략."""
-    if not preset_moe:
-        return None
-    raw = (os.environ.get("JAVSTORY_LLAMACPP_N_CPU_MOE", "") or "").strip().lower()
-    if raw in ("0", "off", "false", "no", "none"):
-        return None
-    if raw:
-        try:
-            n = int(raw)
-            return n if n > 0 else None
-        except ValueError:
-            return LLAMACPP_DEFAULT_N_CPU_MOE
-    return LLAMACPP_DEFAULT_N_CPU_MOE
 
 
 def maybe_stop_llamacpp_after_job(*, logger_func: LoggerFunc | None = None) -> None:
@@ -168,6 +203,8 @@ def llamacpp_request_scope():
 
 
 def llamacpp_base_url() -> str:
+    if _active_base_url:
+        return _active_base_url.rstrip("/")
     explicit = (os.environ.get("JAVSTORY_LLAMACPP_URL", "") or "").strip()
     if explicit:
         return explicit.rstrip("/")
@@ -196,7 +233,6 @@ class LlamaCppModelPreset:
     id: str
     label: str
     gguf_env: str
-    moe: bool = False
     default_ctx: int = 8192
     # -1 = -ngl 생략·llama-server -fit on (VRAM에 맞게 자동). 명시 시에만 -ngl 전달.
     default_ngl: int = -1
@@ -205,46 +241,42 @@ class LlamaCppModelPreset:
 
 
 LLAMACPP_MODEL_PRESETS: Dict[str, LlamaCppModelPreset] = {
-    "qwen3.5-35b-a3b": LlamaCppModelPreset(
-        id="qwen3.5-35b-a3b",
-        label="Qwen3.5-35B-A3B (MoE)",
-        gguf_env="JAVSTORY_LLAMACPP_QWEN35_GGUF",
-        moe=True,
-        default_ctx=LLAMACPP_DEFAULT_CTX_MOE,
-        default_ngl=-1,
-        extra_args=("--flash-attn", "on"),
-        serve_alias="qwen3.5-35b-a3b",
-    ),
     "gemma-4-e4b": LlamaCppModelPreset(
         id="gemma-4-e4b",
         label="Gemma-4-E4B",
         gguf_env="JAVSTORY_LLAMACPP_GEMMA4_GGUF",
-        moe=False,
         default_ctx=LLAMACPP_DEFAULT_CTX_DENSE,
         default_ngl=-1,
         extra_args=("--flash-attn", "on"),
         serve_alias="gemma-4-e4b",
     ),
-    # 자막 교정 전용 (HauhauCS Uncensored Aggressive)
-    "qwen3.5-35b-a3b-uncensored": LlamaCppModelPreset(
-        id="qwen3.5-35b-a3b-uncensored",
-        label="HauhauCS/Qwen3.5-35B-A3B-Uncensored-HauhauCS-Aggressive",
-        gguf_env="JAVSTORY_LLAMACPP_QWEN35_UNC_GGUF",
-        moe=True,
-        default_ctx=LLAMACPP_DEFAULT_CTX_MOE,
-        default_ngl=-1,
-        extra_args=("--flash-attn", "on"),
-        serve_alias="qwen3.5-35b-a3b-uncensored",
-    ),
+    # 자막 교정/페르소나 챗 전용
     "gemma-4-e4b-uncensored": LlamaCppModelPreset(
         id="gemma-4-e4b-uncensored",
         label="HauhauCS/Gemma-4-E4B-Uncensored-HauhauCS-Aggressive",
         gguf_env="JAVSTORY_LLAMACPP_GEMMA4_UNC_GGUF",
-        moe=False,
         default_ctx=LLAMACPP_DEFAULT_CTX_DENSE,
         default_ngl=-1,
         extra_args=("--flash-attn", "on"),
         serve_alias="gemma-4-e4b-uncensored",
+    ),
+    "qwen3-14b": LlamaCppModelPreset(
+        id="qwen3-14b",
+        label="Qwen3-14B (Dense)",
+        gguf_env="JAVSTORY_LLAMACPP_QWEN3_14B_GGUF",
+        default_ctx=LLAMACPP_DEFAULT_CTX_DENSE,
+        default_ngl=-1,
+        extra_args=("--flash-attn", "on"),
+        serve_alias="qwen3-14b",
+    ),
+    "qwen3-14b-uncensored": LlamaCppModelPreset(
+        id="qwen3-14b-uncensored",
+        label="mradermacher/Qwen3-14B-Uncensored",
+        gguf_env="JAVSTORY_LLAMACPP_QWEN3_14B_UNC_GGUF",
+        default_ctx=LLAMACPP_DEFAULT_CTX_DENSE,
+        default_ngl=-1,
+        extra_args=("--flash-attn", "on"),
+        serve_alias="qwen3-14b-uncensored",
     ),
 }
 
@@ -265,7 +297,9 @@ def _llamacpp_preset_id_from_colon_value(raw: str) -> str | None:
 def _llamacpp_preset_id_from_translation_profile(profile: str) -> str | None:
     prof = (profile or "").strip().lower()
     if prof in ("qwen35", "qwen3.5", "qwen_35", "ollama_qwen"):
-        return "qwen3.5-35b-a3b"
+        return "qwen3-14b"
+    if prof in ("qwen3_14", "qwen3-14", "qwen14", "qwen_14"):
+        return "qwen3-14b"
     if prof in ("budget", "gemma", "gemma4", "gemma_4"):
         return "gemma-4-e4b"
     if prof.startswith("llamacpp:"):
@@ -326,20 +360,20 @@ def resolve_active_llamacpp_preset_id(
 def resolve_llamacpp_preset(preset_id: str | None = None) -> LlamaCppModelPreset:
     pid = (preset_id or os.environ.get("JAVSTORY_LLAMACPP_MODEL", "") or "").strip().lower()
     if not pid:
-        pid = "qwen3.5-35b-a3b"
+        pid = "gemma-4-e4b"
     if pid not in LLAMACPP_MODEL_PRESETS:
         # 별칭: qwen, gemma, uncensored 교정
         if "uncensored" in pid or "hauhau" in pid:
             if "gemma" in pid:
                 pid = "gemma-4-e4b-uncensored"
             else:
-                pid = "qwen3.5-35b-a3b-uncensored"
+                pid = "qwen3-14b-uncensored"
         elif "gemma" in pid:
             pid = "gemma-4-e4b"
         elif "qwen" in pid:
-            pid = "qwen3.5-35b-a3b"
+            pid = "qwen3-14b"
         else:
-            pid = "qwen3.5-35b-a3b"
+            pid = "gemma-4-e4b"
     return LLAMACPP_MODEL_PRESETS[pid]
 
 
@@ -447,14 +481,6 @@ def build_server_argv(
         argv.extend(["-fit", "on"])
     if preset.serve_alias:
         argv.extend(["--alias", preset.serve_alias])
-    if preset.moe:
-        # MoE (Qwen3.5-A3B 등): preset.moe 기준 — GGUF 파일명 매칭은 사용하지 않음
-        n_cpu_moe = llamacpp_n_cpu_moe_for_spawn(preset_moe=True)
-        if n_cpu_moe is not None:
-            argv.extend(["--n-cpu-moe", str(n_cpu_moe)])
-        moe_mode = (os.environ.get("JAVSTORY_LLAMACPP_MOE_MODE", "") or "").strip()
-        if moe_mode:
-            argv.extend(["--moe", moe_mode])
     argv.extend(list(preset.extra_args))
     argv.extend(cfg.extra_cli)
     return argv
@@ -470,6 +496,112 @@ def _server_health_ok(base_url: str, timeout: float = 2.0) -> bool:
         except Exception:
             continue
     return False
+
+
+def _port_has_listener(host: str, port: int, timeout: float = 1.0) -> bool:
+    """Return True if any process is actively accepting connections on the port."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.settimeout(timeout)
+        try:
+            s.connect((host, port))
+            return True
+        except Exception:
+            return False
+
+
+def _port_is_listening_netstat(port: int) -> bool:
+    """Windows-only: check via netstat if any process has port in LISTENING state.
+
+    More reliable than socket.bind() on Windows where Hyper-V/Docker port exclusion
+    ranges cause bind() to fail with WSAEACCES even when no server is listening.
+    """
+    if sys.platform != "win32":
+        return False
+    cflags = subprocess.CREATE_NO_WINDOW  # type: ignore[attr-defined]
+    try:
+        result = subprocess.run(
+            ["netstat", "-ano"],
+            capture_output=True, text=True, check=False,
+            creationflags=cflags,
+        )
+        for line in result.stdout.splitlines():
+            parts = line.split()
+            if len(parts) >= 5 and parts[0] == "TCP" and f":{port}" in parts[1] and "LISTEN" in parts[3]:
+                return True
+        return False
+    except Exception:
+        return False
+
+
+def _wait_for_port_free(host: str, port: int, timeout: float = 15.0) -> bool:
+    """Poll until the port is no longer in LISTENING state. Returns True if freed."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if sys.platform == "win32":
+            if not _port_is_listening_netstat(port):
+                return True
+        else:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                try:
+                    s.bind((host, port))
+                    return True
+                except OSError:
+                    pass
+        time.sleep(1.0)
+    return False
+
+
+def _kill_port_owner_windows(
+    port: int,
+    *,
+    logger_func: LoggerFunc | None = None,
+) -> bool:
+    """Windows-only: find and kill the llama-server process listening on port.
+
+    Returns True if a process was found and killed. Silently skips if the owner
+    is not llama-server (to avoid accidentally killing unrelated services).
+    """
+    if sys.platform != "win32":
+        return False
+    log = logger_func or print
+    cflags = subprocess.CREATE_NO_WINDOW  # type: ignore[attr-defined]
+    try:
+        ns = subprocess.run(
+            ["netstat", "-ano"],
+            capture_output=True, text=True, check=False,
+            creationflags=cflags,
+        )
+        pid_str = ""
+        for line in ns.stdout.splitlines():
+            parts = line.split()
+            if len(parts) < 5 or parts[0] != "TCP":
+                continue
+            local_addr = parts[1]
+            state = parts[3]
+            pid_col = parts[4]
+            if f":{port}" in local_addr and state == "LISTENING" and pid_col.isdigit():
+                pid_str = pid_col
+                break
+        if not pid_str:
+            return False
+        tl = subprocess.run(
+            ["tasklist", "/FI", f"PID eq {pid_str}", "/FO", "CSV"],
+            capture_output=True, text=True, check=False,
+            creationflags=cflags,
+        )
+        if "llama-server" not in tl.stdout.lower():
+            log(f"[llama.cpp] 포트 {port} 점유 PID {pid_str}은 llama-server가 아님 — 강제 종료 건너뜀")
+            return False
+        subprocess.run(
+            ["taskkill", "/PID", pid_str, "/T", "/F"],
+            check=False, creationflags=cflags, capture_output=True,
+        )
+        log(f"[llama.cpp] 포트 {port} 점유 llama-server (PID {pid_str}) 강제 종료")
+        time.sleep(1.0)
+        return True
+    except Exception as exc:
+        log(f"[llama.cpp] 포트 {port} 점유 프로세스 종료 시도 실패: {exc}")
+        return False
 
 
 def _server_model_ids(base_url: str, timeout: float = 2.0) -> List[str]:
@@ -581,12 +713,13 @@ def _terminate_llamacpp_proc(
 
 
 def stop_llamacpp_server(*, logger_func: LoggerFunc | None = None) -> None:
-    global _server_proc, _active_preset_id, _active_requests
+    global _server_proc, _active_preset_id, _active_base_url, _active_requests
     _idle_stop_event.set()
     with _lock:
         proc = _server_proc
         _server_proc = None
         _active_preset_id = None
+        _active_base_url = None
         _active_requests = 0
     if proc is None:
         return
@@ -613,6 +746,11 @@ def _tail_server_log(max_lines: int = 24) -> str:
         return ""
 
 
+def _port_conflict_in_tail(tail: str) -> bool:
+    t = (tail or "").lower()
+    return "couldn't bind" in t or "address already in use" in t or "bind: only one usage" in t
+
+
 def _server_exit_hint(tail: str) -> str:
     t = (tail or "").lower()
     if "cuda" in t and ("out of memory" in t or "cudamalloc failed" in t):
@@ -627,6 +765,11 @@ def _server_exit_hint(tail: str) -> str:
         )
     if "failed to load model" in t or "model loading error" in t:
         return "GGUF 로드 실패 — 경로·VRAM·-c(컨텍스트) 설정을 확인하세요."
+    if _port_conflict_in_tail(tail):
+        return (
+            "포트 8081이 이미 사용 중입니다. 이전 llama-server 인스턴스가 완전히 종료되지 않은 경우입니다. "
+            "잠시 후 다시 시도하거나 작업 관리자에서 llama-server.exe를 종료한 뒤 재시작하세요."
+        )
     return ""
 
 
@@ -667,6 +810,7 @@ def ensure_llamacpp_server_ready(
     요청된 프리셋/모델에 맞게 llama-server가 떠 있는지 확인하고 없으면 기동.
     Returns: OpenAI API ``model`` 필드에 넣을 이름(serve_alias).
     """
+    global _server_proc, _active_preset_id, _active_base_url, _last_activity_at
     if not _env_bool("JAVSTORY_LLAMACPP_AUTO_START", True):
         base = llamacpp_base_url()
         if not _server_health_ok(base):
@@ -693,37 +837,45 @@ def ensure_llamacpp_server_ready(
     cfg = LlamaCppServerConfig.from_env(preset)
     base = llamacpp_base_url()
 
-    global _server_proc, _active_preset_id, _last_activity_at
     log = logger_func or print
 
     proc_to_stop: subprocess.Popen | None = None
-    ready_alias: str | None = None
+    check_proc: subprocess.Popen | None = None
+
     with _lock:
         if _server_proc is not None and _server_proc.poll() is not None:
             _server_proc = None
             _active_preset_id = None
 
-        if (
-            _server_proc is not None
-            and _active_preset_id == preset.id
-            and _server_health_ok(base)
-        ):
-            _last_activity_at = time.time()
-            ready_alias = preset.serve_alias or preset.id
-
+        # Only check process state inside the lock — health check (HTTP) must be outside.
+        if _server_proc is not None and _active_preset_id == preset.id:
+            check_proc = _server_proc
         elif _server_proc is not None:
             proc_to_stop = _server_proc
             _server_proc = None
             _active_preset_id = None
 
-    if ready_alias:
-        _ensure_idle_monitor_started(logger_func=log)
-        return ready_alias
+    # Health check runs outside the lock so a slow /health response never
+    # misidentifies a running server as crashed and triggers a spurious respawn.
+    if check_proc is not None:
+        check_proc_health_ok = _server_health_ok(base)
+        if check_proc_health_ok:
+            with _lock:
+                _last_activity_at = time.time()
+            _ensure_idle_monitor_started(logger_func=log)
+            return preset.serve_alias or preset.id
+        # Process alive but health check failed — treat as crashed and respawn.
+        with _lock:
+            if _server_proc is check_proc:
+                _server_proc = None
+                _active_preset_id = None
+        proc_to_stop = check_proc
 
     if proc_to_stop is not None:
         _terminate_llamacpp_proc(proc_to_stop, logger_func=log)
 
-    if _server_health_ok(base):
+    initial_health_ok = _server_health_ok(base)
+    if initial_health_ok:
         model_ids = _server_model_ids(base)
         if not _server_models_match_preset(model_ids, preset):
             running = ", ".join(model_ids) if model_ids else "unknown"
@@ -734,6 +886,49 @@ def ensure_llamacpp_server_ready(
         touch_llamacpp_activity()
         log(f"[llama.cpp] 기존 llama-server 재사용 — {base}/v1")
         return preset.serve_alias or preset.id
+
+    if sys.platform == "win32":
+        bind_probe = _port_bind_probe(cfg.host, cfg.port)
+        port_user_pinned = _llamacpp_port_is_user_pinned(cfg.host, cfg.port)
+        bind_denied_without_listener = (
+            not bind_probe.get("bind_ok")
+            and bind_probe.get("winerror") == 10013
+            and not _port_is_listening_netstat(cfg.port)
+        )
+        if bind_denied_without_listener and not port_user_pinned:
+            old_port = cfg.port
+            replacement = _find_bindable_llamacpp_port(cfg.host, old_port + 1)
+            if replacement is None:
+                raise RuntimeError(
+                    f"포트 {old_port} 바인딩이 Windows에서 거부되었고 자동 대체 포트를 찾지 못했습니다. "
+                    "JAVSTORY_LLAMACPP_PORT를 사용 가능한 포트로 지정하세요."
+                )
+            new_port, _ = replacement
+            cfg.port = new_port
+            base = f"http://{cfg.host}:{cfg.port}"
+            with _lock:
+                _active_base_url = base
+        elif bind_denied_without_listener:
+            raise RuntimeError(
+                f"설정된 llama.cpp 포트 {cfg.port} 바인딩이 Windows에서 거부되었습니다(WinError 10013). "
+                "해당 포트가 Windows 제외/예약 범위일 수 있으니 JAVSTORY_LLAMACPP_PORT를 다른 포트로 지정하세요."
+            )
+
+    # Pre-spawn: if port is in LISTENING state (netstat), a hung llama-server from a
+    # previous session is blocking the port.  Kill it (Windows: llama-server only)
+    # and wait for the port to free before attempting to bind.
+    # Note: socket.bind() is NOT used here — on Windows, Hyper-V/Docker port exclusion
+    # ranges cause bind() to raise WSAEACCES even when no server is listening.
+    pre_spawn_port_listening = sys.platform == "win32" and _port_is_listening_netstat(cfg.port)
+    if pre_spawn_port_listening:
+        log(f"[llama.cpp] 포트 {cfg.port} LISTENING 감지 — 정리 시도")
+        _kill_port_owner_windows(cfg.port, logger_func=log)
+        if not _wait_for_port_free(cfg.host, cfg.port, timeout=15.0):
+            raise RuntimeError(
+                f"포트 {cfg.port}가 15초 이상 점유 중입니다. "
+                "작업 관리자에서 llama-server.exe를 종료한 뒤 다시 시도하세요."
+            )
+        log(f"[llama.cpp] 포트 {cfg.port} 해제 확인 — 서버 시작")
 
     argv = build_server_argv(gguf, cfg, preset)
     proc = _spawn_server(argv, logger_func=log)
@@ -750,6 +945,43 @@ def ensure_llamacpp_server_ready(
                     _server_proc = None
                     _active_preset_id = None
             tail = _tail_server_log()
+            # Port conflict: the spawned server couldn't bind because the previous
+            # instance is still holding the port.  If that server is healthy and
+            # matches our preset, reuse it rather than surfacing an error.
+            if _port_conflict_in_tail(tail):
+                # 1) Try to reuse a healthy existing server
+                post_conflict_health_ok = _server_health_ok(base, timeout=5.0)
+                if post_conflict_health_ok:
+                    model_ids = _server_model_ids(base)
+                    if _server_models_match_preset(model_ids, preset):
+                        with _lock:
+                            _active_preset_id = preset.id
+                            _last_activity_at = time.time()
+                        _ensure_idle_monitor_started(logger_func=log)
+                        log(f"[llama.cpp] 포트 충돌 감지 → 기존 서버 재사용 — {base}/v1")
+                        return preset.serve_alias or preset.id
+                # 2) Not healthy: kill port owner (Windows: llama-server only) then retry
+                if sys.platform == "win32":
+                    _kill_port_owner_windows(cfg.port, logger_func=log)
+                if _wait_for_port_free(cfg.host, cfg.port, timeout=15.0):
+                    log(f"[llama.cpp] 포트 {cfg.port} 해제 — spawn 재시도")
+                    proc2 = _spawn_server(argv, logger_func=log)
+                    with _lock:
+                        _server_proc = proc2
+                        _active_preset_id = preset.id
+                        _last_activity_at = time.time()
+                    retry_dl = time.time() + max(5.0, wait_sec)
+                    while time.time() < retry_dl:
+                        if proc2.poll() is not None:
+                            break
+                        if _server_health_ok(base, timeout=2.0):
+                            with _lock:
+                                _active_preset_id = preset.id
+                                _last_activity_at = time.time()
+                            _ensure_idle_monitor_started(logger_func=log)
+                            log(f"[llama.cpp] 재시작 성공 — {preset.label} @ {base}/v1")
+                            return preset.serve_alias or preset.id
+                        time.sleep(0.5)
             hint = _server_exit_hint(tail)
             msg = f"llama-server가 조기 종료되었습니다 (code={proc.returncode}). 로그: {_log_path}"
             if hint:

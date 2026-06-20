@@ -398,7 +398,7 @@ Item {
                             font.pixelSize: Theme.fontCaption
                             color: Theme.textMuted
                             wrapMode: Text.Wrap
-                            text: "12GB VRAM · 32GB RAM: 컨텍스트 4096, 최대 출력 3072, 프롬프트 캐시 OFF. MoE(Qwen)만 n-cpu-moe 기본 24. OpenRouter 80초 청크 env는 로컬 미적용."
+                            text: "12GB VRAM · 32GB RAM: Gemma-4-E4B 또는 Qwen3-14B 권장. 컨텍스트/출력 토큰은 모델과 VRAM 상황에 맞게 조정하세요."
                         }
 
                         Row {
@@ -477,11 +477,11 @@ Item {
                                 id: llamacppModelCombo
                                 width: parent.width - 180
                                 model: [
-                                    { label: "Qwen3.5-35B-A3B (MoE)", value: "qwen3.5-35b-a3b" },
-                                    { label: "Gemma-4-E4B", value: "gemma-4-e4b" }
+                                    { label: "Gemma-4-E4B", value: "gemma-4-e4b" },
+                                    { label: "Qwen3-14B", value: "qwen3-14b" }
                                 ]
                                 textRole: "label"
-                                currentIndex: SettingsModel.llamacppModel === "gemma-4-e4b" ? 1 : 0
+                                currentIndex: SettingsModel.llamacppModel === "qwen3-14b" ? 1 : 0
                                 onActivated: function(idx) {
                                     if (idx >= 0 && idx < model.length)
                                         SettingsModel.llamacppModel = model[idx].value
@@ -506,35 +506,100 @@ Item {
                             spacing: Theme.spacingSm
                             width: parent.width
                             Text {
-                                text: "Qwen GGUF"
+                                text: "페르소나 카드 모델"
                                 width: 160
                                 font.pixelSize: Theme.fontBody
                                 color: Theme.textSecondary
                                 anchors.verticalCenter: parent.verticalCenter
                             }
-                            TextField {
-                                id: llamacppQwenField
-                                width: parent.width - 260
-                                text: SettingsModel.llamacppQwenGguf
-                                onTextChanged: SettingsModel.llamacppQwenGguf = text
-                                placeholderText: "Qwen3.5-35B-A3B.gguf"
-                                color: Theme.textPrimary
-                                font.pixelSize: Theme.fontBody
+                            ComboBox {
+                                id: personaCardModelCombo
+                                width: parent.width - 180
+                                model: SettingsModel.availablePersonaCardPresets
+                                textRole: "label"
+                                valueRole: "id"
+                                currentIndex: {
+                                    var selected = 0
+                                    for (var i = 0; i < model.length; i++) {
+                                        if (model[i].id === SettingsModel.personaCardPreset) {
+                                            selected = i
+                                            break
+                                        }
+                                    }
+                                    selected
+                                }
+                                onActivated: function(idx) {
+                                    if (idx >= 0 && idx < model.length)
+                                        SettingsModel.personaCardPreset = model[idx].id
+                                }
+                                contentItem: Text {
+                                    leftPadding: Theme.spacingSm
+                                    text: personaCardModelCombo.displayText
+                                    color: Theme.textPrimary
+                                    font.pixelSize: Theme.fontBody
+                                    verticalAlignment: Text.AlignVCenter
+                                }
                                 background: Rectangle {
                                     radius: Theme.radiusSm
                                     color: Theme.surfaceLight
-                                    border.color: llamacppQwenField.activeFocus ? Theme.accentNeon : Theme.glassBorder
+                                    border.color: Theme.glassBorder
                                     border.width: 1
                                 }
                             }
-                            ActionButton {
-                                text: "찾기"
-                                height: 36
-                                onClicked: {
-                                    var p = SettingsModel.browseGgufFile()
-                                    if (p) SettingsModel.llamacppQwenGguf = p
+                        }
+
+                        Row {
+                            spacing: Theme.spacingSm
+                            width: parent.width
+                            Text {
+                                text: "페르소나 챗 모델"
+                                width: 160
+                                font.pixelSize: Theme.fontBody
+                                color: Theme.textSecondary
+                                anchors.verticalCenter: parent.verticalCenter
+                            }
+                            ComboBox {
+                                id: personaChatModelCombo
+                                width: parent.width - 180
+                                model: SettingsModel.availablePersonaChatModels
+                                textRole: "label"
+                                valueRole: "id"
+                                currentIndex: {
+                                    var selected = 0
+                                    for (var i = 0; i < model.length; i++) {
+                                        if (model[i].id === SettingsModel.personaChatModel) {
+                                            selected = i
+                                            break
+                                        }
+                                    }
+                                    selected
+                                }
+                                onActivated: function(idx) {
+                                    if (idx >= 0 && idx < model.length)
+                                        SettingsModel.personaChatModel = model[idx].id
+                                }
+                                contentItem: Text {
+                                    leftPadding: Theme.spacingSm
+                                    text: personaChatModelCombo.displayText
+                                    color: Theme.textPrimary
+                                    font.pixelSize: Theme.fontBody
+                                    verticalAlignment: Text.AlignVCenter
+                                }
+                                background: Rectangle {
+                                    radius: Theme.radiusSm
+                                    color: Theme.surfaceLight
+                                    border.color: Theme.glassBorder
+                                    border.width: 1
                                 }
                             }
+                        }
+
+                        Text {
+                            width: parent.width
+                            font.pixelSize: Theme.fontCaption
+                            color: Theme.textMuted
+                            wrapMode: Text.Wrap
+                            text: "페르소나 카드 모델은 재생성에만, 페르소나 챗 모델은 대화 응답에만 적용됩니다. 번역/교정 활성 모델과는 별도입니다."
                         }
 
                         Row {
@@ -568,6 +633,76 @@ Item {
                                 onClicked: {
                                     var p = SettingsModel.browseGgufFile()
                                     if (p) SettingsModel.llamacppGemmaGguf = p
+                                }
+                            }
+                        }
+
+                        Row {
+                            spacing: Theme.spacingSm
+                            width: parent.width
+                            Text {
+                                text: "Qwen3-14B GGUF"
+                                width: 160
+                                font.pixelSize: Theme.fontBody
+                                color: Theme.textSecondary
+                                anchors.verticalCenter: parent.verticalCenter
+                            }
+                            TextField {
+                                id: llamacppQwen14bField
+                                width: parent.width - 260
+                                text: SettingsModel.llamacppQwen14bGguf
+                                onTextChanged: SettingsModel.llamacppQwen14bGguf = text
+                                placeholderText: "Qwen3-14B.gguf"
+                                color: Theme.textPrimary
+                                font.pixelSize: Theme.fontBody
+                                background: Rectangle {
+                                    radius: Theme.radiusSm
+                                    color: Theme.surfaceLight
+                                    border.color: llamacppQwen14bField.activeFocus ? Theme.accentNeon : Theme.glassBorder
+                                    border.width: 1
+                                }
+                            }
+                            ActionButton {
+                                text: "찾기"
+                                height: 36
+                                onClicked: {
+                                    var p = SettingsModel.browseGgufFile()
+                                    if (p) SettingsModel.llamacppQwen14bGguf = p
+                                }
+                            }
+                        }
+
+                        Row {
+                            spacing: Theme.spacingSm
+                            width: parent.width
+                            Text {
+                                text: "Qwen3-14B Unc GGUF"
+                                width: 160
+                                font.pixelSize: Theme.fontBody
+                                color: Theme.textSecondary
+                                anchors.verticalCenter: parent.verticalCenter
+                            }
+                            TextField {
+                                id: llamacppQwen14bUncField
+                                width: parent.width - 260
+                                text: SettingsModel.llamacppQwen14bUncGguf
+                                onTextChanged: SettingsModel.llamacppQwen14bUncGguf = text
+                                placeholderText: "Qwen3-14B-Uncensored.gguf"
+                                color: Theme.textPrimary
+                                font.pixelSize: Theme.fontBody
+                                background: Rectangle {
+                                    radius: Theme.radiusSm
+                                    color: Theme.surfaceLight
+                                    border.color: llamacppQwen14bUncField.activeFocus ? Theme.accentNeon : Theme.glassBorder
+                                    border.width: 1
+                                }
+                            }
+                            ActionButton {
+                                text: "찾기"
+                                height: 36
+                                onClicked: {
+                                    var p = SettingsModel.browseGgufFile()
+                                    if (p) SettingsModel.llamacppQwen14bUncGguf = p
                                 }
                             }
                         }
@@ -661,38 +796,6 @@ Item {
                                     border.color: Theme.glassBorder
                                     border.width: 1
                                 }
-                            }
-                        }
-
-                        Row {
-                            spacing: Theme.spacingSm
-                            width: parent.width
-                            Text {
-                                text: "MoE CPU 레이어 (--n-cpu-moe)"
-                                width: 160
-                                font.pixelSize: Theme.fontBody
-                                color: Theme.textSecondary
-                                anchors.verticalCenter: parent.verticalCenter
-                            }
-                            TextField {
-                                width: 80
-                                text: SettingsModel.llamacppNCpuMoe
-                                onTextChanged: SettingsModel.llamacppNCpuMoe = text
-                                placeholderText: "24"
-                                color: Theme.textPrimary
-                                font.pixelSize: Theme.fontBody
-                                background: Rectangle {
-                                    radius: Theme.radiusSm
-                                    color: Theme.surfaceLight
-                                    border.color: Theme.glassBorder
-                                    border.width: 1
-                                }
-                            }
-                            Text {
-                                text: "Qwen MoE만 · 0=끔"
-                                font.pixelSize: Theme.fontCaption
-                                color: Theme.textMuted
-                                anchors.verticalCenter: parent.verticalCenter
                             }
                         }
 
@@ -988,8 +1091,8 @@ Item {
                         { label: "JKV-12B (Ollama)", value: "jkv_12b" }
                     ]
                     readonly property var profileOptsLlamacpp: [
-                        { label: "Qwen3.5-35B-A3B (llama.cpp)", value: "qwen35", llamacpp: "qwen3.5-35b-a3b" },
-                        { label: "Gemma-4-E4B (llama.cpp)", value: "budget", llamacpp: "gemma-4-e4b" }
+                        { label: "Gemma-4-E4B (llama.cpp)", value: "budget", llamacpp: "gemma-4-e4b" },
+                        { label: "Qwen3-14B (llama.cpp)", value: "qwen3_14", llamacpp: "qwen3-14b" }
                     ]
 
                     readonly property var harvestOptsOpenAI: [
@@ -1010,8 +1113,8 @@ Item {
                         { label: "JKV-12B (Ollama)", value: "ollama:ja-ko-vn-jav:latest" }
                     ]
                     readonly property var harvestOptsLlamacpp: [
-                        { label: "Qwen3.5-35B-A3B (llama.cpp)", value: "llamacpp:qwen3.5-35b-a3b" },
-                        { label: "Gemma-4-E4B (llama.cpp)", value: "llamacpp:gemma-4-e4b" }
+                        { label: "Gemma-4-E4B (llama.cpp)", value: "llamacpp:gemma-4-e4b" },
+                        { label: "Qwen3-14B (llama.cpp)", value: "llamacpp:qwen3-14b" }
                     ]
 
                     readonly property var correctionOptsOpenAI: [
@@ -1035,8 +1138,8 @@ Item {
                         { label: "JKV-12B (Ollama)", value: "ollama:ja-ko-vn-jav:latest" }
                     ]
                     readonly property var correctionOptsLlamacpp: [
-                        { label: "Qwen3.5-35B-A3B Uncensored (HauhauCS)", value: "llamacpp:qwen3.5-35b-a3b-uncensored", llamacpp: "qwen3.5-35b-a3b-uncensored" },
-                        { label: "Gemma-4-E4B Uncensored (HauhauCS)", value: "llamacpp:gemma-4-e4b-uncensored", llamacpp: "gemma-4-e4b-uncensored" }
+                        { label: "Gemma-4-E4B Uncensored (HauhauCS)", value: "llamacpp:gemma-4-e4b-uncensored", llamacpp: "gemma-4-e4b-uncensored" },
+                        { label: "Qwen3-14B Uncensored", value: "llamacpp:qwen3-14b-uncensored", llamacpp: "qwen3-14b-uncensored" }
                     ]
 
                     property var activeCorrectionOpts: llmIsLlamacpp ? correctionOptsLlamacpp

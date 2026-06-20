@@ -35,7 +35,7 @@ Base = declarative_base()
 # - SQLite `PRAGMA user_version`에 저장한다.
 # - 테이블/컬럼 마이그레이션 로직을 변경하면 이 값을 올려서 1회 재실행되게 한다.
 # - v9+ 스키마는 Alembic only — `upgrade_alembic_head()` (init_db 이후 호출)
-_APP_DB_SCHEMA_VERSION = 11
+_APP_DB_SCHEMA_VERSION = 12
 _ALEMBIC_HEAD_REVISION = "0001_stamp_v8"
 _SCHEMA_USER_VERSION_ALEMBIC = 9
 
@@ -234,6 +234,21 @@ class UserPreference(Base):
     recent_score = Column(Integer, default=0)       # 최근 7일 가중 점수
     time_slot = Column(String(20), default='all')   # 'morning','afternoon','night','all'
     last_watched_at = Column(DateTime, default=datetime.datetime.now)
+
+
+class FileFlagCache(Base):
+    """작품 파일 상태 캐시 — 앱 시작 시 HDD I/O 없이 라이브러리 목록 렌더링용."""
+
+    __tablename__ = "file_flag_cache"
+
+    product_code  = Column(String(50), primary_key=True)
+    has_video     = Column(Integer, nullable=False, default=0)
+    video_path    = Column(Text, nullable=True)
+    lamp_stt      = Column(Integer, nullable=False, default=0)
+    lamp_sub      = Column(Integer, nullable=False, default=0)
+    has_canonical = Column(Integer, nullable=False, default=0)
+    has_story     = Column(Integer, nullable=False, default=0)
+    scanned_at    = Column(Text, nullable=True)
 
 
 class Product(Base):
@@ -535,6 +550,7 @@ def init_db():
         WatchHistory.__table__,
         FavoriteScoreHistory.__table__,
         UserPreference.__table__,
+        FileFlagCache.__table__,
     ]
     Base.metadata.create_all(bind=engine, tables=_v8_tables)
     print("[DB] Running migration checks...")
@@ -546,6 +562,7 @@ def init_db():
     _migrate_v7_favorite_score_history()
     _migrate_v8_watch_history_part_positions()
     _migrate_v11_watch_later_columns()
+    _migrate_v12_file_flag_cache()
     _ensure_indexes_and_optimize()
     try:
         with sqlite3.connect(DB_PATH) as conn:
@@ -894,6 +911,32 @@ def _migrate_v11_watch_later_columns():
             conn.commit()
     except Exception as e:
         print(f"[DB Migration v11] 실패: {e}")
+
+
+def _migrate_v12_file_flag_cache():
+    """v12: file_flag_cache 테이블 생성 — 라이브러리 목록 로딩 시 HDD I/O 제거용."""
+    import sqlite3
+
+    try:
+        with sqlite3.connect(DB_PATH) as conn:
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS file_flag_cache (
+                    product_code  TEXT PRIMARY KEY,
+                    has_video     INTEGER NOT NULL DEFAULT 0,
+                    video_path    TEXT,
+                    lamp_stt      INTEGER NOT NULL DEFAULT 0,
+                    lamp_sub      INTEGER NOT NULL DEFAULT 0,
+                    has_canonical INTEGER NOT NULL DEFAULT 0,
+                    has_story     INTEGER NOT NULL DEFAULT 0,
+                    scanned_at    TEXT
+                )
+                """
+            )
+            conn.commit()
+            print("[DB Migration v12] file_flag_cache 테이블 생성 완료")
+    except Exception as e:
+        print(f"[DB Migration v12] 실패: {e}")
 
 
 def _migrate_v6_actress_translation_note():

@@ -33,9 +33,9 @@ def test_persona_chat_dynamic_temperature_and_tokens(monkeypatch):
     assert _situational_max_tokens("비슷한 추천 자세히", 2000) == 2000
     assert _situational_max_tokens("비슷한 추천 자세히", 2600) == 2400
     assert _situational_max_tokens("더 세게 자세히 분석해줘", 3072) == 3072
-    monkeypatch.setenv("JAVSTORY_LLAMACPP_MODEL", "qwen3.5-35b-a3b")
+    monkeypatch.setenv("JAVSTORY_PERSONA_CHAT_MODEL", "qwen3-14b-uncensored")
     monkeypatch.setenv("JAVSTORY_LLAMACPP_CTX", "4096")
-    assert _persona_chat_max_tokens_for_context("더 세게 자세히 분석해줘", 3072) == 800
+    assert _persona_chat_max_tokens_for_context("더 세게 자세히 분석해줘", 3072) == 3072
 
 
 def test_persona_chat_filters_reasoning_only_payload():

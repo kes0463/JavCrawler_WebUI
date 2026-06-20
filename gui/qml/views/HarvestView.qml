@@ -37,12 +37,15 @@ Item {
         onDropped: function(drop) {
             if (drop) drop.acceptProposedAction()
             if (!drop || !drop.urls || drop.urls.length === 0) return;
-            var added = 0
+            var paths = []
             for (var i = 0; i < drop.urls.length; i++) {
                 var p = root._urlToLocalPath(drop.urls[i])
-                if (p) { HarvestModel.queueFolder(p); added += 1 }
+                if (p) paths.push(p)
             }
-            if (added > 0) window.showToast("드롭됨: " + added + "개 경로를 큐에 추가 요청", "info")
+            if (paths.length > 0) {
+                HarvestModel.queueFolders(paths)
+                window.showToast("드롭됨: " + paths.length + "개 경로를 큐에 추가 요청", "info")
+            }
         }
     }
 

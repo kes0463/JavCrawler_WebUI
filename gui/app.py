@@ -300,6 +300,58 @@ def _start_db_hydrate_background() -> None:
     threading.Thread(target=_run, daemon=True, name="db-hydrate").start()
 
 
+def _prewarm_llamacpp_server_bg(delay_seconds: float = 180.0) -> None:
+    """앱 시작 후 llama-server 기동 + persona context 계산을 병렬로 미리 수행해
+    페르소나 카드 재생성 대기 시간을 줄인다.
+    기본 180초 지연으로 라이브러리 로딩 완료 후 시작 (JAVSTORY_LLAMACPP_PREWARM_DELAY로 조정 가능)."""
+    raw = (os.environ.get("JAVSTORY_LLAMACPP_PREWARM", "1") or "1").strip().lower()
+    if raw in ("0", "false", "no", "off"):
+        return
+
+    try:
+        delay_seconds = float(os.environ.get("JAVSTORY_LLAMACPP_PREWARM_DELAY", str(delay_seconds)) or delay_seconds)
+    except (TypeError, ValueError):
+        pass
+
+    def _run() -> None:
+        import time
+        time.sleep(delay_seconds)
+        from javstory.analytics.persona_card import persona_card_model_from_env
+        model = persona_card_model_from_env()
+        print(f"[Prewarm] 시작 (server preset={model}, context 병렬 계산)")
+
+        def _server() -> None:
+            try:
+                from javstory.llm.llamacpp_backend import ensure_llamacpp_server_ready
+                ensure_llamacpp_server_ready({"model": model})
+                print("[Prewarm] llama-server 준비 완료")
+            except Exception as exc:
+                print(f"[Prewarm] llama-server 실패 (무시): {exc}")
+
+        def _context() -> None:
+            try:
+                from javstory.analytics.persona_card import prewarm_persona_context
+                prewarm_persona_context()
+            except Exception as exc:
+                print(f"[Prewarm] persona context 실패 (무시): {exc}")
+
+        def _intent() -> None:
+            try:
+                from javstory.persona.intent_classifier import prewarm_intent_classifier
+                prewarm_intent_classifier()
+            except Exception as exc:
+                print(f"[Prewarm] intent classifier 실패 (무시): {exc}")
+
+        t_srv = threading.Thread(target=_server, daemon=True, name="prewarm-server")
+        t_ctx = threading.Thread(target=_context, daemon=True, name="prewarm-context")
+        t_int = threading.Thread(target=_intent, daemon=True, name="prewarm-intent")
+        t_srv.start()
+        t_ctx.start()
+        t_int.start()
+
+    threading.Thread(target=_run, daemon=True, name="llamacpp-prewarm").start()
+
+
 def create_engine(app) -> QQmlApplicationEngine:
     """QQmlApplicationEngine을 생성하고 Python 모델을 context에 등록한다."""
     from javstory.harvest.database import init_and_upgrade_db
@@ -383,6 +435,10 @@ def create_engine(app) -> QQmlApplicationEngine:
     print("[UI] Initializing InsightModel...")
     insight_model = InsightModel(parent=app)
     folder_binding_inbox_store = FolderBindingInboxStore(parent=app)
+
+    # llama-server 프리웜 — 라이브러리 로딩 완료 후(기본 180초) 백그라운드에서 서버 기동 + context 계산
+    # JAVSTORY_LLAMACPP_PREWARM_DELAY 환경변수로 지연 시간 조정 가능
+    _prewarm_llamacpp_server_bg()
 
     # 로컬 번역(Ollama) 설정이면 앱 시작 시 `ollama serve` 자동 실행
     # (앱/엔진 초기화 타이밍 이슈를 피하려고 다음 이벤트 루프로 지연)

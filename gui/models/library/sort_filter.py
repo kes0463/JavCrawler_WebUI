@@ -7,7 +7,6 @@ from pathlib import Path
 from typing import Any
 
 from gui.models.library.search import (
-    build_watch_feedback_by_base,
     match_summary,
     parse_search_expr,
     preview_path_for,
@@ -26,6 +25,8 @@ class ListRebuildOptions:
     sort_mode: int = 0
     favorite_delta_days: int = 0
     preview_path_cache: dict[str, str] = field(default_factory=dict)
+    watch_map: dict = field(default_factory=dict)
+    deltas_map: dict = field(default_factory=dict)
 
 
 class LibrarySortFilter:
@@ -107,28 +108,13 @@ class LibrarySortFilter:
             cache[key] = v
             return v
 
-        watch_map = build_watch_feedback_by_base()
+        watch_map = opts.watch_map
         mode = opts.sort_mode
         eff_delta_days = int(opts.favorite_delta_days or 0)
         if eff_delta_days <= 0 and mode in (11, 12):
             eff_delta_days = 7
 
-        deltas_map: dict[str, int | None] = {}
-        if eff_delta_days > 0:
-            try:
-                from javstory.harvest.database import favorite_score_deltas_for_period
-
-                meta_by_code: dict[str, int] = {}
-                for s2 in filtered:
-                    pc2 = (getattr(s2, "product_code", "") or "").strip().upper()
-                    if pc2:
-                        meta_by_code[pc2] = int(getattr(s2, "favorite_score", 0) or 0)
-                deltas_map = favorite_score_deltas_for_period(
-                    meta_scores_by_code=meta_by_code,
-                    period_days=eff_delta_days,
-                )
-            except Exception:
-                deltas_map = {}
+        deltas_map: dict[str, int | None] = opts.deltas_map if eff_delta_days > 0 else {}
 
         merged_items: list[dict] = []
         for base_pc, lst in groups.items():

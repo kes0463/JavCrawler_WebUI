@@ -21,10 +21,10 @@ def test_llamacpp_active_model_syncs_translation_models(monkeypatch):
 
     assert model.llamacppModel == "gemma-4-e4b"
 
-    model.llamacppModel = "qwen3.5-35b-a3b"
+    model.llamacppModel = "qwen3-14b"
 
-    assert model.llamacppModel == "qwen3.5-35b-a3b"
-    assert model.translationProfile == "qwen35"
-    assert model.harvestTranslationModel == "llamacpp:qwen3.5-35b-a3b"
-    assert model.correctionProfile == "llamacpp:qwen3.5-35b-a3b-uncensored"
-    assert model.llamacppCtx == "4096"
+    assert model.llamacppModel == "qwen3-14b"
+    assert model.translationProfile == "qwen3_14"
+    assert model.harvestTranslationModel == "llamacpp:qwen3-14b"
+    assert model.correctionProfile == "llamacpp:qwen3-14b-uncensored"
+    assert model.llamacppCtx == "8192"

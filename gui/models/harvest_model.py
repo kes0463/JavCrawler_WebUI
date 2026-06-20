@@ -215,17 +215,8 @@ class HarvestModel(QObject):
     @Slot(str)
     def addFolder(self, path: str):
         """단일 폴더 수집."""
-        from javstory.harvest.folder_harvest import plan_single_folder, planned_to_worker_entries
-        jobs, warns = plan_single_folder(Path(path))
-        for w in warns:
-            self.logMessage.emit(f"[경고] {w}")
-        if not jobs:
-            self.toastMessage.emit("실행할 작업이 없습니다.", "warning")
-            return
-        entries = planned_to_worker_entries(jobs)
-        self._enqueue_global(entries)
-        self._pump_global()
-        self.toastMessage.emit(f"{len(jobs)}건 수집 시작", "success")
+        self.toastMessage.emit("폴더 스캔 중... (백그라운드)", "info")
+        self._plan_in_background("run_single", [path])
 
     @Slot(str)
     def addParentFolder(self, path: str):
@@ -236,21 +227,8 @@ class HarvestModel(QObject):
     @Slot(str)
     def queueFolder(self, path: str):
         """단일 폴더 수집: 즉시 실행하지 않고 큐에 추가."""
-        from javstory.harvest.folder_harvest import plan_single_folder, planned_to_worker_entries
-        jobs, warns = plan_single_folder(Path(path))
-        for w in warns:
-            self.logMessage.emit(f"[경고] {w}")
-        if not jobs:
-            self.toastMessage.emit("큐에 추가할 작업이 없습니다.", "warning")
-            return
-        entries = planned_to_worker_entries(jobs)
-        self._queued_entries.extend(entries)
-        for e in entries:
-            sku = self._entry_sku(e)
-            if sku:
-                self._tasks.upsert(sku, "waiting", 0, "큐 대기")
-        self.queuedCountChanged.emit()
-        self.toastMessage.emit(f"{len(jobs)}건 큐에 추가됨 (총 {len(self._queued_entries)}건)", "success")
+        self.toastMessage.emit("폴더 스캔 중... (백그라운드)", "info")
+        self._plan_in_background("queue_single", [path])
 
     @Slot(str)
     def queueParentFolder(self, path: str):
@@ -267,7 +245,7 @@ class HarvestModel(QObject):
         self._plan_in_background("queue_folders", list(paths))
 
     def _plan_in_background(self, action: str, paths: list[str]) -> None:
-        """대량 폴더 계획(DFS)을 백그라운드에서 계산."""
+        """폴더 작업 계획을 백그라운드에서 계산."""
 
         class _PlanRunnable(QRunnable):
             def __init__(self, owner: "HarvestModel", action: str, paths: list[str]) -> None:
@@ -279,13 +257,17 @@ class HarvestModel(QObject):
             def run(self) -> None:
                 try:
                     from javstory.harvest.folder_harvest import (
+                        plan_single_folder,
                         plan_parent_folder,
                         plan_folder_paths,
                         planned_to_worker_entries,
                     )
                     warns: list[str] = []
                     jobs = []
-                    if self._action in ("run_parent", "queue_parent"):
+                    if self._action in ("run_single", "queue_single"):
+                        p = Path(self._paths[0])
+                        jobs, warns = plan_single_folder(p)
+                    elif self._action in ("run_parent", "queue_parent"):
                         p = Path(self._paths[0])
                         jobs, warns = plan_parent_folder(p)
                     elif self._action == "queue_folders":
@@ -311,17 +293,18 @@ class HarvestModel(QObject):
             self.logMessage.emit(f"[경고] {w}")
 
         if not entries:
-            msg = "실행할 작업이 없습니다." if action == "run_parent" else "큐에 추가할 작업이 없습니다."
+            msg = "실행할 작업이 없습니다." if action in ("run_single", "run_parent") else "큐에 추가할 작업이 없습니다."
             self.toastMessage.emit(msg, "warning")
             return
 
-        if action == "run_parent":
+        if action in ("run_single", "run_parent"):
             self._enqueue_global(entries)
             self._pump_global()
-            self.toastMessage.emit(f"{len(entries)}건 하위 폴더 수집 시작", "success")
+            label = "하위 폴더 수집" if action == "run_parent" else "수집"
+            self.toastMessage.emit(f"{len(entries)}건 {label} 시작", "success")
             return
 
-        # queue_parent / queue_folders
+        # queue_single / queue_parent / queue_folders
         self._queued_entries.extend(entries)
         for e in entries:
             sku = self._entry_sku(e)

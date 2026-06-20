@@ -16,7 +16,7 @@ from javstory.persona.persona_chat import (
     _deterministic_recommendation_response,
     _format_chat_response_text,
     _is_incomplete_stage_direction_response,
-    _is_qwen_llamacpp_context_limited,
+    _looks_truncated_response,
     _persona_chat_max_tokens_for_context,
     _recommendation_candidates_from_payload,
     _recommendation_response_needs_replacement,
@@ -109,7 +109,7 @@ class StreamingChatWorker(QThread):
                 product_code=self.product_code,
                 temperature=req_temperature,
                 max_tokens=req_max_tokens,
-                compact=_is_qwen_llamacpp_context_limited(),
+                compact=False,
             )
             payload["stream"] = True
             headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
@@ -156,11 +156,21 @@ class StreamingChatWorker(QThread):
                 return
 
             full_text = _strip_reasoning_leak(full_text)
+            if not full_text:
+                full_text = self._retry_non_streaming_final()
             if full_text and _is_incomplete_stage_direction_response(full_text):
                 full_text = self._retry_non_streaming_final()
                 sentence_buffer = full_text
             full_text = _format_chat_response_text(full_text)
+            if _looks_truncated_response(full_text) and not self._retried_non_streaming:
+                retry_text = self._retry_non_streaming_final()
+                if retry_text:
+                    full_text = retry_text
             full_text = _with_truncation_note(full_text, finish_reason)
+            if _looks_truncated_response(full_text):
+                full_text = full_text.rstrip() + "\n\n[응답이 문장 중간에서 끊긴 것 같아요. '계속'이라고 입력하면 이어서 정리해드릴게요.]"
+            if not full_text:
+                full_text = "응답이 비어 있어서 표시할 내용이 없었어요. 같은 질문을 한 번만 다시 보내주세요."
             needs_replacement = _recommendation_response_needs_replacement(
                 self.user_message,
                 full_text,
@@ -225,13 +235,14 @@ class StreamingChatWorker(QThread):
                 history=[],
                 product_code=self.product_code,
                 temperature=0.75,
-                max_tokens=800,
+                max_tokens=1400,
             )
             content = ((response.get("choices") or [{}])[0].get("message") or {}).get("content")
             cleaned = _strip_reasoning_leak(str(content or ""))
             if _is_incomplete_stage_direction_response(cleaned):
                 return ""
-            return _format_chat_response_text(cleaned)
+            formatted = _format_chat_response_text(cleaned)
+            return "" if _looks_truncated_response(formatted) else formatted
         except Exception:
             return ""
 
