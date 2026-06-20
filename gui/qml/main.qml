@@ -180,6 +180,9 @@ ApplicationWindow {
 
     // ── 전역 내비게이션 ─────────────────────────────
     property string pendingLibraryDetailProductCode: ""
+    property int pendingActressId: 0
+    /// 배우 프로필 → 작품 상세 진입 시, 상세 닫으면 이 배우 상세로 복귀 (0이면 라이브러리 목록)
+    property int libraryDetailReturnActressId: 0
 
     function ensureViewLoaded(idx) {
         if (idx === 1)
@@ -195,15 +198,22 @@ ApplicationWindow {
         else if (idx === 6)
             personaChatLoader.active = true
         else if (idx === 7)
+            actressLoader.active = true
+        else if (idx === 8)
             settingsLoader.active = true
     }
 
     function navigateToIndex(idx) {
         ensureViewLoaded(idx)
         viewStack.currentIndex = idx
+        sidebar.currentIndex = idx
     }
 
-    function navigateToLibraryDetail(productCode) {
+    function navigateToLibraryDetail(productCode, returnActressId) {
+        if (returnActressId !== undefined && returnActressId > 0)
+            libraryDetailReturnActressId = returnActressId
+        else
+            libraryDetailReturnActressId = 0
         pendingLibraryDetailProductCode = productCode || ""
         sidebar.currentIndex = 4
         navigateToIndex(4)
@@ -213,10 +223,45 @@ ApplicationWindow {
         }
     }
 
+    function handleLibraryDetailClosed() {
+        if (libraryDetailReturnActressId <= 0)
+            return
+        var id = libraryDetailReturnActressId
+        libraryDetailReturnActressId = 0
+        navigateToActressProfile(id)
+    }
+
     function navigateToLibrarySearch(query) {
         LibraryModel.searchQuery = query
         sidebar.currentIndex = 4
         navigateToIndex(4)
+    }
+
+    function navigateToActressProfile(actressId) {
+        if (!actressId || actressId <= 0)
+            return
+        pendingActressId = actressId
+        navigateToIndex(7)
+        if (actressLoader.item) {
+            actressLoader.item.selectedActressId = actressId
+            actressLoader.item.showingDetail = true
+            if (actressLoader.item.actressModel) {
+                actressLoader.item.actressModel.loadProfile(actressId)
+                pendingActressId = 0
+            }
+        }
+    }
+
+    function navigateToActressByName(name) {
+        var trimmed = (name || "").trim()
+        if (!trimmed)
+            return
+        var id = ActressModel.findActressIdByName(trimmed)
+        if (id > 0) {
+            navigateToActressProfile(id)
+        } else {
+            showToast("'" + trimmed + "' 배우 프로필이 없습니다. 배우 프로필 탭에서 추가할 수 있습니다.", "info")
+        }
     }
 
     // ── 전역 플레이어 제어 ───────────────────────────
@@ -406,6 +451,24 @@ ApplicationWindow {
                 active: false
             }
             Loader {
+                id: actressLoader
+                source: "views/ActressView.qml"
+                asynchronous: true
+                active: false
+                property var actressModel: ActressModel
+                onLoaded: {
+                    if (item) {
+                        item.actressModel = actressModel
+                        if (window.pendingActressId > 0) {
+                            item.selectedActressId = window.pendingActressId
+                            item.showingDetail = true
+                            actressModel.loadProfile(window.pendingActressId)
+                            window.pendingActressId = 0
+                        }
+                    }
+                }
+            }
+            Loader {
                 id: settingsLoader
                 source: "views/SettingsView.qml"
                 asynchronous: true
@@ -420,6 +483,13 @@ ApplicationWindow {
             window.ensureViewLoaded(viewStack.currentIndex)
             if (viewStack.currentIndex === 4 && libraryLoader.item)
                 libraryLoader.item.forceLibraryFocus()
+            if (viewStack.currentIndex === 7 && actressLoader.item && actressLoader.item.actressModel) {
+                actressLoader.item.actressModel.reload()
+                if (pendingActressId > 0) {
+                    actressLoader.item.actressModel.loadProfile(pendingActressId)
+                    pendingActressId = 0
+                }
+            }
         }
     }
 

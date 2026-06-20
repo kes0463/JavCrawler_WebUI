@@ -207,9 +207,15 @@ def _slug_candidates(product_id: str) -> List[str]:
             out.append(x)
 
     add(slug)
+    # SIRO-2735 등 일부 SIRO 시리즈는 siro2735 (하이픈 없이) 형태로도 존재
+    if "-" in slug and slug.startswith(("siro-", "siro")):
+        no_hyphen = slug.replace("-", "", 1)  # siro-2735 -> siro2735
+        add(no_hyphen)
     for suf in ("-uncensored-leaked", "-uncensored", "-leaked", "-censored"):
         if not slug.endswith(suf):
             add(slug + suf)
+            if "-" in slug and slug.startswith(("siro-", "siro")):
+                add(no_hyphen + suf)
     return out
 
 
@@ -353,6 +359,7 @@ def fetch_video_info(
             continue
         if _detail_has_content(info):
             return info
+        # For redirect/empty pages, continue to next slug (including siro2735)
 
     if last_exc is not None:
         raise last_exc

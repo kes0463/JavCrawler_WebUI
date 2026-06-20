@@ -511,6 +511,12 @@ def build_persona_context(*, max_products: int | None = None) -> Dict[str, Any]:
         "subtitle_profile": {},
     }
 
+    try:
+        from javstory.utils.actress_profile import get_favorite_actress_profiles
+        ctx["favorite_actress_profiles"] = get_favorite_actress_profiles(10)
+    except Exception:
+        ctx["favorite_actress_profiles"] = []
+
     if not persona_deep_enabled():
         return ctx
 

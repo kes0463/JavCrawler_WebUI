@@ -11,8 +11,8 @@ Rectangle {
 
     property bool hoverGlow: false
     property int contentMargins: Theme.spacingMd
-    /** true면 내부 content 크기로 implicitHeight를 계산(자동 높이). anchors.fill 기반 콘텐츠가 있으면 루프가 날 수 있어 기본은 false. */
     property bool autoSize: false
+    property string title: ""
 
     // 그림자 애니메이션용 중간 속성
     property real _shadowR: (hoverArea.containsMouse && hoverGlow) ? 22 : 9
@@ -54,15 +54,30 @@ Rectangle {
 
     Loader { id: contentLoader; active: false }
 
+    // 선택적 타이틀 (title 프로퍼티가 비어 있으면 렌더링 안 함)
+    Text {
+        id: titleLabel
+        visible: root.title !== ""
+        text: root.title
+        color: Theme.textSecondary
+        font.pixelSize: 12
+        font.weight: Font.Medium
+        anchors.top: parent.top
+        anchors.left: parent.left
+        anchors.margins: root.contentMargins
+    }
+
     Item {
         id: contentArea
-        anchors {
-            fill: root.autoSize ? undefined : parent
-            left: root.autoSize ? parent.left : undefined
-            right: root.autoSize ? parent.right : undefined
-            top: root.autoSize ? parent.top : undefined
-            margins: root.contentMargins
-        }
-        // autoSize=true일 때는 childrenRect로만 implicitHeight 계산(높이를 강제하지 않음)
+        // fill + 개별 undefined 혼용 시 undefined가 fill을 override해 width/height=0이 되는 Qt 버그 방지.
+        // 개별 앵커만 명시적으로 사용.
+        anchors.left: parent.left
+        anchors.right: parent.right
+        anchors.leftMargin: root.contentMargins
+        anchors.rightMargin: root.contentMargins
+        anchors.top: root.title !== "" ? titleLabel.bottom : parent.top
+        anchors.topMargin: root.title !== "" ? Theme.spacingSm : root.contentMargins
+        anchors.bottom: root.autoSize ? undefined : parent.bottom
+        anchors.bottomMargin: root.autoSize ? 0 : root.contentMargins
     }
 }

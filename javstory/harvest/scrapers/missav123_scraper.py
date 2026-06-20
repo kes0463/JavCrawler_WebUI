@@ -165,26 +165,42 @@ def _slug_candidates(product_id: str) -> List[str]:
             out.append(x)
 
     add(slug)
+    # SIRO-2735 등 일부 SIRO 시리즈는 siro2735 (하이픈 없이) 형태로도 존재
+    if "-" in slug and slug.startswith(("siro-", "siro")):
+        no_hyphen = slug.replace("-", "", 1)  # siro-2735 -> siro2735
+        add(no_hyphen)
     for suf in ("-uncensored-leaked", "-uncensored", "-leaked", "-censored"):
         if not slug.endswith(suf):
             add(slug + suf)
+            if "-" in slug and slug.startswith(("siro-", "siro")):
+                add(no_hyphen + suf)
     return out
 
 
 def _missav_detail_has_content(info: MissavVideoInfo) -> bool:
+    """Missav redirect pages have title but no code/player; treat as valid if title present (fav count is main goal)."""
     title = str(getattr(info, "title", "") or "").strip()
     code = str(getattr(info, "code", "") or "").strip()
-    return bool(title or code)
+    # For SIRO series redirect pages, title alone is sufficient for FavoritesOnlyWorker
+    return bool(title)
 
 
 def parse_video_html(html: str, *, base_url: str = BASE_URL) -> MissavVideoInfo:
     soup = BeautifulSoup(html, "lxml")
     info = MissavVideoInfo()
 
-    # title
-    h1 = soup.select_one(SELECTORS["title"])
+    # title - missav123.to often redirects or uses different structure (e.g. to 123av)
+    h1 = soup.select_one(SELECTORS["title"]) or soup.select_one("h1") or soup.select_one("title")
     if h1:
-        info.title = _text(h1)
+        raw_title = _text(h1)
+        info.title = raw_title
+        # If it's a redirect page to 123av (common for SIRO series), extract the real title
+        if any(k in raw_title for k in ["移転しました", "123av.com", "SIRO-2735"]):
+            # The full title often appears after "—"
+            if "—" in raw_title:
+                parts = [p.strip() for p in raw_title.split("—", 1)]
+                if len(parts) > 1 and parts[1]:
+                    info.title = parts[1]
 
     # player attrs: code / cover
     player = soup.select_one(SELECTORS["player"])
@@ -243,11 +259,22 @@ def parse_video_html(html: str, *, base_url: str = BASE_URL) -> MissavVideoInfo:
                 info.maker = _text(a) if a else _text(row)
                 continue
 
-    # fallback code: try from title prefix "CODE - ..."
+    # fallback code: try from title prefix "CODE - ..." or redirect title
     if not info.code and info.title:
         m = re.match(r"^([A-Za-z0-9]+-\d+)\b", info.title)
         if m:
             info.code = m.group(1)
+        else:
+            # For redirect pages like "SIRO-2735 — ..."
+            m2 = re.search(r"(SIRO|siro)-?(\d+)", info.title, re.I)
+            if m2:
+                info.code = f"SIRO-{m2.group(2)}"
+
+    # If title was updated from redirect, try to set code from it too
+    if not info.code and info.title and "SIRO" in info.title.upper():
+        m3 = re.search(r"SIRO-?(\d+)", info.title, re.I)
+        if m3:
+            info.code = f"SIRO-{m3.group(1)}"
 
     info.favourite_count = _favourite_count_missav(soup)
     return info

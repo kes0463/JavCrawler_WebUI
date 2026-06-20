@@ -18,9 +18,8 @@ from PySide6.QtCore import QTimer, QUrl
 from PySide6.QtQml import QQmlApplicationEngine
 
 _QML_DIR = Path(__file__).resolve().parent / "qml"
-
-_OLLAMA_SERVE_PROC: subprocess.Popen | None = None
 _OLLAMA_SERVE_LOG_PATH: Path | None = None
+_OLLAMA_SERVE_PROC: subprocess.Popen | None = None
 
 # job_id가 파일명 기반이면 ')'가 포함될 수 있어, 마지막 '(job=...)'를 통째로 잡는다.
 _RE_MOSAIC_JOB = re.compile(r"\(job=(.+)\)\s*$")
@@ -402,6 +401,7 @@ def create_engine(app) -> QQmlApplicationEngine:
     from gui.models.translation_queue_model import TranslationQueueController
     from gui.models.player_model import PlayerModel
     from gui.models.insight_model import InsightModel
+    from gui.models.actress_model import ActressModel
     from gui.folder_binding_inbox_store import FolderBindingInboxStore
 
     ctx = engine.rootContext()
@@ -434,6 +434,8 @@ def create_engine(app) -> QQmlApplicationEngine:
     player_model = PlayerModel(parent=app)
     print("[UI] Initializing InsightModel...")
     insight_model = InsightModel(parent=app)
+    print("[UI] Initializing ActressModel...")
+    actress_model = ActressModel(parent=app)
     folder_binding_inbox_store = FolderBindingInboxStore(parent=app)
 
     # llama-server 프리웜 — 라이브러리 로딩 완료 후(기본 180초) 백그라운드에서 서버 기동 + context 계산
@@ -456,6 +458,7 @@ def create_engine(app) -> QQmlApplicationEngine:
     ctx.setContextProperty("EmbeddingQueue", embedding_queue)
     ctx.setContextProperty("SettingsModel", settings)
     ctx.setContextProperty("FolderExplorerModel", folder_explorer)
+    ctx.setContextProperty("ActressModel", actress_model)
     ctx.setContextProperty("TranslationQueue", translation_queue)
     ctx.setContextProperty("FolderBindingInboxStore", folder_binding_inbox_store)
     ctx.setContextProperty("PlayerModel", player_model)

@@ -40,6 +40,26 @@ _CHAT_SEARCH_EMBEDDING_WEIGHTS = (0.3, 0.5, 0.2)
 ENHANCED_PERSONA_MEMORY_PATH = DATA_ROOT / "cache" / "persona_chat_enhanced_memory.json"
 
 
+def _actress_db_chat_context(user_message: str, persona_context: dict) -> dict:
+    """배우 프로필 DB 컨텍스트 — 즐겨찾기 + 메시지 내 이름 매칭."""
+    from javstory.utils.actress_profile import get_actress_context_by_name
+
+    out: dict = {
+        "favorite_profiles": persona_context.get("favorite_actress_profiles") or [],
+        "mentioned": [],
+    }
+    msg = (user_message or "").strip()
+    if not msg:
+        return out
+    for fav in out["favorite_profiles"]:
+        name = (fav.get("name") or "").strip()
+        if name and name in msg:
+            ctx = get_actress_context_by_name(name)
+            if ctx:
+                out["mentioned"].append(ctx)
+    return out
+
+
 # 추천/검색 의도를 명시적으로 부정하는 패턴
 # 이 패턴이 포함된 메시지는 "recommendation" 의도로 분류하지 않는다.
 _RECOMMENDATION_NEGATION_HINTS = (
@@ -573,6 +593,7 @@ class EroticPersonaEngine:
                 "semantic_profile": context.get("semantic_profile") or {},
                 "sample_groups": context.get("sample_groups") or {},
             },
+            "actress_db_context": _actress_db_chat_context(user_message, context),
             "mentioned_products": products,
             "library_search": library_search,
         }

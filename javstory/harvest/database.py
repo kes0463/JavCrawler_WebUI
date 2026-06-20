@@ -8,6 +8,7 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    Date,
     create_engine,
     event,
 )
@@ -35,7 +36,7 @@ Base = declarative_base()
 # - SQLite `PRAGMA user_version`에 저장한다.
 # - 테이블/컬럼 마이그레이션 로직을 변경하면 이 값을 올려서 1회 재실행되게 한다.
 # - v9+ 스키마는 Alembic only — `upgrade_alembic_head()` (init_db 이후 호출)
-_APP_DB_SCHEMA_VERSION = 12
+_APP_DB_SCHEMA_VERSION = 13
 _ALEMBIC_HEAD_REVISION = "0001_stamp_v8"
 _SCHEMA_USER_VERSION_ALEMBIC = 9
 
@@ -158,6 +159,67 @@ class Actress(Base):
     # 배우 단위 번역 노트 — 같은 배우의 모든 작품에 공통 적용되는 페르소나/말투/표기 가이드.
     # Gemini 번역 프롬프트의 {{note}}에 작품 노트·전역 노트와 함께 합쳐 주입된다.
     translation_note = Column(Text, nullable=True)
+
+    # Actress Profile Extension (2026-06)
+    name_ja = Column(String(100), nullable=True)           # synonym for japanese (for consistency)
+    name_ko = Column(String(100), nullable=True, index=True)
+    name_en = Column(String(100), nullable=True)
+    profile_image_url = Column(Text, nullable=True)
+    genres = Column(Text, nullable=True)                    # comma-separated or JSON
+    user_score = Column(Float, nullable=True)               # 0.0 ~ 10.0
+    profile_text = Column(Text, nullable=True)
+    birth_date = Column(Date, nullable=True)
+    height = Column(Integer, nullable=True)                 # cm
+    bust = Column(Integer, nullable=True)
+    waist = Column(Integer, nullable=True)
+    hip = Column(Integer, nullable=True)
+    cup_size = Column(String(10), nullable=True)
+    debut_date = Column(Date, nullable=True)
+    agency = Column(String(100), nullable=True)
+    is_favorite = Column(Boolean, default=False)
+    favorite_intensity = Column(Float, nullable=True)       # 0.0 ~ 10.0
+    strong_reaction_count = Column(Integer, default=0)
+    watch_count = Column(Integer, default=0)
+    last_watched = Column(Date, nullable=True)
+    memo = Column(Text, nullable=True)
+    # created_at / updated_at will be added via Alembic migration (using server_default for SQLite compatibility)
+
+    created_at = Column(DateTime, nullable=True, default=datetime.datetime.now)
+    updated_at = Column(DateTime, nullable=True, default=datetime.datetime.now, onupdate=datetime.datetime.now)
+
+    # Relationships for new tables (added in step 3)
+    images = relationship("ActressImage", back_populates="actress", cascade="all, delete-orphan")
+    aliases = relationship("ActressAlias", back_populates="actress", cascade="all, delete-orphan")
+
+
+class ActressImage(Base):
+    """배우 사진 갤러리 (profile + additional images)"""
+    __tablename__ = 'actress_images'
+
+    image_id = Column(Integer, primary_key=True)
+    actress_id = Column(Integer, ForeignKey('actresses.id', ondelete='CASCADE'), index=True)
+    image_url = Column(Text, nullable=False)
+    is_profile = Column(Boolean, default=False)
+    sort_order = Column(Integer, default=0)
+    caption = Column(Text, nullable=True)
+    added_at = Column(DateTime, default=datetime.datetime.now)
+
+    actress = relationship("Actress", back_populates="images")
+
+
+class ActressAlias(Base):
+    """배우 별명 관리 (search, persona에서 중요)"""
+    __tablename__ = 'actress_aliases'
+
+    alias_id = Column(Integer, primary_key=True)
+    actress_id = Column(Integer, ForeignKey('actresses.id', ondelete='CASCADE'), index=True)
+    alias_name = Column(Text, nullable=False)
+    alias_type = Column(String(20), nullable=True)  # stage, old, korean, english, other
+    is_primary = Column(Boolean, default=False)
+    created_at = Column(DateTime, default=datetime.datetime.now)
+
+    actress = relationship("Actress", back_populates="aliases")
+
 
 class Genre(Base):
     """장르 정보 테이블 (genres)"""

@@ -23,6 +23,12 @@ HeatmapWidget 1.0 HeatmapWidget.qml
 PersonaCard 1.0 PersonaCard.qml
 TasteDriftChart 1.0 TasteDriftChart.qml
 ActorCollectionCard 1.0 ActorCollectionCard.qml
+ActressProfileCard 1.0 ActressProfileCard.qml
+ActressGallery 1.0 ActressGallery.qml
+AliasManager 1.0 AliasManager.qml
+AddActressDialog 1.0 AddActressDialog.qml
+ActressDetailPanel 1.0 ActressDetailPanel.qml
+MergeActressDialog 1.0 MergeActressDialog.qml
 InsightSectionHeader 1.0 InsightSectionHeader.qml
 EmptyInsightHint 1.0 EmptyInsightHint.qml
 InsightTabBar 1.0 InsightTabBar.qml

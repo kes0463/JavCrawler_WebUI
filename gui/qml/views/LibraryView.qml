@@ -19,6 +19,14 @@ Item {
             })
     }
 
+    function closeDetail() {
+        if (!detailVisible)
+            return
+        detailVisible = false
+        LibraryModel.clearDetailHistory()
+        window.handleLibraryDetailClosed()
+    }
+
     property bool detailVisible: false
     property bool selectMode: false
     property var selectedSkus: []
@@ -342,7 +350,7 @@ Item {
                 root.selectMode = false
                 root.selectedSkus = []
             } else {
-                root.detailVisible = false
+                root.closeDetail()
             }
         }
     }
@@ -354,7 +362,7 @@ Item {
             && !detailLoader.item.folderPickerOpen
             && !manualFolderPicker.visible
             && !(root.Window.window && root.Window.window.isPlayerOpen)
-        onActivated: root.detailVisible = false
+        onActivated: root.closeDetail()
     }
 
     FolderDialog {
@@ -1809,7 +1817,7 @@ Item {
         z: 2000
         sourceComponent: Component {
             LibraryDetail {
-                onBack: root.detailVisible = false
+                onBack: root.closeDetail()
             }
         }
     }

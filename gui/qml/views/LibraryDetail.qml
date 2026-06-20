@@ -2235,7 +2235,7 @@ Item {
                                                 anchors.fill: parent
                                                 hoverEnabled: true
                                                 cursorShape: Qt.PointingHandCursor
-                                                onClicked: root.searchAndGoBack(modelData)
+                                                onClicked: window.navigateToActressByName(modelData)
                                             }
                                         }
                                     }
