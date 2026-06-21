@@ -246,8 +246,6 @@ Item {
         onActivated: root._toggleAllSelection()
     }
 
-    Component.onCompleted: LibraryModel.reload()
-
     Connections {
         target: LibraryModel
         function onToastMessage(msg, level) { window.showToast(msg, level); }

@@ -10,7 +10,35 @@ Item {
     property var actressModel: null
     property int selectedActressId: 0
     property bool showingDetail: false
+    property string listSortKey: "name"
+    property bool listSortAscending: true
 
+    readonly property var _sortOptions: [
+        { key: "name", label: "이름" },
+        { key: "works", label: "작품수" },
+        { key: "favorite", label: "즐겨찾기" },
+        { key: "score", label: "점수" },
+        { key: "recent", label: "최근추가" }
+    ]
+
+    function syncSortFromModel() {
+        if (!actressModel) return
+        listSortKey = actressModel.sortKey || "name"
+        listSortAscending = actressModel.sortAscending !== undefined
+            ? actressModel.sortAscending
+            : true
+    }
+
+    function toggleListSort(key) {
+        if (listSortKey === key)
+            listSortAscending = !listSortAscending
+        else {
+            listSortKey = key
+            listSortAscending = (key === "name")
+        }
+        if (actressModel)
+            actressModel.reloadSortedEx(listSortKey, listSortAscending)
+    }
 
     AddActressDialog {
         id: addActressDialog
@@ -32,11 +60,14 @@ Item {
     }
 
     onActressModelChanged: {
-        if (actressModel) actressModel.reload()
+        syncSortFromModel()
+        if (actressModel)
+            actressModel.refreshList()
     }
 
-    Component.onCompleted: {
-        if (actressModel) actressModel.reload()
+    Connections {
+        target: actressModel
+        function onSortStateChanged() { root.syncSortFromModel() }
     }
 
     StackLayout {
@@ -68,7 +99,7 @@ Item {
                     }
                 }
 
-                RowLayout {
+                ColumnLayout {
                     Layout.fillWidth: true
                     spacing: Theme.spacingSm
 
@@ -80,27 +111,36 @@ Item {
                         }
                     }
 
-                    ComboBox {
-                        id: sortCombo
-                        implicitWidth: 110
-                        model: ["이름순", "즐겨찾기", "점수순", "최근추가"]
-                        currentIndex: 0
-                        background: Rectangle {
-                            color: Theme.surfaceLight
-                            radius: 6
-                            border.color: Theme.glassBorder
-                        }
-                        contentItem: Text {
-                            leftPadding: 8
-                            text: sortCombo.displayText
-                            color: Theme.textPrimary
-                            font.pixelSize: 13
-                            verticalAlignment: Text.AlignVCenter
-                        }
-                        onCurrentIndexChanged: {
-                            if (!root.actressModel) return
-                            var keys = ["name", "favorite", "score", "recent"]
-                            root.actressModel.reloadSorted(keys[currentIndex])
+                    Flow {
+                        Layout.fillWidth: true
+                        spacing: 6
+                        Repeater {
+                            model: root._sortOptions
+                            delegate: Rectangle {
+                                readonly property bool active: root.listSortKey === modelData.key
+                                width: sortChipText.width + 16
+                                height: 28
+                                radius: 14
+                                color: active
+                                    ? Qt.rgba(Theme.accentNeon.r, Theme.accentNeon.g, Theme.accentNeon.b, 0.18)
+                                    : Theme.surfaceLight
+                                border.color: active ? Theme.accentNeon : Theme.glassBorder
+                                Text {
+                                    id: sortChipText
+                                    anchors.centerIn: parent
+                                    text: modelData.label + (active
+                                        ? (root.listSortAscending ? " ↑" : " ↓")
+                                        : "")
+                                    color: active ? "#FFFFFF" : Theme.textSecondary
+                                    font.pixelSize: 12
+                                    font.bold: active
+                                }
+                                MouseArea {
+                                    anchors.fill: parent
+                                    cursorShape: Qt.PointingHandCursor
+                                    onClicked: root.toggleListSort(modelData.key)
+                                }
+                            }
                         }
                     }
                 }

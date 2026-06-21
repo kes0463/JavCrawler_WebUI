@@ -13,6 +13,7 @@ Rectangle {
     property int contentMargins: Theme.spacingMd
     property bool autoSize: false
     property string title: ""
+    readonly property bool hovered: hoverArea.containsMouse
 
     // 그림자 애니메이션용 중간 속성
     property real _shadowR: (hoverArea.containsMouse && hoverGlow) ? 22 : 9

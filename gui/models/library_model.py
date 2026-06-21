@@ -645,6 +645,7 @@ class MetadataResyncWorker(QThread):
                 chunk_size = 200
                 total_rows = 0
                 total_commits = 0
+                changed_product_codes: list[str] = []
                 while True:
                     id_q = session.query(JAVMetadata.id).filter(JAVMetadata.id > last_id)
                     if self._product_codes:
@@ -737,6 +738,9 @@ class MetadataResyncWorker(QThread):
 
                         if changed:
                             dirty += 1
+                            pc = (getattr(row, "product_code", None) or "").strip().upper()
+                            if pc:
+                                changed_product_codes.append(pc)
 
                     if dirty > 0:
                         session.commit()
@@ -745,7 +749,12 @@ class MetadataResyncWorker(QThread):
             finally:
                 session.close()
 
-            self.finished.emit({"updated": updated, "skipped": skipped, "unknown_samples": unknown_samples})
+            self.finished.emit({
+                "updated": updated,
+                "skipped": skipped,
+                "unknown_samples": unknown_samples,
+                "changed_product_codes": changed_product_codes,
+            })
         except Exception as e:
             self.error.emit(str(e))
 
@@ -1366,13 +1375,13 @@ class LibraryModel(QObject):
                     # 전체 재동기화는 리스트 reload만으로는 현재 열려있는 상세 화면이 즉시 갱신되지 않을 수 있어
                     # 현재 상세 품번이 있으면 refreshProduct로 상세도 같이 갱신한다.
                     try:
-                        cur_pc = (self._detail.productCode or "").strip().upper()
-                        if cur_pc:
-                            self.refreshProduct(cur_pc)
-                    except Exception:
-                        pass
-                    try:
-                        self.reload()
+                        codes = payload.get("changed_product_codes") or []
+                        if codes:
+                            self.refreshProducts(codes)
+                        else:
+                            cur_pc = (self._detail.productCode or "").strip().upper()
+                            if cur_pc:
+                                self.refreshProduct(cur_pc)
                     except Exception:
                         pass
                     try:
@@ -1428,11 +1437,7 @@ class LibraryModel(QObject):
                     if self._metadata_resync_worker is w:
                         self._metadata_resync_worker = None
                     try:
-                        self.refreshProduct(pc)
-                    except Exception:
-                        pass
-                    try:
-                        self.reload()
+                        self.refreshProducts([pc])
                     except Exception:
                         pass
                     try:
@@ -1592,7 +1597,7 @@ class LibraryModel(QObject):
                 self._all_summaries = [s for s in (self._all_summaries or []) if (s.product_code or "").strip().upper() != base]
             except Exception:
                 pass
-            self.reload()
+            self._rebuild()
             self.toastMessage.emit(
                 f"삭제 완료: {base}" + (" (파일 포함)" if delete_files else ""),
                 "success",
@@ -1602,40 +1607,62 @@ class LibraryModel(QObject):
 
     @Slot(str)
     def refreshProduct(self, product_code: str):
+        self._refresh_products_impl([product_code], rebuild=True)
+
+    @Slot("QStringList")
+    def refreshProducts(self, product_codes) -> None:
+        self._refresh_products_impl(list(product_codes or []), rebuild=True)
+
+    def _refresh_products_impl(self, product_codes: list, *, rebuild: bool = True) -> None:
         try:
-            pc = (product_code or "").strip().upper()
-            if not pc: return
-            found = False
-            for i, s in enumerate(self._all_summaries):
-                if s.product_code == pc:
-                    from gui.library_data import row_to_summary
-                    from javstory.harvest.database import get_db_session, JAVMetadata
-                    session = get_db_session()
+            codes = {
+                str(c or "").strip().upper()
+                for c in (product_codes or [])
+                if str(c or "").strip()
+            }
+            if not codes:
+                return
+
+            from gui.library_data import row_to_summary
+            from javstory.harvest.database import get_db_session, JAVMetadata
+
+            updated_detail_pc = ""
+            found_any = False
+            session = get_db_session()
+            try:
+                for i, s in enumerate(self._all_summaries):
+                    pc = (getattr(s, "product_code", "") or "").strip().upper()
+                    if pc not in codes:
+                        continue
+                    row = session.query(JAVMetadata).filter_by(product_code=pc).first()
+                    if not row:
+                        continue
                     try:
-                        row = session.query(JAVMetadata).filter_by(product_code=pc).first()
-                        if row:
-                            # 파일 플래그 캐시도 해당 작품만 갱신
-                            try:
-                                from javstory.library.file_flag_scanner import upsert_one_flag
-                                upsert_one_flag(
-                                    pc,
-                                    (row.folder_path or "").strip() or None,
-                                    bool(row.is_hardcoded),
-                                )
-                            except Exception:
-                                pass
-                            new_s = row_to_summary(row)
-                            self._all_summaries[i] = new_s
-                            found = True
-                    finally: session.close()
-                    break
-            
-            if found:
-                # 2. 현재 상세 페이지(DetailView)가 해당 품번이면 즉시 다시 로드하여 UI 갱신
-                if self._detail.productCode == pc:
-                    self.loadDetail(pc)
-                # 3. 전체 목록 재구성 필터링 반영
+                        from javstory.library.file_flag_scanner import upsert_one_flag
+                        upsert_one_flag(
+                            pc,
+                            (row.folder_path or "").strip() or None,
+                            bool(row.is_hardcoded),
+                        )
+                    except Exception:
+                        pass
+                    self._all_summaries[i] = row_to_summary(row)
+                    found_any = True
+                    if (self._detail.productCode or "").strip().upper() == pc:
+                        updated_detail_pc = pc
+            finally:
+                session.close()
+
+            if not found_any:
+                return
+
+            if updated_detail_pc:
+                self.loadDetail(updated_detail_pc)
+            if rebuild:
                 self._rebuild()
+                eff_days = int(self._favorite_delta_days or 0)
+                if eff_days > 0 or int(self._sort_mode or 0) in (11, 12):
+                    self._refresh_deltas_map(eff_days if eff_days > 0 else 7)
         except Exception as e:
             _ = e
 

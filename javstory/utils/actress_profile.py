@@ -377,6 +377,166 @@ def _format_debut_ym(value) -> str:
     return s
 
 
+def parse_actor_tokens(*values: Optional[str]) -> List[str]:
+    """actors_ko/ja/romaji CSV → 개별 배우 이름 토큰."""
+    tokens: List[str] = []
+    seen: set[str] = set()
+    for val in values:
+        raw = (val or "").strip()
+        if not raw:
+            continue
+        for part in raw.split(","):
+            token = part.strip()
+            if not token:
+                continue
+            key = token.casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            tokens.append(token)
+    return tokens
+
+
+def normalize_actor_name_key(name: str) -> str:
+    return (name or "").strip().casefold()
+
+
+def actress_names_match_tokens(search_names: List[str], actor_tokens: List[str]) -> bool:
+    """검색 이름과 작품 배우 토큰이 정확히 일치하는지 (부분 문자열 제외)."""
+    search_keys = {
+        normalize_actor_name_key(n)
+        for n in (search_names or [])
+        if normalize_actor_name_key(n)
+    }
+    if not search_keys:
+        return False
+    for token in actor_tokens or []:
+        if normalize_actor_name_key(token) in search_keys:
+            return True
+    return False
+
+
+def metadata_row_matches_actress(row, search_names: List[str]) -> bool:
+    """JAVMetadata 행의 배우 목록에 해당 프로필 이름이 포함되는지."""
+    tokens = parse_actor_tokens(
+        getattr(row, "actors_ko", None),
+        getattr(row, "actors_ja", None),
+        getattr(row, "actors", None),
+        getattr(row, "actors_romaji", None),
+    )
+    return actress_names_match_tokens(search_names, tokens)
+
+
+def batch_actress_work_counts(session, actress_rows: list) -> dict[int, int]:
+    """배우별 라이브러리 출연 작품 수 (품번 dedupe, 역인덱스 1-pass).
+
+    메타데이터 전체 × 배우 전체 이중 루프 대신, 이름→배우ID 역인덱스로
+    메타데이터를 한 번만 순회한다.
+    """
+    from javstory.harvest.database import JAVMetadata
+
+    if not actress_rows:
+        return {}
+
+    name_to_ids: dict[str, set[int]] = {}
+    actress_ids: list[int] = []
+    for row in actress_rows:
+        aid = row.id
+        actress_ids.append(aid)
+        for name in collect_actress_search_names(row):
+            key = normalize_actor_name_key(name)
+            if not key:
+                continue
+            name_to_ids.setdefault(key, set()).add(aid)
+
+    counts = {aid: 0 for aid in actress_ids}
+    seen: dict[int, set[str]] = {aid: set() for aid in actress_ids}
+
+    meta_rows = session.query(
+        JAVMetadata.product_code,
+        JAVMetadata.actors_ko,
+        JAVMetadata.actors_ja,
+        JAVMetadata.actors,
+        JAVMetadata.actors_romaji,
+    ).all()
+
+    for product_code, actors_ko, actors_ja, actors, actors_romaji in meta_rows:
+        pc = (product_code or "").strip()
+        if not pc:
+            continue
+        token_keys = {
+            normalize_actor_name_key(t)
+            for t in parse_actor_tokens(actors_ko, actors_ja, actors, actors_romaji)
+        }
+        token_keys.discard("")
+        if not token_keys:
+            continue
+
+        matched: set[int] = set()
+        for tk in token_keys:
+            ids = name_to_ids.get(tk)
+            if ids:
+                matched.update(ids)
+        if not matched:
+            continue
+
+        for aid in matched:
+            if pc in seen[aid]:
+                continue
+            seen[aid].add(pc)
+            counts[aid] += 1
+
+    return counts
+
+
+def fetch_actress_library_works(session, actress, max_items: int = 500) -> List[dict]:
+    """배우 출연작 목록 — 정확 토큰 매칭, release_date 내림차순.
+
+    ILIKE 선필터+상한(50) 방식은 합치기 후 이름·작품이 늘면
+    흡수된 배우 작품이 후보 풀/상위 N에서 빠질 수 있어 전체 스캔한다.
+    """
+    from javstory.harvest.database import JAVMetadata
+
+    names = collect_actress_search_names(actress)
+    if not names:
+        return []
+
+    meta_rows = (
+        session.query(JAVMetadata)
+        .order_by(JAVMetadata.release_date.desc())
+        .all()
+    )
+
+    seen: set[str] = set()
+    items: List[dict] = []
+    for row in meta_rows:
+        if not metadata_row_matches_actress(row, names):
+            continue
+        pc = (row.product_code or "").strip()
+        if not pc or pc in seen:
+            continue
+        seen.add(pc)
+        items.append({
+            "product_code": pc,
+            "title_ko": row.title_ko or row.title or "",
+            "titleKo": row.title_ko or row.title or "",
+            "actors_ko": row.actors_ko or "",
+            "actorsKo": row.actors_ko or "",
+            "genres_ko": row.genres_ko or row.genres or "",
+            "cover_path": row.cover_image_local_path or row.cover_image_url or "",
+            "coverPath": row.cover_image_local_path or row.cover_image_url or "",
+            "release_date": row.release_date or "",
+            "scene_count": 0,
+            "user_rating": 0,
+            "userRating": 0,
+            "user_liked": False,
+            "favorite_score": int(getattr(row, "favorite_score", 0) or 0),
+        })
+        if len(items) >= max_items:
+            break
+    return items
+
+
 def collect_actress_search_names(actress: Actress) -> List[str]:
     """작품 매칭용 이름 후보 (본명 + 별명)."""
     names: List[str] = []
@@ -439,29 +599,29 @@ def merge_actresses(keep_id: int, merge_id: int) -> bool:
         return False
     try:
         with get_db_session_ctx() as session:
+            from sqlalchemy.orm import joinedload
+
             keep = session.query(Actress).filter_by(id=keep_id).first()
-            merge = session.query(Actress).filter_by(id=merge_id).first()
+            merge = (
+                session.query(Actress)
+                .options(joinedload(Actress.aliases))
+                .filter_by(id=merge_id)
+                .first()
+            )
             if not keep or not merge:
                 return False
+
+            merge_search_names = collect_actress_search_names(merge)
 
             session.query(ActressImage).filter_by(actress_id=merge_id).update(
                 {"actress_id": keep_id}
             )
 
-            for alias in session.query(ActressAlias).filter_by(actress_id=merge_id).all():
-                _ensure_alias(session, keep_id, alias.alias_name, alias.alias_type or "other")
-                session.delete(alias)
+            for name in merge_search_names:
+                _ensure_alias(session, keep_id, name, "other")
 
-            alias_specs = [
-                (merge.japanese, "stage"),
-                (merge.name_ja, "stage"),
-                (merge.name_ko, "korean"),
-                (merge.korean, "korean"),
-                (merge.romaji, "english"),
-                (merge.name_en, "english"),
-            ]
-            for name, atype in alias_specs:
-                _ensure_alias(session, keep_id, name or "", atype)
+            for alias in session.query(ActressAlias).filter_by(actress_id=merge_id).all():
+                session.delete(alias)
 
             for attr in (
                 "name_ja", "name_ko", "name_en", "korean", "romaji",

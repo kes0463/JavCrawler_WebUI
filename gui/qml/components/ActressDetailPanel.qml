@@ -170,6 +170,24 @@ Item {
         return 0
     }
 
+    function _workListRow(w) {
+        return {
+            product_code: String(w.product_code || ""),
+            title_ko: String(w.title_ko || w.titleKo || ""),
+            titleKo: String(w.title_ko || w.titleKo || ""),
+            actors_ko: String(w.actors_ko || w.actorsKo || ""),
+            actorsKo: String(w.actors_ko || w.actorsKo || ""),
+            genres_ko: String(w.genres_ko || ""),
+            cover_path: String(w.cover_path || w.coverPath || ""),
+            coverPath: String(w.cover_path || w.coverPath || ""),
+            release_date: String(w.release_date || ""),
+            favorite_score: Number(w.favorite_score || 0),
+            user_rating: Number(w.user_rating || w.userRating || 0),
+            userRating: Number(w.user_rating || w.userRating || 0),
+            user_liked: Boolean(w.user_liked || false)
+        }
+    }
+
     function _rebuildWorksList() {
         worksListModel.clear()
         var filtered = []
@@ -180,7 +198,7 @@ Item {
         var anyUserRating = _filteredHasAnyRating(filtered)
         filtered.sort(function(a, b) { return _compareWorks(a, b, anyUserRating) })
         for (var j = 0; j < filtered.length; j++)
-            worksListModel.append(filtered[j])
+            worksListModel.append(_workListRow(filtered[j]))
     }
 
     function setGenreFilter(genre) {
@@ -785,8 +803,6 @@ Item {
                             selectByMouse: true
                             padding: 8
                             onTextChanged: { if (!root._suppressSave) profileTextTimer.restart() }
-
-                            ScrollBar.vertical: ScrollBar { policy: ScrollBar.AlwaysOff }
 
                             background: Rectangle {
                                 color: Theme.surfaceLight

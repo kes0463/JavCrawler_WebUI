@@ -484,7 +484,8 @@ ApplicationWindow {
             if (viewStack.currentIndex === 4 && libraryLoader.item)
                 libraryLoader.item.forceLibraryFocus()
             if (viewStack.currentIndex === 7 && actressLoader.item && actressLoader.item.actressModel) {
-                actressLoader.item.actressModel.reload()
+                actressLoader.item.syncSortFromModel()
+                actressLoader.item.actressModel.refreshList()
                 if (pendingActressId > 0) {
                     actressLoader.item.actressModel.loadProfile(pendingActressId)
                     pendingActressId = 0

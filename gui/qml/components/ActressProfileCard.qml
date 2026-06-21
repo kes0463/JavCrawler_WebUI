@@ -25,7 +25,7 @@ GlassCard {
 
     border.color: root.selected
         ? Theme.accentNeon
-        : (hoverArea.containsMouse && hoverGlow ? Theme.glassBorderHover : Theme.glassBorder)
+        : (root.hovered && hoverGlow ? Theme.glassBorderHover : Theme.glassBorder)
     border.width: root.selected ? 2 : 1
 
     readonly property var _genreTags: {

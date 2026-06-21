@@ -5,7 +5,7 @@ Follows patterns from LibraryModel and settings_model.py.
 """
 
 from PySide6.QtCore import (
-    QObject, Property, Signal, Slot, QAbstractListModel, QModelIndex, Qt
+    QObject, Property, Signal, Slot, QAbstractListModel, QModelIndex, Qt, QThread
 )
 from typing import Any, List, Dict, Optional
 import json
@@ -20,7 +20,8 @@ from javstory.utils.actress_profile import (
     resolve_actress_by_name,
     merge_actresses,
     aggregate_work_genres,
-    collect_actress_search_names,
+    batch_actress_work_counts,
+    fetch_actress_library_works,
     load_actress_media,
     promote_gallery_image_to_profile,
     resolve_actress_media_path,
@@ -163,12 +164,45 @@ class ActressListModel(QAbstractListModel):
         self.endResetModel()
 
 
+class _ActressWorksSortWorker(QThread):
+    """작품수 정렬 — 메타데이터 전체 스캔을 UI 스레드 밖에서 수행."""
+
+    finished = Signal(list)
+    error = Signal(str)
+
+    def __init__(self, query: str, ascending: bool, parent=None):
+        super().__init__(parent)
+        self._query = query
+        self._ascending = ascending
+
+    def run(self):
+        try:
+            from sqlalchemy.orm import joinedload
+
+            session = get_db_session()
+            try:
+                qry = session.query(Actress).options(joinedload(Actress.aliases))
+                qry = ActressModel._apply_search_filter(qry, self._query)
+                rows = qry.all()
+                counts = batch_actress_work_counts(session, rows)
+                rows.sort(
+                    key=lambda r: (counts.get(r.id, 0), (r.name_ko or r.korean or "")),
+                    reverse=not self._ascending,
+                )
+                self.finished.emit(ActressModel._rows_to_list_items(rows))
+            finally:
+                session.close()
+        except Exception as e:
+            self.error.emit(str(e))
+
+
 class ActressModel(QObject):
     """Main model for actress profiles. Exposed to QML."""
 
     # Signals
     actressListChanged = Signal()
     currentProfileChanged = Signal()
+    sortStateChanged = Signal()
     toastMessage = Signal(str, str)  # message, level (success/info/warning/error)
     errorOccurred = Signal(str)
 
@@ -177,6 +211,10 @@ class ActressModel(QObject):
         self._list_model = ActressListModel(self)
         self._current_profile: Dict = {}
         self._is_loading = False
+        self._works_sort_worker: _ActressWorksSortWorker | None = None
+        self._sort_key = "name"
+        self._sort_ascending = True
+        self._filter_query = ""
         self.reload()
 
     @Property(QObject, constant=True)
@@ -191,12 +229,69 @@ class ActressModel(QObject):
     def isLoading(self) -> bool:
         return self._is_loading
 
-    _SORT_ORDERS = {
-        "name":     lambda q: q.order_by(Actress.name_ko.asc().nullslast(), Actress.japanese.asc()),
-        "favorite": lambda q: q.order_by(Actress.is_favorite.desc(), Actress.name_ko.asc().nullslast()),
-        "score":    lambda q: q.order_by(Actress.user_score.desc().nullslast(), Actress.name_ko.asc().nullslast()),
-        "recent":   lambda q: q.order_by(Actress.id.desc()),
-    }
+    @Property(str, notify=sortStateChanged)
+    def sortKey(self) -> str:
+        return self._current_sort
+
+    @Property(bool, notify=sortStateChanged)
+    def sortAscending(self) -> bool:
+        return self._current_sort_ascending
+
+    _SORT_KEYS = ("name", "works", "favorite", "score", "recent")
+
+    @staticmethod
+    def _rows_to_list_items(rows: list) -> list:
+        items = []
+        for r in rows:
+            items.append({
+                "id": r.id,
+                "name_ko": r.name_ko or r.korean or "",
+                "name_ja": r.name_ja or r.japanese or "",
+                "japanese": r.japanese or "",
+                "profile_image_url": _resolve_data_path(r.profile_image_url or ""),
+                "user_score": getattr(r, "user_score", 0.0) or 0.0,
+                "is_favorite": getattr(r, "is_favorite", False),
+                "genres": getattr(r, "genres", "") or "",
+            })
+        return items
+
+    def _order_actress_rows(self, session, rows: list, sort: str, ascending: bool) -> list:
+        rows = list(rows or [])
+        if sort == "works":
+            counts = batch_actress_work_counts(session, rows)
+            rows.sort(
+                key=lambda r: (counts.get(r.id, 0), (r.name_ko or r.korean or "")),
+                reverse=not ascending,
+            )
+            return rows
+
+        reverse = not ascending
+        if sort == "name":
+            rows.sort(
+                key=lambda r: (r.name_ko or r.korean or "", r.name_ja or r.japanese or ""),
+                reverse=reverse,
+            )
+        elif sort == "favorite":
+            rows.sort(
+                key=lambda r: (bool(getattr(r, "is_favorite", False)), r.name_ko or r.korean or ""),
+                reverse=reverse,
+            )
+        elif sort == "score":
+            rows.sort(
+                key=lambda r: (float(getattr(r, "user_score", 0.0) or 0.0), r.name_ko or r.korean or ""),
+                reverse=reverse,
+            )
+        elif sort == "recent":
+            rows.sort(
+                key=lambda r: (getattr(r, "id", 0) or 0, r.name_ko or r.korean or ""),
+                reverse=reverse,
+            )
+        else:
+            rows.sort(
+                key=lambda r: (r.name_ko or r.korean or "", r.name_ja or r.japanese or ""),
+                reverse=reverse,
+            )
+        return rows
 
     @staticmethod
     def _apply_search_filter(qry, query: str):
@@ -226,36 +321,98 @@ class ActressModel(QObject):
     @Slot()
     def reload(self):
         """Load all actress profiles for grid (name sort)."""
-        self._reload_internal(sort="name")
+        self._sort_key = "name"
+        self._sort_ascending = True
+        self.sortStateChanged.emit()
+        self._reload_internal(sort="name", ascending=True)
+
+    @Slot()
+    def refreshList(self):
+        """현재 정렬·검색 조건을 유지한 채 목록만 갱신."""
+        self._refresh_list()
 
     @Slot(str)
     def reloadSorted(self, sort: str):
-        """Load actress list with specified sort key: name/favorite/score/recent."""
+        """Load actress list with specified sort key (legacy: ascending defaults)."""
+        ascending = sort == "name"
         self._sort_key = sort
-        self._reload_internal(sort=sort)
+        self._sort_ascending = ascending
+        self.sortStateChanged.emit()
+        self._reload_internal(sort=sort, ascending=ascending)
 
-    def _reload_internal(self, sort: str = "name", query: str = ""):
+    @Slot(str, bool)
+    def reloadSortedEx(self, sort: str, ascending: bool):
+        """Load actress list with sort key and direction."""
+        self._sort_key = sort if sort in self._SORT_KEYS else "name"
+        self._sort_ascending = bool(ascending)
+        self.sortStateChanged.emit()
+        self._reload_internal(sort=self._sort_key, ascending=self._sort_ascending)
+
+    def _refresh_list(self):
+        """현재 정렬·검색 조건을 유지한 채 목록만 갱신."""
+        self._reload_internal(
+            sort=self._current_sort,
+            ascending=self._current_sort_ascending,
+            query=self._filter_query,
+        )
+
+    def _reload_internal(self, sort: str = "name", ascending: bool = True, query: str = ""):
+        if sort == "works":
+            self._reload_works_sort_async(query, ascending)
+            return
+        self._apply_reload(sort, ascending, query)
+
+    def _is_works_sort_worker_running(self) -> bool:
+        worker = self._works_sort_worker
+        if worker is None:
+            return False
+        try:
+            return worker.isRunning()
+        except RuntimeError:
+            self._works_sort_worker = None
+            return False
+
+    def _reload_works_sort_async(self, query: str, ascending: bool):
+        if self._is_works_sort_worker_running():
+            worker = self._works_sort_worker
+            worker.requestInterruption()
+            worker.wait(200)
+
+        self._is_loading = True
+        self.actressListChanged.emit()
+
+        worker = _ActressWorksSortWorker(query, ascending, parent=self)
+        worker.finished.connect(lambda items, w=worker: self._on_works_sort_done(items, w))
+        worker.error.connect(lambda msg, w=worker: self._on_works_sort_error(msg, w))
+        self._works_sort_worker = worker
+        worker.start()
+
+    def _on_works_sort_done(self, items: list, worker: _ActressWorksSortWorker | None = None):
+        if worker is not None and self._works_sort_worker is worker:
+            self._works_sort_worker = None
+        self._list_model.set_actresses(items)
+        self._is_loading = False
+        self.actressListChanged.emit()
+
+    def _on_works_sort_error(self, message: str, worker: _ActressWorksSortWorker | None = None):
+        if worker is not None and self._works_sort_worker is worker:
+            self._works_sort_worker = None
+        self._is_loading = False
+        self.actressListChanged.emit()
+        self.errorOccurred.emit(f"배우 목록 로드 실패: {message}")
+        self.toastMessage.emit(f"배우 목록 로드 실패: {message}", "error")
+
+    def _apply_reload(self, sort: str, ascending: bool, query: str):
         self._is_loading = True
         try:
+            from sqlalchemy.orm import joinedload
+
             session = get_db_session()
             try:
-                qry = session.query(Actress)
+                qry = session.query(Actress).options(joinedload(Actress.aliases))
                 qry = self._apply_search_filter(qry, query)
-                sorter = self._SORT_ORDERS.get(sort, self._SORT_ORDERS["name"])
-                rows = sorter(qry).all()
-                items = []
-                for r in rows:
-                    items.append({
-                        "id": r.id,
-                        "name_ko": r.name_ko or r.korean or "",
-                        "name_ja": r.name_ja or r.japanese or "",
-                        "japanese": r.japanese or "",
-                        "profile_image_url": _resolve_data_path(r.profile_image_url or ""),
-                        "user_score": getattr(r, "user_score", 0.0) or 0.0,
-                        "is_favorite": getattr(r, "is_favorite", False),
-                        "genres": getattr(r, "genres", "") or "",
-                    })
-                self._list_model.set_actresses(items)
+                rows = self._order_actress_rows(session, qry.all(), sort, ascending)
+                self._list_model.set_actresses(self._rows_to_list_items(rows))
                 self.actressListChanged.emit()
             finally:
                 session.close()
@@ -268,11 +425,20 @@ class ActressModel(QObject):
     @Slot(str)
     def filterList(self, query: str):
         """실시간 검색 필터 — 리스트 모델을 직접 갱신."""
-        self._reload_internal(sort=self._current_sort, query=query)
+        self._filter_query = (query or "").strip()
+        self._reload_internal(
+            sort=self._current_sort,
+            ascending=self._current_sort_ascending,
+            query=self._filter_query,
+        )
 
     @property
     def _current_sort(self) -> str:
         return getattr(self, "_sort_key", "name")
+
+    @property
+    def _current_sort_ascending(self) -> bool:
+        return getattr(self, "_sort_ascending", True)
 
     @Slot(int)
     def loadProfile(self, actress_id: int):
@@ -379,7 +545,7 @@ class ActressModel(QObject):
                     add_alias(new_id, primary_name, "stage", is_primary=True)
 
                 self.toastMessage.emit("새 배우 프로필이 추가되었습니다.", "success")
-                self.reload()  # refresh list
+                self._refresh_list()  # refresh list
                 return new_id
             finally:
                 session.close()
@@ -404,7 +570,7 @@ class ActressModel(QObject):
                 session.commit()
                 self.toastMessage.emit("프로필이 업데이트되었습니다.", "success")
                 self.loadProfile(actress_id)
-                self.reload()
+                self._refresh_list()
                 return True
             finally:
                 session.close()
@@ -425,7 +591,7 @@ class ActressModel(QObject):
         )
         if path:
             self.loadProfile(actress_id)
-            self.reload()
+            self._refresh_list()
             return str(path)
         self.toastMessage.emit("사진 저장 실패 (파일을 확인하세요)", "error")
         return ""
@@ -449,7 +615,7 @@ class ActressModel(QObject):
             if promote_gallery_image_to_profile(actress_id, rel):
                 self.toastMessage.emit("대표 사진이 변경되었습니다.", "success")
                 self.loadProfile(actress_id)
-                self.reload()
+                self._refresh_list()
                 return True
             self.toastMessage.emit("대표 사진 설정 실패 (gallery/ 경로 확인)", "warning")
             return False
@@ -464,7 +630,7 @@ class ActressModel(QObject):
             if promote_gallery_image_to_profile(actress_id, image_url):
                 self.toastMessage.emit("대표 사진이 변경되었습니다.", "success")
                 self.loadProfile(actress_id)
-                self.reload()
+                self._refresh_list()
                 return True
             self.toastMessage.emit("대표 사진 설정 실패 (gallery/ 경로 확인)", "warning")
             return False
@@ -509,77 +675,39 @@ class ActressModel(QObject):
 
     def _fetch_library_works(self, actress_id: int) -> list:
         """내부: 배우 연관 작품 목록 (별명 포함 검색)."""
-        from javstory.harvest.database import JAVMetadata, WatchHistory
-        from sqlalchemy import or_
+        from javstory.harvest.database import WatchHistory
+        from sqlalchemy.orm import joinedload
 
         session = get_db_session()
         try:
-            actress = session.query(Actress).filter_by(id=actress_id).first()
+            actress = (
+                session.query(Actress)
+                .options(joinedload(Actress.aliases))
+                .filter_by(id=actress_id)
+                .first()
+            )
             if not actress:
                 return []
 
-            names = collect_actress_search_names(actress)
-            if not names:
-                return []
+            items = fetch_actress_library_works(session, actress)
+            if not items:
+                return items
 
-            filters = []
-            for name in names:
-                like = f"%{name}%"
-                filters += [
-                    JAVMetadata.actors_ko.ilike(like),
-                    JAVMetadata.actors_ja.ilike(like),
-                    JAVMetadata.actors.ilike(like),
-                    JAVMetadata.actors_romaji.ilike(like),
-                ]
-
-            rows = (
-                session.query(JAVMetadata)
-                .filter(or_(*filters))
-                .order_by(JAVMetadata.release_date.desc())
-                .limit(50)
-                .all()
-            )
-
-            seen: set[str] = set()
-            items: list[dict] = []
-            for r in rows:
-                pc = (r.product_code or "").strip()
-                if not pc or pc in seen:
-                    continue
-                seen.add(pc)
-                items.append({
-                    "product_code": pc,
-                    "title_ko": r.title_ko or r.title or "",
-                    "titleKo": r.title_ko or r.title or "",
-                    "actors_ko": r.actors_ko or "",
-                    "actorsKo": r.actors_ko or "",
-                    "genres_ko": r.genres_ko or r.genres or "",
-                    "cover_path": r.cover_image_local_path or r.cover_image_url or "",
-                    "coverPath": r.cover_image_local_path or r.cover_image_url or "",
-                    "release_date": r.release_date or "",
-                    "scene_count": 0,
-                    "user_rating": 0,
-                    "userRating": 0,
-                    "user_liked": False,
-                    "favorite_score": int(getattr(r, "favorite_score", 0) or 0),
-                })
-
-            if items:
-                codes = [it["product_code"] for it in items]
-                watch_rows = session.query(WatchHistory).filter(
-                    WatchHistory.product_code.in_(codes)
-                ).all()
-                watch_by_pc: dict[str, WatchHistory] = {}
-                for wh in watch_rows:
-                    key = (wh.product_code or "").strip().upper()
-                    if key:
-                        watch_by_pc[key] = wh
-                for it in items:
-                    wh = watch_by_pc.get(it["product_code"].upper())
-                    rating = int(wh.rating or 0) if wh else 0
-                    it["user_rating"] = rating
-                    it["userRating"] = rating
-                    it["user_liked"] = bool(wh.liked) if wh else False
+            codes = [it["product_code"] for it in items]
+            watch_rows = session.query(WatchHistory).filter(
+                WatchHistory.product_code.in_(codes)
+            ).all()
+            watch_by_pc: dict[str, WatchHistory] = {}
+            for wh in watch_rows:
+                key = (wh.product_code or "").strip().upper()
+                if key:
+                    watch_by_pc[key] = wh
+            for it in items:
+                wh = watch_by_pc.get(it["product_code"].upper())
+                rating = int(wh.rating or 0) if wh else 0
+                it["user_rating"] = rating
+                it["userRating"] = rating
+                it["user_liked"] = bool(wh.liked) if wh else False
 
             return items
         finally:
@@ -614,7 +742,7 @@ class ActressModel(QObject):
         if ok:
             self.toastMessage.emit("배우 프로필을 합쳤습니다.", "success")
             self.loadProfile(keep_id)
-            self.reload()
+            self._refresh_list()
         else:
             self.toastMessage.emit("배우 합치기에 실패했습니다.", "error")
         return ok
@@ -632,7 +760,7 @@ class ActressModel(QObject):
                     "id": r.id,
                     "name_ko": r.name_ko or r.korean or "",
                     "name_ja": r.name_ja or r.japanese or "",
-                    "user_score": getattr(r, "user_score", 0.0),
+                    "user_score": float(getattr(r, "user_score", 0.0) or 0.0),
                 } for r in rows]
             finally:
                 session.close()

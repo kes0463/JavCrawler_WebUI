@@ -137,8 +137,10 @@ Item {
 
                 DropArea {
                     anchors.fill: parent
-                    onEntered: { if (drag.hasUrls) drag.accept(Qt.CopyAction) }
-                    onDropped: {
+                    onEntered: function(drag) {
+                        if (drag.hasUrls) drag.accept(Qt.CopyAction)
+                    }
+                    onDropped: function(drop) {
                         if (!drop.hasUrls) return
                         var urls = []
                         for (var i = 0; i < drop.urls.length; i++)
@@ -248,8 +250,10 @@ Item {
 
                 DropArea {
                     anchors.fill: parent
-                    onEntered: { if (drag.hasUrls) drag.accept(Qt.CopyAction) }
-                    onDropped: {
+                    onEntered: function(drag) {
+                        if (drag.hasUrls) drag.accept(Qt.CopyAction)
+                    }
+                    onDropped: function(drop) {
                         if (!drop.hasUrls) return
                         var urls = []
                         for (var i = 0; i < drop.urls.length; i++)

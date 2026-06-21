@@ -42,7 +42,11 @@ Dialog {
         var rows = root.actressModel.searchActresses(searchField.text.trim())
         for (var i = 0; i < rows.length; i++) {
             if (rows[i].id === root.keepActressId) continue
-            resultsModel.append(rows[i])
+            resultsModel.append({
+                id: rows[i].id || 0,
+                name_ko: rows[i].name_ko || "",
+                name_ja: rows[i].name_ja || ""
+            })
         }
     }
 

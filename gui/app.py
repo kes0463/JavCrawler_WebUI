@@ -485,6 +485,9 @@ def create_engine(app) -> QQmlApplicationEngine:
     except Exception:
         pass
 
+    # 라이브러리 탭 진입 전에도 백그라운드에서 목록 로드를 시작한다.
+    QTimer.singleShot(0, library.reload)
+
     from gui.folder_watch_service import FolderMoveWatchService
 
     folder_watch = FolderMoveWatchService(library, parent=app)
