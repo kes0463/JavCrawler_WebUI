@@ -10,7 +10,6 @@ from pathlib import Path
 
 from javstory.library.stills.extract import extract_snapshots_auto_adaptive
 from javstory.utils.derived_cache import is_up_to_date, mark_up_to_date
-from javstory.utils.perf_log import perf_span
 from javstory.utils.process_limit import ffmpeg_semaphore
 
 logger = logging.getLogger(__name__)
@@ -72,15 +71,7 @@ class SnapshotQueueManager:
                     logger.info(f"⏭️ [Snapshot-Queue] 스킵(최신): {code} ({len(existing)}개)")
                 else:
                     with ffmpeg_semaphore:
-                        with perf_span(
-                            "snapshots.extract",
-                            product_code=str(code),
-                            video=str(vp),
-                            out_dir=str(od),
-                            via="snapshot_queue",
-                        ):
-                            # extract_snapshots_auto_adaptive 내부에서 자동으로 CUDA 가속 사용 시도함
-                            extract_snapshots_auto_adaptive(vp, od)
+                        extract_snapshots_auto_adaptive(vp, od)
                     mark_up_to_date(meta_path=meta_path, inputs={"video": Path(vp)}, params=params)
                 logger.info(f"✅ [Snapshot-Queue] 추출 완료: {code}")
             except Exception as e:

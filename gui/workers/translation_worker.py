@@ -8,10 +8,11 @@ class TranslationWorker(QThread):
     """QThread.finished(무인자)와 이름이 겹치면 스레드 종료·deleteLater 연결이 꼬일 수 있어 별도 시그널 사용."""
     translationFinished = Signal(bool, str)  # success, message
 
-    def __init__(self, sku: str, video_path: str, parent=None):
+    def __init__(self, sku: str, video_path: str, force_rebuild: bool = False, parent=None):
         super().__init__(parent)
         self.sku = sku
         self.video_path = video_path
+        self.force_rebuild = bool(force_rebuild)
         # QThread.finished 가 translationFinished 슬롯보다 먼저 오는 경우 좀비 복구 오동작 방지용
         self._translation_notified: bool = False
 
@@ -27,7 +28,7 @@ class TranslationWorker(QThread):
                     product_code=self.sku,
                     skip_translation=False,
                     skip_media=True,
-                    force_rebuild_story_context=False
+                    force_rebuild_story_context=bool(self.force_rebuild)
                 )
             )
             if isinstance(res, dict) and res.get("error"):

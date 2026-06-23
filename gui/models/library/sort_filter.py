@@ -3,13 +3,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Any
 
 from gui.models.library.search import (
     match_summary,
     parse_search_expr,
-    preview_path_for,
     release_month_key,
 )
 from gui.library_data import preference_score
@@ -86,27 +84,16 @@ class LibrarySortFilter:
 
             return max(lst, key=score)
 
-        try:
-            from javstory.config.app_config import DATA_ROOT, E_MEDIA_ROOT
-
-            e_root = Path(E_MEDIA_ROOT)
-            legacy_root = Path(DATA_ROOT) / "media"
-        except Exception:
-            e_root = None
-            legacy_root = None
-
         cache = opts.preview_path_cache
 
         def preview_path_cached(base_pc: str) -> str:
+            # 캐시 미스 시 디스크 stat을 하지 않는다(메인 스레드 프리즈 방지).
+            # 미스 항목은 백그라운드 warmup(_warmup_preview_cache)이 채운 뒤
+            # 다음 _rebuild에서 노출된다.
             key = (base_pc or "").strip().upper()
             if not key:
                 return ""
-            hit = cache.get(key)
-            if hit is not None:
-                return hit
-            v = preview_path_for(key, e_root, legacy_root)
-            cache[key] = v
-            return v
+            return cache.get(key) or ""
 
         watch_map = opts.watch_map
         mode = opts.sort_mode

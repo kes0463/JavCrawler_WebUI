@@ -62,7 +62,7 @@ Item {
     onActressModelChanged: {
         syncSortFromModel()
         if (actressModel)
-            actressModel.refreshList()
+            actressModel.refreshListIfNeeded()
     }
 
     Connections {
@@ -104,10 +104,24 @@ Item {
                     spacing: Theme.spacingSm
 
                     SearchBar {
+                        id: actressSearchBar
                         Layout.fillWidth: true
                         placeholderText: "이름 · 장르 · 별명 검색"
-                        onTextChanged: {
-                            if (root.actressModel) root.actressModel.filterList(text)
+                        onTextChanged: searchDebounce.restart()
+                        onAccepted: function(query) {
+                            searchDebounce.stop()
+                            if (root.actressModel)
+                                root.actressModel.filterList(query)
+                        }
+                    }
+
+                    Timer {
+                        id: searchDebounce
+                        interval: 400
+                        repeat: false
+                        onTriggered: {
+                            if (root.actressModel)
+                                root.actressModel.filterList(actressSearchBar.text)
                         }
                     }
 
@@ -152,6 +166,8 @@ Item {
                     clip: true
                     cellWidth: 230
                     cellHeight: 340
+                    // LibraryView와 동일 — 스크롤 시 delegate 재생성 완화 (과하면 메모리 부담)
+                    cacheBuffer: 320
                     model: actressModel ? actressModel.listModel : 0
 
                     delegate: Item {
@@ -167,6 +183,8 @@ Item {
                             nameJa: model.nameJa || ""
                             profileImage: model.profileImage || ""
                             userScore: model.userScore || 0.0
+                            workCount: model.workCount || 0
+                            showWorkCount: root.listSortKey === "works"
                             isFavorite: model.isFavorite || false
                             genres: model.genres || ""
                             selected: root.selectedActressId === model.id

@@ -31,13 +31,46 @@ from javstory.persona.library_search import (
     split_query_terms,
 )
 from javstory.persona.persona_memory import EnhancedPersonaMemory
-from javstory.search.library_search import HybridLibrarySearch
+from javstory.persona.recommendation_pool import fetch_recommendation_pool
+from javstory.persona.user_rating_list import fetch_user_rated_products, is_user_rating_list_request
 
 CONTEXT_SIMILARITY_THRESHOLD = 0.6
 CONTEXT_MAX_ITEMS = 8
 _CHAT_SEARCH_FAST_WEIGHTS = (0.45, 0.0, 0.55)
 _CHAT_SEARCH_EMBEDDING_WEIGHTS = (0.3, 0.5, 0.2)
 ENHANCED_PERSONA_MEMORY_PATH = DATA_ROOT / "cache" / "persona_chat_enhanced_memory.json"
+
+
+def _actress_name_candidates_from_context(persona_context: dict) -> list[str]:
+    """즐겨찾기·시청 상위 배우명 후보 (긴 이름 우선 매칭용)."""
+    names: list[str] = []
+    seen: set[str] = set()
+
+    def add(raw) -> None:
+        n = (raw or "").strip()
+        if not n:
+            return
+        key = n.casefold()
+        if key in seen:
+            return
+        seen.add(key)
+        names.append(n)
+
+    for fav in persona_context.get("favorite_actress_profiles") or []:
+        if not isinstance(fav, dict):
+            continue
+        add(fav.get("name"))
+        add(fav.get("name_ja"))
+
+    for key in ("top_actors", "top_actors_recent"):
+        for actor in persona_context.get(key) or []:
+            if isinstance(actor, dict):
+                add(actor.get("name"))
+            elif isinstance(actor, str):
+                add(actor)
+
+    names.sort(key=len, reverse=True)
+    return names
 
 
 def _actress_db_chat_context(user_message: str, persona_context: dict) -> dict:
@@ -51,12 +84,23 @@ def _actress_db_chat_context(user_message: str, persona_context: dict) -> dict:
     msg = (user_message or "").strip()
     if not msg:
         return out
-    for fav in out["favorite_profiles"]:
-        name = (fav.get("name") or "").strip()
-        if name and name in msg:
-            ctx = get_actress_context_by_name(name)
-            if ctx:
-                out["mentioned"].append(ctx)
+
+    seen_ids: set[int] = set()
+    mentioned: list[dict] = []
+    for name in _actress_name_candidates_from_context(persona_context):
+        if name not in msg:
+            continue
+        ctx = get_actress_context_by_name(name)
+        if not ctx:
+            continue
+        aid = int(ctx.get("id") or 0)
+        if aid > 0:
+            if aid in seen_ids:
+                continue
+            seen_ids.add(aid)
+        mentioned.append(ctx)
+
+    out["mentioned"] = mentioned
     return out
 
 
@@ -126,11 +170,14 @@ def _persona_chat_search_weights() -> tuple[float, float, float]:
     return _CHAT_SEARCH_FAST_WEIGHTS
 
 
-def _top_strong_reactions(limit: int = 3) -> List[Dict[str, Any]]:
+def _top_strong_reactions(limit: int = 3, *, memory_store: Any | None = None) -> List[Dict[str, Any]]:
     try:
-        store = EnhancedPersonaMemory()
-        store.load_from_json(str(ENHANCED_PERSONA_MEMORY_PATH))
-        memory = store.prompt_context("", max_items=max(3, limit * 2))
+        if memory_store is not None:
+            memory = memory_store.prompt_context("", max_items=max(3, limit * 2))
+        else:
+            store = EnhancedPersonaMemory()
+            store.load_from_json(str(ENHANCED_PERSONA_MEMORY_PATH))
+            memory = store.prompt_context("", max_items=max(3, limit * 2))
     except Exception:
         return []
     notes = [item for item in memory.get("strong_reaction_notes") or [] if isinstance(item, dict)]
@@ -196,6 +243,9 @@ def _summarize_sensual_triggers(turn_ons: List[Any], strong_reactions: List[Dict
 
 def _chat_intent(user_message: str, mentioned_codes: List[str]) -> str:
     text = str(user_message or "").lower()
+
+    if is_user_rating_list_request(text):
+        return "user_rating_list"
 
     # 추천/검색 의도의 명시적 부정 여부를 먼저 확인
     is_negated = any(hint in text for hint in _RECOMMENDATION_NEGATION_HINTS)
@@ -266,12 +316,109 @@ def _selected_persona_fields(
         include("turn_ons", turn_ons[:5])
         include("avoidances", avoidances[:4])
         include("evidence", evidence[:2])
+    elif intent == "user_rating_list":
+        include("summary", persona_summary)
     else:
         include("summary", persona_summary)
         include("sensual_summary", sensual_summary)
         include("turn_ons", turn_ons[:4])
         include("avoidances", avoidances[:3])
     return base
+
+
+def _chat_pipeline_mode(intent: str, user_message: str) -> str:
+    """Return 'full', 'light', or 'rating_list' for pipeline cost control."""
+    if intent == "user_rating_list":
+        return "rating_list"
+    if intent == "general":
+        return "light"
+    if intent in {"recommendation", "self_analysis"}:
+        return "full"
+    if intent == "product" and not is_user_rating_list_request(user_message):
+        return "light"
+    lowered = str(user_message or "").lower()
+    if any(h in lowered for h in ("줄거리", "시놉", "정보", "검색", "찾아")):
+        return "light"
+    return "full"
+
+
+def _needs_hybrid_library_search(intent: str, user_message: str) -> bool:
+    """HybridLibrarySearch는 추천·품번·명시적 검색 의도에서만 실행한다."""
+    if intent in {"recommendation", "product"}:
+        return True
+    lowered = str(user_message or "").lower()
+    return any(h in lowered for h in ("추천", "비슷", "찾아", "골라", "볼만", "검색"))
+
+
+def _mix_hidden_gem_candidates(
+    adapted_results: List[Dict[str, Any]],
+    *,
+    limit: int = 3,
+) -> List[Dict[str, Any]]:
+    """Blend insight Hidden Gems into recommendation candidates for exploration."""
+    if not adapted_results:
+        return adapted_results
+    try:
+        from javstory.analytics.library_stats import get_unwatched_gems
+
+        gems = get_unwatched_gems(max(2, limit))
+    except Exception:
+        return adapted_results
+
+    existing = {
+        normalize_product_code(str(item.get("product_code") or ""))
+        for item in adapted_results
+    }
+    merged = list(adapted_results)
+    for gem in gems[:limit]:
+        pc = normalize_product_code(str(gem.get("product_code") or ""))
+        if not pc or pc in existing:
+            continue
+        merged.append(
+            {
+                "product_code": pc,
+                "title_ko": str(gem.get("title_ko") or ""),
+                "title_ja": "",
+                "actors": _split_csv(str(gem.get("actors_ko") or "")),
+                "genres": [],
+                "maker": "",
+                "release_date": str(gem.get("release_date") or ""),
+                "synopsis": "",
+                "favorite_score": 0,
+                "folder_path": "",
+                "source": "hidden_gem",
+                "score": float(gem.get("rec_score") or 0.55),
+                "gem_type": str(gem.get("gem_type") or ""),
+            }
+        )
+        existing.add(pc)
+    return merged
+
+
+def _build_user_rating_library_search(user_message: str, rated_items: List[Dict[str, Any]]) -> Dict[str, Any]:
+    codes = [str(item.get("product_code") or "").strip().upper() for item in rated_items if item.get("product_code")]
+    return {
+        "query": user_message,
+        "terms": [],
+        "strict_title_terms": [],
+        "strict_title_contains": False,
+        "source_policy": {
+            "mode": "user_rating_list",
+            "primary_source": "watch_history",
+            "allowed_candidate_sources": ["user_rating"],
+            "use_db_metadata": True,
+            "use_synopsis": False,
+            "use_grok": False,
+            "use_embedding": False,
+            "hard_constraints": [
+                "사용자가 직접 평점/좋아요/완주를 남긴 작품만 나열한다.",
+                "평점이 없는 작품은 목록에 넣지 않는다.",
+            ],
+        },
+        "product_codes": codes[:20],
+        "fallback_seed_codes": [],
+        "results": rated_items,
+    }
 
 
 def build_focused_context(user_message: str, full_persona_data: dict) -> str:
@@ -472,12 +619,87 @@ class EroticPersonaEngine:
 
         return data
 
+    def _batch_product_snapshots(self, product_codes: List[str]) -> List[Dict[str, Any]]:
+        """Query all product codes in a single DB session instead of one session each."""
+        normalized = [normalize_product_code(pc) for pc in product_codes]
+        normalized = [pc for pc in normalized if pc]
+        if not normalized:
+            return []
+        rows_by_code: Dict[str, Any] = {}
+        with get_db_session_ctx() as session:
+            rows = session.query(JAVMetadata).filter(JAVMetadata.product_code.in_(normalized)).all()
+            for row in rows:
+                rows_by_code[row.product_code] = row
+        results = []
+        for pc in normalized:
+            data: Dict[str, Any] = {"product_code": pc}
+            row = rows_by_code.get(pc)
+            if row:
+                data.update(
+                    {
+                        "title_ko": row.title_ko or "",
+                        "title_ja": row.title_ja or "",
+                        "actors": _split_csv(row.actors_ko or row.actors_ja or row.actors or ""),
+                        "genres": _split_csv(row.genres_ko or row.genres or ""),
+                        "maker": row.maker_ko or row.maker_ja or row.maker or "",
+                        "release_date": row.release_date or "",
+                        "synopsis": row.synopsis_ko or row.synopsis or "",
+                    }
+                )
+            try:
+                from javstory.translation.story_grok_module import load_cached_grok_json_flexible
+
+                grok = load_cached_grok_json_flexible(pc)
+                grok_pc = normalize_product_code(str((grok or {}).get("product_code") or ""))
+                if grok and (not grok_pc or grok_pc != pc):
+                    data["story_context_status"] = {
+                        "available": False,
+                        "reason": "grok_product_code_mismatch",
+                        "requested_product_code": pc,
+                        "grok_product_code": grok_pc or "",
+                    }
+                elif grok and grok.get("verification_ok") is not False and not grok.get("code_mismatch"):
+                    scene_tags: List[str] = []
+                    scene_tones: List[str] = []
+                    for scene in grok.get("scenes") or []:
+                        if not isinstance(scene, dict):
+                            continue
+                        for tag in scene.get("key_tags") or []:
+                            if isinstance(tag, str) and tag.strip() and tag.strip() not in scene_tags:
+                                scene_tags.append(tag.strip())
+                        tone = str(scene.get("tone") or "").strip()
+                        if tone and tone not in scene_tones:
+                            scene_tones.append(tone)
+                    data["story_context"] = {
+                        "summary": (grok.get("overall_summary") or grok.get("synopsis_short") or "")[:600],
+                        "tags": scene_tags[:12],
+                        "tones": scene_tones[:8],
+                        "scene_count": len(grok.get("scenes") or []),
+                        "source": "grok_story_cache",
+                        "verified_product_code": grok_pc,
+                        "confidence": "medium",
+                    }
+                    data["story_context_status"] = {
+                        "available": bool(data["story_context"]["summary"]),
+                        "reason": "grok_verified_product_code_match",
+                        "requested_product_code": pc,
+                        "grok_product_code": grok_pc,
+                    }
+            except Exception:
+                pass
+            results.append(data)
+        return results
+
     def build_chat_context(
         self,
         user_message: str,
         *,
         product_code: str | None = None,
         seed_product_codes: List[str] | None = None,
+        recent_recommended_codes: List[str] | None = None,
+        compact: bool = False,
+        memory_store: Any | None = None,
+        fast: bool = False,
     ) -> Dict[str, Any]:
         mentioned = extract_product_codes(user_message)
         explicit_pc = normalize_product_code(product_code)
@@ -485,13 +707,14 @@ class EroticPersonaEngine:
             mentioned.insert(0, explicit_pc)
 
         intent = _chat_intent(user_message, mentioned)
+        pipeline_mode = _chat_pipeline_mode(intent, user_message)
         persona = self.persona_snapshot()
         # cache_only(Ollama 합성 스킵)와 context_snapshot()(DB 쿼리)은 독립적으로 제어한다.
         # skip_context=True 일 때만 생략; cache_only 단독으로는 DB 쿼리를 막지 않는다.
-        context = {} if self.skip_context else self.context_snapshot()
-        products = [self.product_snapshot(pc) for pc in mentioned[:3]]
+        context = {} if self.skip_context or pipeline_mode == "rating_list" else self.context_snapshot()
+        products = self._batch_product_snapshots(mentioned[:3])
         products = [p for p in products if p]
-        strong_reactions = _top_strong_reactions(3)
+        strong_reactions = _top_strong_reactions(3, memory_store=memory_store)
         strong_seed_codes = _strong_reaction_seed_codes(strong_reactions, 3)
         combined_seed_codes = list(dict.fromkeys(list(seed_product_codes or []) + strong_seed_codes))
         hybrid_query = user_message
@@ -500,23 +723,52 @@ class EroticPersonaEngine:
             if hint:
                 hybrid_query = f"{user_message}\n최근 강한 반응 작품과 자극 축: {hint}"
 
-        # LEGACY: 아래 코드는 HybridLibrarySearch로 대체됨
-        # library_search = PersonaLibrarySearch(limit=self.search_limit).search(
-        #     user_message,
-        #     product_codes=mentioned,
-        #     fallback_seed_codes=seed_product_codes,
-        # )
-        search_weights = _persona_chat_search_weights()
-        hybrid_results = HybridLibrarySearch(
-            top_k=20,
-            weights=search_weights,
-        ).search_with_fusion(hybrid_query)
-        library_search = _adapt_hybrid_search_results(
-            user_message,
-            hybrid_results,
-            product_codes=mentioned,
-            fallback_seed_codes=combined_seed_codes,
-        )
+        exclude_codes = [
+            normalize_product_code(code)
+            for code in (recent_recommended_codes or [])
+            if normalize_product_code(code)
+        ]
+        if exclude_codes and pipeline_mode != "rating_list":
+            hybrid_query = (
+                f"{hybrid_query}\n"
+                f"최근 챗에서 이미 추천한 품번은 후보에서 제외: {', '.join(exclude_codes[:12])}"
+            )
+
+        if pipeline_mode == "rating_list":
+            rated_items = fetch_user_rated_products(limit=40 if not compact else 20)
+            library_search = _build_user_rating_library_search(user_message, rated_items)
+        elif _needs_hybrid_library_search(intent, user_message):
+            search_top_k = 8 if pipeline_mode == "light" or compact or fast else 20
+            search_weights = _persona_chat_search_weights()
+            hybrid_results = fetch_recommendation_pool(
+                hybrid_query,
+                top_k=search_top_k,
+                weights=search_weights,
+                exclude_codes=exclude_codes,
+                prefer_actor_content=any(
+                    hint in str(user_message or "").lower()
+                    for hint in ("배우", "좋아하는 배우", "즐겨찾는 배우", "출연")
+                ),
+                fast=fast,
+            )
+            library_search = _adapt_hybrid_search_results(
+                user_message,
+                hybrid_results,
+                product_codes=mentioned,
+                fallback_seed_codes=combined_seed_codes,
+            )
+            if pipeline_mode == "full" and intent == "recommendation" and not fast:
+                library_search["results"] = _mix_hidden_gem_candidates(
+                    list(library_search.get("results") or []),
+                    limit=3,
+                )
+        else:
+            library_search = _adapt_hybrid_search_results(
+                user_message,
+                [],
+                product_codes=mentioned,
+                fallback_seed_codes=combined_seed_codes,
+            )
 
         persona_summary = str(persona.get("summary") or "").strip()
         sensual_summary = str(persona.get("sensual_summary") or "").strip()
@@ -593,9 +845,11 @@ class EroticPersonaEngine:
                 "semantic_profile": context.get("semantic_profile") or {},
                 "sample_groups": context.get("sample_groups") or {},
             },
-            "actress_db_context": _actress_db_chat_context(user_message, context),
+            "actress_db_context": _actress_db_chat_context(user_message, context) if pipeline_mode != "rating_list" else {"favorite_profiles": [], "mentioned": []},
             "mentioned_products": products,
             "library_search": library_search,
+            "pipeline_mode": pipeline_mode,
+            "user_rating_list": library_search.get("results") or [] if pipeline_mode == "rating_list" else [],
         }
 
     def build_chat_context_json(self, user_message: str, *, product_code: str | None = None) -> str:

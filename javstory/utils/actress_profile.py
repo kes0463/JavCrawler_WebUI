@@ -14,7 +14,7 @@ from PIL import Image, ImageOps
 from PIL.Image import Resampling
 
 from javstory.config.app_config import DATA_ROOT, E_DATA_ROOT
-from javstory.harvest.database import get_db_session, get_db_session_ctx, Actress, ActressImage, ActressAlias
+from javstory.harvest.database import get_db_session, get_db_session_ctx, Actress, ActressImage, ActressAlias, ActressWork
 
 
 def actress_storage_root() -> Path:
@@ -41,6 +41,7 @@ def resolve_actress_media_path(path: str) -> str:
 
 
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif"}
+GALLERY_THUMB_SIZE = 256
 
 
 def sanitize_folder_name(name: str) -> str:
@@ -126,6 +127,57 @@ def _list_image_files(folder: Path) -> List[Path]:
     )
 
 
+def _gallery_thumb_path(full_path: Path) -> Path:
+    return full_path.parent / "thumb" / full_path.name
+
+
+def _write_gallery_thumb(full_path: Path, *, size: int = GALLERY_THUMB_SIZE) -> Optional[Path]:
+    """gallery/ 원본 옆 gallery/thumb/ 에 썸네일 생성."""
+    try:
+        if not full_path.is_file():
+            return None
+        thumb_path = _gallery_thumb_path(full_path)
+        thumb_path.parent.mkdir(parents=True, exist_ok=True)
+        with Image.open(full_path) as img:
+            img = ImageOps.exif_transpose(img)
+            img.thumbnail((size, size), Resampling.LANCZOS)
+            ext = full_path.suffix.lower()
+            if ext == ".png":
+                img.save(thumb_path, optimize=True)
+            else:
+                save_kwargs = {"quality": 85, "optimize": True}
+                if ext not in (".jpg", ".jpeg"):
+                    thumb_path = thumb_path.with_suffix(".jpg")
+                img.convert("RGB").save(thumb_path, **save_kwargs)
+        return thumb_path if thumb_path.is_file() else None
+    except Exception as e:
+        print(f"[ActressProfile] gallery thumb failed for {full_path}: {e}")
+        return None
+
+
+def _gallery_thumb_rel(full_path: Path) -> str:
+    thumb = _gallery_thumb_path(full_path)
+    if thumb.is_file():
+        return _rel_data_path(thumb)
+    return _rel_data_path(full_path)
+
+
+def _gallery_entry_from_file(
+    gf: Path,
+    image_by_url: dict[str, ActressImage],
+    sort_index: int,
+) -> dict:
+    rel = _rel_data_path(gf)
+    row = image_by_url.get(rel)
+    return {
+        "image_id": int(row.image_id) if row else 0,
+        "image_url": rel,
+        "thumb_url": _gallery_thumb_rel(gf),
+        "filename": gf.name,
+        "sort_order": int(row.sort_order) if row else sort_index,
+    }
+
+
 def _actress_name_ko(actress: Actress, actress_id: int) -> str:
     return (actress.name_ko or actress.korean or "").strip() or f"actress_{actress_id}"
 
@@ -152,8 +204,98 @@ def _clear_folder_except(folder: Path, keep: Path | None = None) -> None:
             pass
 
 
-def load_actress_media(actress_id: int) -> dict:
-    """profile/ · gallery/ 폴더에서만 미디어 경로를 수집한다."""
+def _normalize_image_url(url: str) -> str:
+    return (url or "").replace("\\", "/")
+
+
+def _resolve_profile_rel(
+    actress: Actress,
+    profile_dir: Path,
+    profile_files: List[Path],
+) -> str:
+    profile_rel = ""
+    db_url = (actress.profile_image_url or "").strip()
+    if db_url:
+        db_path = Path(db_url)
+        if not db_path.is_absolute():
+            for root in (actress_storage_root(), DATA_ROOT):
+                candidate = (root / db_url).resolve()
+                if candidate.is_file():
+                    db_path = candidate
+                    break
+            else:
+                db_path = (actress_storage_root() / db_url).resolve()
+        if db_path.is_file() and _path_in_subdir(db_path, "profile"):
+            profile_rel = _rel_data_path(db_path)
+
+    if not profile_rel and profile_files:
+        profile_rel = _rel_data_path(profile_files[-1])
+    return profile_rel
+
+
+def _gallery_entries_from_files(
+    gallery_files: List[Path],
+    image_by_url: dict[str, ActressImage],
+) -> tuple[List[dict], set[str]]:
+    gallery_images: List[dict] = []
+    valid_rels: set[str] = set()
+    for i, gf in enumerate(gallery_files):
+        rel = _rel_data_path(gf)
+        valid_rels.add(rel)
+        gallery_images.append(_gallery_entry_from_file(gf, image_by_url, i))
+    return gallery_images, valid_rels
+
+
+def _sync_actress_media_rows(
+    session,
+    actress: Actress,
+    actress_id: int,
+    profile_rel: str,
+    gallery_files: List[Path],
+    image_rows: List[ActressImage],
+) -> List[dict]:
+    """디스크 기준으로 ActressImage·profile_image_url 동기화 (쓰기 경로)."""
+    image_by_url = {_normalize_image_url(r.image_url): r for r in image_rows}
+    gallery_images: List[dict] = []
+    valid_rels: set[str] = set()
+
+    for i, gf in enumerate(gallery_files):
+        rel = _rel_data_path(gf)
+        valid_rels.add(rel)
+        if not _gallery_thumb_path(gf).is_file():
+            _write_gallery_thumb(gf)
+        row = image_by_url.get(rel)
+        if not row:
+            row = ActressImage(
+                actress_id=actress_id,
+                image_url=rel,
+                is_profile=False,
+                sort_order=i,
+            )
+            session.add(row)
+            session.flush()
+            image_by_url[rel] = row
+            image_rows.append(row)
+        gallery_images.append(_gallery_entry_from_file(gf, image_by_url, i))
+
+    for row in list(image_rows):
+        url = _normalize_image_url(row.image_url)
+        if url not in valid_rels or row.is_profile:
+            session.delete(row)
+
+    if profile_rel and profile_rel != (actress.profile_image_url or "").strip():
+        actress.profile_image_url = profile_rel
+
+    session.commit()
+    return gallery_images
+
+
+def load_actress_media(actress_id: int, *, sync_db: bool = False) -> dict:
+    """profile/ · gallery/ 폴더에서 미디어 경로를 수집한다.
+
+    sync_db=False(기본): 읽기 전용 — DB 일괄 조회, commit/insert/delete 없음.
+    sync_db=True: 디스크와 actress_images·profile_image_url 동기화.
+    """
     out = {"profile_image_url": "", "gallery_images": []}
     try:
         with get_db_session_ctx() as session:
@@ -161,63 +303,31 @@ def load_actress_media(actress_id: int) -> dict:
             if not actress:
                 return out
 
-            folder, profile_dir, gallery_dir = find_actress_media_dirs(actress, actress_id)
-
+            _, profile_dir, gallery_dir = find_actress_media_dirs(actress, actress_id)
             profile_files = _list_image_files(profile_dir)
             gallery_files = _list_image_files(gallery_dir)
+            profile_rel = _resolve_profile_rel(actress, profile_dir, profile_files)
 
-            profile_rel = ""
-            db_url = (actress.profile_image_url or "").strip()
-            if db_url:
-                db_path = Path(db_url)
-                if not db_path.is_absolute():
-                    for root in (actress_storage_root(), DATA_ROOT):
-                        candidate = (root / db_url).resolve()
-                        if candidate.is_file():
-                            db_path = candidate
-                            break
-                    else:
-                        db_path = (actress_storage_root() / db_url).resolve()
-                if db_path.is_file() and _path_in_subdir(db_path, "profile"):
-                    profile_rel = _rel_data_path(db_path)
+            image_rows = (
+                session.query(ActressImage)
+                .filter_by(actress_id=actress_id)
+                .all()
+            )
+            image_by_url = {_normalize_image_url(r.image_url): r for r in image_rows}
 
-            if not profile_rel and profile_files:
-                profile_rel = _rel_data_path(profile_files[-1])
-
-            gallery_images: List[dict] = []
-            valid_rels: set[str] = set()
-            for i, gf in enumerate(gallery_files):
-                rel = _rel_data_path(gf)
-                valid_rels.add(rel)
-                row = session.query(ActressImage).filter_by(
-                    actress_id=actress_id, image_url=rel
-                ).first()
-                if not row:
-                    row = ActressImage(
-                        actress_id=actress_id,
-                        image_url=rel,
-                        is_profile=False,
-                        sort_order=i,
-                    )
-                    session.add(row)
-                    session.flush()
-                gallery_images.append({
-                    "image_id": row.image_id,
-                    "image_url": rel,
-                    "filename": gf.name,
-                    "sort_order": i,
-                })
-
-            stale = session.query(ActressImage).filter_by(actress_id=actress_id).all()
-            for row in stale:
-                url = (row.image_url or "").replace("\\", "/")
-                if url not in valid_rels or row.is_profile:
-                    session.delete(row)
-
-            if profile_rel and profile_rel != (actress.profile_image_url or "").strip():
-                actress.profile_image_url = profile_rel
-
-            session.commit()
+            if sync_db:
+                gallery_images = _sync_actress_media_rows(
+                    session,
+                    actress,
+                    actress_id,
+                    profile_rel,
+                    gallery_files,
+                    image_rows,
+                )
+            else:
+                gallery_images, _ = _gallery_entries_from_files(
+                    gallery_files, image_by_url
+                )
 
             out["profile_image_url"] = profile_rel
             out["gallery_images"] = gallery_images
@@ -225,6 +335,11 @@ def load_actress_media(actress_id: int) -> dict:
     except Exception as e:
         print(f"[ActressProfile] load_actress_media error: {e}")
         return out
+
+
+def sync_actress_media_db(actress_id: int) -> dict:
+    """디스크 ↔ DB 강제 동기화 (이미지 추가·삭제 후 등)."""
+    return load_actress_media(actress_id, sync_db=True)
 
 
 def promote_gallery_image_to_profile(actress_id: int, image_url: str) -> Optional[Path]:
@@ -263,10 +378,14 @@ def promote_gallery_image_to_profile(actress_id: int, image_url: str) -> Optiona
             actress.profile_image_url = rel
             actress.updated_at = datetime.now()
             session.commit()
-            return target
+            saved = target
+
+        sync_actress_media_db(actress_id)
+        return saved
     except Exception as e:
         print(f"[ActressProfile] promote_gallery_image_to_profile error: {e}")
         return None
+
 
 def save_actress_image(
     actress_id: int,
@@ -313,6 +432,9 @@ def save_actress_image(
                 img.thumbnail((max_gallery_size, max_gallery_size), Resampling.LANCZOS)
             img.save(target_path, quality=95, optimize=True)
 
+        if not is_profile:
+            _write_gallery_thumb(target_path)
+
         rel = _rel_data_path(target_path)
 
         session = get_db_session()
@@ -337,6 +459,7 @@ def save_actress_image(
         finally:
             session.close()
 
+        sync_actress_media_db(actress_id)
         return target_path
 
     except Exception as e:
@@ -356,6 +479,7 @@ def add_alias(actress_id: int, alias_name: str, alias_type: str = "stage", is_pr
                 is_primary=is_primary,
             )
             session.add(alias)
+            rebuild_actress_works_for_actress(session, actress_id, source="alias")
             session.commit()
             return True
         finally:
@@ -427,7 +551,266 @@ def metadata_row_matches_actress(row, search_names: List[str]) -> bool:
     return actress_names_match_tokens(search_names, tokens)
 
 
-def batch_actress_work_counts(session, actress_rows: list) -> dict[int, int]:
+def _actress_works_index_ready(session) -> bool:
+    return session.query(ActressWork.actress_id).limit(1).first() is not None
+
+
+def _build_actress_name_index(session) -> dict[str, list[int]]:
+    """정규화 이름 → actress_id 목록 (1-pass 역인덱스)."""
+    from sqlalchemy.orm import joinedload
+
+    index: dict[str, list[int]] = {}
+    rows = session.query(Actress).options(joinedload(Actress.aliases)).all()
+    for row in rows:
+        aid = int(row.id)
+        for name in collect_actress_search_names(row):
+            key = normalize_actor_name_key(name)
+            if not key:
+                continue
+            bucket = index.setdefault(key, [])
+            if aid not in bucket:
+                bucket.append(aid)
+    return index
+
+
+def _metadata_row_to_work_item(row) -> dict:
+    pc = (row.product_code or "").strip()
+    return {
+        "product_code": pc,
+        "title_ko": row.title_ko or row.title or "",
+        "titleKo": row.title_ko or row.title or "",
+        "actors_ko": row.actors_ko or "",
+        "actorsKo": row.actors_ko or "",
+        "genres_ko": row.genres_ko or row.genres or "",
+        "cover_path": row.cover_image_local_path or row.cover_image_url or "",
+        "coverPath": row.cover_image_local_path or row.cover_image_url or "",
+        "release_date": row.release_date or "",
+        "scene_count": 0,
+        "user_rating": 0,
+        "userRating": 0,
+        "user_liked": False,
+        "favorite_score": int(getattr(row, "favorite_score", 0) or 0),
+    }
+
+
+def refresh_actress_work_count(session, actress_id: int) -> int:
+    """actress_works 집계 → actresses.work_count 캐시 갱신."""
+    from sqlalchemy import func
+
+    aid = int(actress_id or 0)
+    if aid <= 0:
+        return 0
+    count = (
+        session.query(func.count(ActressWork.product_code))
+        .filter(ActressWork.actress_id == aid)
+        .scalar()
+    ) or 0
+    now = datetime.now()
+    session.query(Actress).filter_by(id=aid).update(
+        {"work_count": int(count), "works_updated_at": now},
+        synchronize_session=False,
+    )
+    return int(count)
+
+
+def refresh_actress_work_counts(session, actress_ids) -> None:
+    """여러 배우 work_count 캐시 갱신."""
+    ids = {int(i) for i in (actress_ids or []) if int(i or 0) > 0}
+    for aid in ids:
+        refresh_actress_work_count(session, aid)
+
+
+def refresh_all_actress_work_counts(session) -> int:
+    """전체 배우 work_count 캐시 백필 (actress_works GROUP BY)."""
+    from sqlalchemy import func
+
+    now = datetime.now()
+    count_rows = (
+        session.query(ActressWork.actress_id, func.count(ActressWork.product_code))
+        .group_by(ActressWork.actress_id)
+        .all()
+    )
+    count_map = {int(aid): int(cnt or 0) for aid, cnt in count_rows}
+    updated = 0
+    for (aid,) in session.query(Actress.id).all():
+        aid = int(aid)
+        session.query(Actress).filter_by(id=aid).update(
+            {"work_count": count_map.get(aid, 0), "works_updated_at": now},
+            synchronize_session=False,
+        )
+        updated += 1
+    return updated
+
+
+def sync_actress_works_for_product(session, product_code: str, *, source: str = "harvest") -> int:
+    """품번 기준 actress_works 갱신 (harvest/resync)."""
+    from javstory.harvest.database import JAVMetadata
+
+    pc = (product_code or "").strip().upper()
+    if not pc:
+        return 0
+
+    old_ids = {
+        int(r[0])
+        for r in session.query(ActressWork.actress_id).filter_by(product_code=pc).all()
+    }
+    session.query(ActressWork).filter_by(product_code=pc).delete(synchronize_session=False)
+    row = session.query(JAVMetadata).filter_by(product_code=pc).first()
+    if not row:
+        refresh_actress_work_counts(session, old_ids)
+        return 0
+
+    tokens = parse_actor_tokens(
+        row.actors_ko, row.actors_ja, row.actors, row.actors_romaji
+    )
+    if not tokens:
+        refresh_actress_work_counts(session, old_ids)
+        return 0
+
+    name_index = _build_actress_name_index(session)
+    now = datetime.now()
+    added = 0
+    linked: set[int] = set()
+
+    for token in tokens:
+        key = normalize_actor_name_key(token)
+        if not key:
+            continue
+        for actress_id in name_index.get(key, []):
+            if actress_id in linked:
+                continue
+            linked.add(actress_id)
+            session.add(ActressWork(
+                actress_id=actress_id,
+                product_code=pc,
+                match_source=source,
+                matched_token=token,
+                updated_at=now,
+            ))
+            added += 1
+    refresh_actress_work_counts(session, old_ids | linked)
+    return added
+
+
+def rebuild_actress_works_for_actress(session, actress_id: int, *, source: str = "scan") -> int:
+    """단일 배우의 actress_works 전체 재구축 (이름·별명·합치기 후).
+
+    jav_metadata 전체를 한 번에 메모리에 올리지 않고 ID 청크 단위로 스캔해
+    UI·DB 락 점유 시간을 줄인다.
+    """
+    from sqlalchemy.orm import joinedload
+    from javstory.harvest.database import JAVMetadata
+
+    actress = (
+        session.query(Actress)
+        .options(joinedload(Actress.aliases))
+        .filter_by(id=actress_id)
+        .first()
+    )
+    if not actress:
+        return 0
+
+    names = collect_actress_search_names(actress)
+    session.query(ActressWork).filter_by(actress_id=actress_id).delete(synchronize_session=False)
+    if not names:
+        refresh_actress_work_count(session, actress_id)
+        session.commit()
+        return 0
+
+    search_keys = {
+        normalize_actor_name_key(n)
+        for n in names
+        if normalize_actor_name_key(n)
+    }
+    now = datetime.now()
+    added = 0
+    last_id = 0
+    chunk_size = 200
+
+    while True:
+        ids = [
+            r[0]
+            for r in session.query(JAVMetadata.id)
+            .filter(JAVMetadata.id > last_id)
+            .order_by(JAVMetadata.id.asc())
+            .limit(chunk_size)
+            .all()
+        ]
+        if not ids:
+            break
+        last_id = int(ids[-1] or last_id)
+
+        for mid in ids:
+            row = session.query(JAVMetadata).filter_by(id=mid).first()
+            if not row:
+                continue
+            if not metadata_row_matches_actress(row, names):
+                continue
+            pc = (row.product_code or "").strip().upper()
+            if not pc:
+                continue
+            matched_token = ""
+            for token in parse_actor_tokens(
+                row.actors_ko, row.actors_ja, row.actors, row.actors_romaji
+            ):
+                if normalize_actor_name_key(token) in search_keys:
+                    matched_token = token
+                    break
+            session.add(ActressWork(
+                actress_id=int(actress_id),
+                product_code=pc,
+                match_source=source,
+                matched_token=matched_token,
+                updated_at=now,
+            ))
+            added += 1
+        session.commit()
+
+    refresh_actress_work_count(session, actress_id)
+    session.commit()
+    return added
+
+
+def rebuild_all_actress_works(session, *, source: str = "scan") -> int:
+    """전체 jav_metadata 스캔으로 actress_works 백필."""
+    from javstory.harvest.database import JAVMetadata
+
+    session.query(ActressWork).delete(synchronize_session=False)
+    name_index = _build_actress_name_index(session)
+    now = datetime.now()
+    total = 0
+
+    for row in session.query(JAVMetadata).all():
+        pc = (row.product_code or "").strip().upper()
+        if not pc:
+            continue
+        tokens = parse_actor_tokens(
+            row.actors_ko, row.actors_ja, row.actors, row.actors_romaji
+        )
+        if not tokens:
+            continue
+        linked: set[int] = set()
+        for token in tokens:
+            key = normalize_actor_name_key(token)
+            if not key:
+                continue
+            for actress_id in name_index.get(key, []):
+                if actress_id in linked:
+                    continue
+                linked.add(actress_id)
+                session.add(ActressWork(
+                    actress_id=actress_id,
+                    product_code=pc,
+                    match_source=source,
+                    matched_token=token,
+                    updated_at=now,
+                ))
+                total += 1
+    refresh_all_actress_work_counts(session)
+    return total
+
+
+def _batch_actress_work_counts_legacy(session, actress_rows: list) -> dict[int, int]:
     """배우별 라이브러리 출연 작품 수 (품번 dedupe, 역인덱스 1-pass).
 
     메타데이터 전체 × 배우 전체 이중 루프 대신, 이름→배우ID 역인덱스로
@@ -489,7 +872,32 @@ def batch_actress_work_counts(session, actress_rows: list) -> dict[int, int]:
     return counts
 
 
-def fetch_actress_library_works(session, actress, max_items: int = 500) -> List[dict]:
+def _batch_actress_work_counts_indexed(session, actress_rows: list) -> dict[int, int]:
+    from sqlalchemy import func
+
+    if not actress_rows:
+        return {}
+    actress_ids = [int(r.id) for r in actress_rows]
+    counts = {aid: 0 for aid in actress_ids}
+    rows = (
+        session.query(ActressWork.actress_id, func.count(ActressWork.product_code))
+        .filter(ActressWork.actress_id.in_(actress_ids))
+        .group_by(ActressWork.actress_id)
+        .all()
+    )
+    for aid, cnt in rows:
+        counts[int(aid)] = int(cnt or 0)
+    return counts
+
+
+def batch_actress_work_counts(session, actress_rows: list) -> dict[int, int]:
+    """배우별 라이브러리 출연 작품 수."""
+    if _actress_works_index_ready(session):
+        return _batch_actress_work_counts_indexed(session, actress_rows)
+    return _batch_actress_work_counts_legacy(session, actress_rows)
+
+
+def _fetch_actress_library_works_legacy(session, actress, max_items: int = 500) -> List[dict]:
     """배우 출연작 목록 — 정확 토큰 매칭, release_date 내림차순.
 
     ILIKE 선필터+상한(50) 방식은 합치기 후 이름·작품이 늘면
@@ -535,6 +943,143 @@ def fetch_actress_library_works(session, actress, max_items: int = 500) -> List[
         if len(items) >= max_items:
             break
     return items
+
+
+def _fetch_actress_library_works_indexed(session, actress, max_items: int = 500) -> List[dict]:
+    from javstory.harvest.database import JAVMetadata
+
+    aid = int(getattr(actress, "id", 0) or 0)
+    if aid <= 0:
+        return []
+
+    rows = (
+        session.query(JAVMetadata)
+        .join(ActressWork, ActressWork.product_code == JAVMetadata.product_code)
+        .filter(ActressWork.actress_id == aid)
+        .order_by(JAVMetadata.release_date.desc())
+        .limit(max_items)
+        .all()
+    )
+    return [_metadata_row_to_work_item(row) for row in rows]
+
+
+def fetch_actress_library_works(session, actress, max_items: int = 500) -> List[dict]:
+    """배우 출연작 목록 — actress_works 인덱스 우선, 없으면 레거시 스캔."""
+    if _actress_works_index_ready(session):
+        return _fetch_actress_library_works_indexed(session, actress, max_items)
+    return _fetch_actress_library_works_legacy(session, actress, max_items)
+
+
+def verify_actress_works_backfill(
+    session,
+    *,
+    sample_limit: int | None = None,
+) -> dict:
+    """백필 검증 — 레거시 스캔 vs actress_works·work_count 캐시.
+
+    Returns:
+        dict: checked, count_mismatches, works_mismatches, cache_mismatches, ok
+    """
+    from sqlalchemy.orm import joinedload
+
+    qry = session.query(Actress).options(joinedload(Actress.aliases)).order_by(Actress.id.asc())
+    if sample_limit is not None and int(sample_limit) > 0:
+        qry = qry.limit(int(sample_limit))
+    rows = qry.all()
+    if not rows:
+        return {
+            "checked": 0,
+            "count_mismatches": [],
+            "works_mismatches": [],
+            "cache_mismatches": [],
+            "ok": True,
+        }
+
+    actress_ids = [int(r.id) for r in rows]
+    id_set = set(actress_ids)
+
+    indexed_pcs_by_aid: dict[int, set[str]] = {aid: set() for aid in actress_ids}
+    for aid, pc in session.query(ActressWork.actress_id, ActressWork.product_code).filter(
+        ActressWork.actress_id.in_(actress_ids)
+    ).all():
+        aid = int(aid)
+        if aid not in id_set:
+            continue
+        code = (pc or "").strip().upper()
+        if code:
+            indexed_pcs_by_aid[aid].add(code)
+
+    legacy_pcs_by_aid: dict[int, set[str]] = {aid: set() for aid in actress_ids}
+    name_to_ids: dict[str, set[int]] = {}
+    for row in rows:
+        aid = int(row.id)
+        for name in collect_actress_search_names(row):
+            key = normalize_actor_name_key(name)
+            if not key:
+                continue
+            name_to_ids.setdefault(key, set()).add(aid)
+
+    from javstory.harvest.database import JAVMetadata
+
+    for meta in session.query(JAVMetadata).all():
+        pc = (meta.product_code or "").strip().upper()
+        if not pc:
+            continue
+        matched: set[int] = set()
+        for token in parse_actor_tokens(
+            meta.actors_ko, meta.actors_ja, meta.actors, meta.actors_romaji
+        ):
+            key = normalize_actor_name_key(token)
+            if not key:
+                continue
+            matched.update(name_to_ids.get(key, set()))
+        for aid in matched:
+            if aid in legacy_pcs_by_aid:
+                legacy_pcs_by_aid[aid].add(pc)
+
+    count_mismatches: list[dict] = []
+    works_mismatches: list[dict] = []
+    cache_mismatches: list[dict] = []
+
+    for row in rows:
+        aid = int(row.id)
+        legacy_cnt = len(legacy_pcs_by_aid.get(aid, set()))
+        indexed_cnt = len(indexed_pcs_by_aid.get(aid, set()))
+        cached_cnt = int(getattr(row, "work_count", 0) or 0)
+
+        if legacy_cnt != indexed_cnt:
+            count_mismatches.append({
+                "actress_id": aid,
+                "legacy": legacy_cnt,
+                "indexed": indexed_cnt,
+            })
+
+        if cached_cnt != indexed_cnt:
+            cache_mismatches.append({
+                "actress_id": aid,
+                "cached": cached_cnt,
+                "indexed": indexed_cnt,
+            })
+
+        legacy_pcs = legacy_pcs_by_aid.get(aid, set())
+        indexed_pcs = indexed_pcs_by_aid.get(aid, set())
+        if legacy_pcs != indexed_pcs:
+            works_mismatches.append({
+                "actress_id": aid,
+                "legacy_only": sorted(legacy_pcs - indexed_pcs)[:5],
+                "indexed_only": sorted(indexed_pcs - legacy_pcs)[:5],
+                "legacy_total": len(legacy_pcs),
+                "indexed_total": len(indexed_pcs),
+            })
+
+    ok = not count_mismatches and not works_mismatches and not cache_mismatches
+    return {
+        "checked": len(rows),
+        "count_mismatches": count_mismatches,
+        "works_mismatches": works_mismatches,
+        "cache_mismatches": cache_mismatches,
+        "ok": ok,
+    }
 
 
 def collect_actress_search_names(actress: Actress) -> List[str]:
@@ -643,6 +1188,7 @@ def merge_actresses(keep_id: int, merge_id: int) -> bool:
             keep.favorite_intensity = max(ki, mi) if (ki or mi) else None
             keep.updated_at = datetime.now()
             session.delete(merge)
+            rebuild_actress_works_for_actress(session, keep_id, source="merge")
             session.commit()
             return True
     except Exception as e:
@@ -706,6 +1252,7 @@ def get_actress_context(actress_id: int) -> dict:
                 return {}
             aliases = [a.alias_name for a in (row.aliases or [])]
             return {
+                "id":                 row.id,
                 "name":               row.name_ko or row.korean or "",
                 "name_ja":            row.name_ja or row.japanese or "",
                 "name_en":            row.name_en or "",
@@ -718,6 +1265,7 @@ def get_actress_context(actress_id: int) -> dict:
                 "is_favorite":        bool(row.is_favorite),
                 "aliases":            aliases,
                 "agency":             row.agency or "",
+                "work_count":         int(getattr(row, "work_count", 0) or 0),
             }
     except Exception as e:
         print(f"[ActressProfile] get_actress_context error: {e}")

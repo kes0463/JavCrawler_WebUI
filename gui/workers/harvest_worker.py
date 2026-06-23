@@ -228,7 +228,7 @@ class HarvestWorker(QThread):
                 is_skeleton = bool(crawler_res.get("skeleton_saved"))
                 if not is_skeleton:
                     tq = TranslationQueueController.instance()
-                    if tq: tq.enqueue(sku, item)
+                    if tq: tq.enqueue(sku, item, force_rebuild)
                     self.msleep(50)
                 else:
                     log(f"[HarvestWorker] {sku}는 뼈대 정보이므로 번역 큐 등록을 스킵합니다.")

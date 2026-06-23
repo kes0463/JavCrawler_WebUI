@@ -102,7 +102,9 @@ _REASONING_LEAK_HINTS = (
     "recall current state context",
     "scan library search results",
     "analyze the context",
-    "analyze the search results",
+    "let me check the database",
+    "the user wants",
+    "i should present",
     "synthesize and structure",
     "drafting the analysis",
     "self correction",
@@ -390,7 +392,7 @@ class PersonaChatMemory:
         self.save(payload)
 
 
-_ENHANCED_SCHEMA_VERSION = 2  # v2: note 필드(product_mentions, strong_reaction_notes 등) 통합
+_ENHANCED_SCHEMA_VERSION = 3  # v3: recent_recommended_product_codes 필드 추가
 
 
 def _tokenize_memory_text(text: str) -> List[str]:
@@ -463,8 +465,10 @@ class EnhancedPersonaMemory:
     negative_feedback_notes: List[Dict[str, Any]] = field(default_factory=list)
     correction_notes: List[Dict[str, Any]] = field(default_factory=list)
     style_notes: List[Dict[str, Any]] = field(default_factory=list)
+    recent_recommended_product_codes: List[str] = field(default_factory=list)
     max_notes: int = 24
     max_products: int = 80
+    max_recent_recommended: int = 24
 
     def add_turn(self, user_msg: str, assistant_msg: str) -> None:
         """Add a recent turn and keep only the latest 8-12 turns."""
@@ -569,6 +573,15 @@ class EnhancedPersonaMemory:
                 max_items=self.max_notes,
             )
 
+        assistant_codes = [normalize_product_code(c) for c in extract_product_codes(assistant_text)]
+        for code in [c for c in assistant_codes if c]:
+            if code not in self.recent_recommended_product_codes:
+                self.recent_recommended_product_codes.append(code)
+        if len(self.recent_recommended_product_codes) > self.max_recent_recommended:
+            self.recent_recommended_product_codes = self.recent_recommended_product_codes[
+                -self.max_recent_recommended :
+            ]
+
     def load_recent_messages(self) -> List[Dict[str, str]]:
         """working_memory를 recent_messages 형식으로 반환.
 
@@ -623,7 +636,38 @@ class EnhancedPersonaMemory:
             "negative_feedback_notes": self.negative_feedback_notes[-max_items:],
             "correction_notes": self.correction_notes[-max_items:],
             "style_notes": self.style_notes[-max_items:],
+            "recent_recommended_product_codes": list(self.recent_recommended_product_codes[-max_items:]),
         }
+
+    def memory_snapshot_for_ui(self) -> Dict[str, Any]:
+        """Expose editable memory notes for the GUI panel."""
+        return {
+            "turn_count": self.turn_count,
+            "preference_notes": list(self.preference_notes),
+            "strong_reaction_notes": list(self.strong_reaction_notes),
+            "negative_feedback_notes": list(self.negative_feedback_notes),
+            "correction_notes": list(self.correction_notes),
+            "style_notes": list(self.style_notes),
+            "recent_recommended_product_codes": list(self.recent_recommended_product_codes),
+        }
+
+    def remove_note(self, category: str, index: int) -> bool:
+        """Remove a single note entry by category and index."""
+        mapping = {
+            "preference": self.preference_notes,
+            "strong_reaction": self.strong_reaction_notes,
+            "negative_feedback": self.negative_feedback_notes,
+            "correction": self.correction_notes,
+            "style": self.style_notes,
+        }
+        notes = mapping.get(str(category or "").strip())
+        if notes is None:
+            return False
+        idx = int(index)
+        if idx < 0 or idx >= len(notes):
+            return False
+        del notes[idx]
+        return True
 
     def compress_session_to_episode(self, session_turns: list) -> dict:
         """Summarize turns into an episodic memory entry and store it."""
@@ -687,6 +731,7 @@ class EnhancedPersonaMemory:
         self.negative_feedback_notes = []
         self.correction_notes = []
         self.style_notes = []
+        self.recent_recommended_product_codes = []
 
     def save_to_json(self, path: str) -> None:
         """통합 메모리를 단일 파일로 저장한다."""
@@ -707,6 +752,7 @@ class EnhancedPersonaMemory:
             "negative_feedback_notes": self.negative_feedback_notes,
             "correction_notes": self.correction_notes,
             "style_notes": self.style_notes,
+            "recent_recommended_product_codes": self.recent_recommended_product_codes,
             # ── 레거시 호환 ──
             "recent_messages": self._working_memory_as_recent_messages(),
         }
@@ -774,6 +820,21 @@ class EnhancedPersonaMemory:
                 attr,
                 [dict(item) for item in payload.get(attr) or [] if isinstance(item, Mapping)][-self.max_notes :],
             )
+        self.recent_recommended_product_codes = [
+            str(code or "").strip().upper()
+            for code in payload.get("recent_recommended_product_codes") or []
+            if str(code or "").strip()
+        ][-self.max_recent_recommended :]
+        if not self.recent_recommended_product_codes:
+            for msg in reversed(self._working_memory_as_recent_messages()):
+                if str(msg.get("role") or "") != "assistant":
+                    continue
+                for code in extract_product_codes(str(msg.get("content") or "")):
+                    pc = normalize_product_code(code)
+                    if pc and pc not in self.recent_recommended_product_codes:
+                        self.recent_recommended_product_codes.append(pc)
+                if len(self.recent_recommended_product_codes) >= self.max_recent_recommended:
+                    break
 
     def _summarize_session_with_llm(self, turns: List[Mapping[str, Any]]) -> Dict[str, Any]:
         if not turns:

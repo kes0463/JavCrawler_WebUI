@@ -45,12 +45,15 @@ class InsightModel(QObject):
     tasteVectorChanged = Signal()
     nextWatchRecsChanged = Signal()
     hiddenGemsChanged = Signal()
+    favoriteActorPicksChanged = Signal()
     actorCollectionsChanged = Signal()
     watchHeatmapChanged = Signal()
     personaCardChanged = Signal()
     personaRegeneratingChanged = Signal()
     personaChatMessagesChanged = Signal()
     personaChatRunningChanged = Signal()
+    personaChatTonePresetChanged = Signal()
+    personaChatMemoryChanged = Signal()
     pipelineReportChanged = Signal()
     weeklyDigestChanged = Signal()
     allDataChanged = Signal()
@@ -92,6 +95,7 @@ class InsightModel(QObject):
         self._taste_vector = "{}"
         self._next_watch_recs = "[]"
         self._hidden_gems = "[]"
+        self._favorite_actor_picks = "[]"
         self._actor_collections = "{}"
         self._watch_heatmap = "{}"
         self._persona_card = "{}"
@@ -100,6 +104,8 @@ class InsightModel(QObject):
         self._persona_chat_messages = json.dumps(self._persona_chat_history, ensure_ascii=False)
         self._persona_chat_worker = None
         self._persona_chat_service = None  # PersonaChatService 재사용 인스턴스
+        self._persona_chat_tone_preset = "recommend"
+        self._persona_chat_memory_json = "{}"
         self._persona_chat_request_id = 0
         self._persona_chat_cancel_requested = False
         self._pipeline_report = "{}"
@@ -127,6 +133,7 @@ class InsightModel(QObject):
         self._personaChatFinished.connect(self._finish_persona_chat)
 
         QTimer.singleShot(2000, self._start_initial_load)
+        QTimer.singleShot(2500, self.refreshPersonaChatMemory)
 
     # ── Properties ──────────────────────────────────────────────────────────
 
@@ -186,6 +193,10 @@ class InsightModel(QObject):
     def hiddenGems(self):
         return self._hidden_gems
 
+    @Property(str, notify=favoriteActorPicksChanged)
+    def favoriteActorPicks(self):
+        return self._favorite_actor_picks
+
     @Property(str, notify=actorCollectionsChanged)
     def actorCollections(self):
         return self._actor_collections
@@ -221,6 +232,48 @@ class InsightModel(QObject):
     @Property(bool, notify=personaChatRunningChanged)
     def isPersonaChatRunning(self):
         return self._persona_chat_running
+
+    @Property(str, notify=personaChatTonePresetChanged)
+    def personaChatTonePreset(self):
+        return self._persona_chat_tone_preset
+
+    @personaChatTonePreset.setter
+    def personaChatTonePreset(self, value: str) -> None:
+        preset = str(value or "recommend").strip() or "recommend"
+        if preset == self._persona_chat_tone_preset:
+            return
+        self._persona_chat_tone_preset = preset
+        service = self._persona_chat_service
+        if service is not None:
+            service.tone_preset = preset
+        self.personaChatTonePresetChanged.emit()
+
+    @Property(str, notify=personaChatMemoryChanged)
+    def personaChatMemoryJson(self):
+        return self._persona_chat_memory_json
+
+    def _sync_persona_chat_memory(self) -> None:
+        try:
+            if self._persona_chat_service is not None:
+                payload = json.dumps(
+                    self._persona_chat_service.enhanced_memory_store.memory_snapshot_for_ui(),
+                    ensure_ascii=False,
+                )
+            else:
+                from javstory.persona.persona_memory import EnhancedPersonaMemory
+                from javstory.persona.persona_chat import ENHANCED_PERSONA_MEMORY_PATH
+
+                store = EnhancedPersonaMemory()
+                store.load_from_json(str(ENHANCED_PERSONA_MEMORY_PATH))
+                payload = json.dumps(
+                    store.memory_snapshot_for_ui(),
+                    ensure_ascii=False,
+                )
+        except Exception:
+            payload = "{}"
+        if payload != self._persona_chat_memory_json:
+            self._persona_chat_memory_json = payload
+            self.personaChatMemoryChanged.emit()
 
     # ── 데이터 수집 (백그라운드) ───────────────────────────────────────────
 
@@ -308,6 +361,7 @@ class InsightModel(QObject):
 
         if phase == cls._PHASE_RECOMMEND:
             from javstory.analytics.preference_engine import get_recommendations
+            from javstory.analytics.actor_content_recommender import recommend_favorite_actor_content
             from javstory.analytics.library_stats import (
                 get_today_recommendation,
                 get_unwatched_gems,
@@ -317,6 +371,7 @@ class InsightModel(QObject):
                 "recs": dump(get_today_recommendation(6)),
                 "next_watch": dump(get_recommendations(5, use_embeddings=False)),
                 "hidden_gems": dump(get_unwatched_gems(6)),
+                "favorite_actor_picks": dump(recommend_favorite_actor_content(6)),
             }
 
         if phase == cls._PHASE_COLLECTION:
@@ -411,7 +466,43 @@ class InsightModel(QObject):
             from javstory.persona.persona_chat import PersonaChatService
 
             self._persona_chat_service = PersonaChatService()
+            self._persona_chat_service.tone_preset = self._persona_chat_tone_preset
         return self._persona_chat_service
+
+    @Slot(str)
+    def setPersonaChatTonePreset(self, preset: str) -> None:
+        self.personaChatTonePreset = preset
+
+    @Slot()
+    def refreshPersonaChatMemory(self) -> None:
+        self._sync_persona_chat_memory()
+
+    @Slot()
+    def ensurePersonaChatReady(self) -> None:
+        """페르소나 챗 탭 진입 시 llama-server를 백그라운드에서 미리 띄운다."""
+        def _worker() -> None:
+            try:
+                from javstory.llm.llamacpp_backend import ensure_llamacpp_server_ready
+                from javstory.persona.persona_chat import persona_chat_model_from_env
+
+                preset = persona_chat_model_from_env()
+                ensure_llamacpp_server_ready({"model": preset, "provider": "llamacpp"})
+            except Exception as exc:
+                self.logMessage.emit(f"[InsightModel] 페르소나 챗 워밍업 실패: {exc}")
+
+        threading.Thread(target=_worker, daemon=True, name="persona-chat-prewarm").start()
+
+    @Slot(str, int)
+    def removePersonaMemoryNote(self, category: str, index: int) -> None:
+        try:
+            service = self._get_or_create_chat_service()
+            if service.enhanced_memory_store.remove_note(category, index):
+                from javstory.persona.persona_chat import ENHANCED_PERSONA_MEMORY_PATH
+
+                service.enhanced_memory_store.save_to_json(str(ENHANCED_PERSONA_MEMORY_PATH))
+        except Exception:
+            pass
+        self._sync_persona_chat_memory()
 
     @Slot()
     def clearPersonaChat(self) -> None:
@@ -430,6 +521,7 @@ class InsightModel(QObject):
         except Exception:
             pass
         self._sync_persona_chat_messages()
+        self._sync_persona_chat_memory()
 
     @Slot(str)
     @Slot(str, bool)
@@ -613,6 +705,18 @@ class InsightModel(QObject):
 
     def _apply_persona_chat_stream_completed(self, content: str) -> None:
         text = str(content or "")
+        current = ""
+        if self._persona_chat_history and self._persona_chat_history[-1].get("role") == "assistant":
+            current = str(self._persona_chat_history[-1].get("content") or "")
+        user_message = ""
+        if self._persona_chat_history:
+            for row in reversed(self._persona_chat_history):
+                if row.get("role") == "user":
+                    user_message = str(row.get("content") or "")
+                    break
+        from javstory.persona.persona_chat import _prefer_streamed_over_final
+
+        text = _prefer_streamed_over_final(current, text, user_message=user_message)
         if text:
             self._upsert_streaming_assistant_message(text, status="ok")
         elif self._persona_chat_history and self._persona_chat_history[-1].get("role") == "assistant":
@@ -696,6 +800,7 @@ class InsightModel(QObject):
         if self._persona_chat_running:
             self._persona_chat_running = False
             self.personaChatRunningChanged.emit()
+        self._sync_persona_chat_memory()
 
     def _on_refresh_ready(self, payload: object) -> None:
         if not isinstance(payload, dict):
@@ -726,6 +831,7 @@ class InsightModel(QObject):
             ("taste", "_taste_vector", self.tasteVectorChanged),
             ("next_watch", "_next_watch_recs", self.nextWatchRecsChanged),
             ("hidden_gems", "_hidden_gems", self.hiddenGemsChanged),
+            ("favorite_actor_picks", "_favorite_actor_picks", self.favoriteActorPicksChanged),
             ("actor_collections", "_actor_collections", self.actorCollectionsChanged),
             ("heatmap", "_watch_heatmap", self.watchHeatmapChanged),
             ("persona", "_persona_card", self.personaCardChanged),

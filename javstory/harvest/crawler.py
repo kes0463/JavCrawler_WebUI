@@ -198,24 +198,7 @@ def _page_location_href(page: Any) -> str | None:
     except: pass
     return None
 
-def _print_scraped_preview(data: dict[str, Any]) -> None:
-    print("[Hybrid] --- 수집 결과 ---")
-    order = [("final_url", "최종 URL"), ("title", "제목"), ("product_code", "품번"), ("release_date", "출시일"), ("maker", "메이커"), ("actors", "배우"), ("genres", "장르"), ("synopsis", "시놉시스"), ("cover_url", "표지 URL")]
-    for key, label in order:
-        v = data.get("_final_url") or data.get("final_url") if key == "final_url" else data.get(key)
-        if v is None or v == "" or v == []:
-            print(f"  {label}: (없음)")
-            continue
-        if isinstance(v, list):
-            preview = ", ".join(str(x) for x in v[:12])
-            if len(v) > 12: preview += f" … 외 {len(v) - 12}명"
-            print(f"  {label}: {preview}")
-        elif isinstance(v, str) and len(v) > 200 and key == "synopsis":
-            print(f"  {label}: {v[:200]}…")
-        else: print(f"  {label}: {v}")
-    print("[Hybrid] ------------------")
-
-def _raw_has_any_content(raw: dict[str, Any]) -> bool:
+def _page_location_href(page: Any) -> str | None:
     if not raw: return False
     # 단순 요청 정보나 URL 외에 실제 데이터가 있는지 확인
     #
@@ -336,6 +319,8 @@ def _merge_empty_only(base: dict[str, Any], extra: dict[str, Any], *, source: st
     - actors/genres는 합집합(중복 제거, 순서 보존)
     - title이 들어오면 original_title도 채울 수 있도록 유지
     """
+    from javstory.harvest.scrapers.av123_scraper import _is_boilerplate_title
+
     if not extra:
         return base
     base.setdefault("_sources_tried", [])
@@ -347,11 +332,15 @@ def _merge_empty_only(base: dict[str, Any], extra: dict[str, Any], *, source: st
     # 문자열 필드: 비어있으면 채움
     for k in ("title", "original_title", "synopsis", "cover_url", "release_date", "maker"):
         if _empty_str(base.get(k)) and isinstance(extra.get(k), str) and str(extra.get(k)).strip():
-            base[k] = str(extra.get(k)).strip()
+            val = str(extra.get(k)).strip()
+            if k in ("title", "original_title") and _is_boilerplate_title(val):
+                continue
+            base[k] = val
 
     # title이 채워졌는데 original_title이 비어있으면 동기화
     if _empty_str(base.get("original_title")) and isinstance(base.get("title"), str) and base["title"].strip():
-        base["original_title"] = base["title"].strip()
+        if not _is_boilerplate_title(base["title"]):
+            base["original_title"] = base["title"].strip()
 
     # 리스트 필드: 합집합
     for k in ("actors", "genres"):
@@ -372,7 +361,7 @@ def _merge_empty_only(base: dict[str, Any], extra: dict[str, Any], *, source: st
         if k.startswith("_fav_src_"):
             base[k] = int(v or 0)
 
-    # 디버그용: 최종 URL / 소스
+    # 최종 URL / 소스
     if _empty_str(base.get("_final_url")) and isinstance(extra.get("_final_url"), str) and extra["_final_url"].strip():
         base["_final_url"] = extra["_final_url"].strip()
     base.setdefault("_sources_used", [])
@@ -408,7 +397,7 @@ def _scrape_123av(product_code: str) -> dict[str, Any]:
     fav = int(getattr(info, "favourite_count", 0) or 0)
     return {
         "title": str(getattr(info, "title", "") or "").strip(),
-        "original_title": str(getattr(info, "title", "") or "").strip(),
+        "original_title": str(getattr(info, "title_ja", "") or getattr(info, "title", "") or "").strip(),
         "synopsis": str(getattr(info, "description", "") or "").strip(),
         "cover_url": poster,
         "actors": actresses,
@@ -598,13 +587,9 @@ class HybridJavCrawler:
                         label_val = row.ele('tag:a')
                         if label_val: data["label"] = label_val.text.strip()
 
-            # [디버그] 추출된 핵심 필드 로그 남기기
-            for k in ["product_code", "actors", "genres", "maker"]:
-                if data.get(k): log_ts(f"[Hybrid] 정밀 라벨 발견: {k} -> {data[k]}")
             final_url = _page_location_href(page) or final_url
             data = _merge_njav_body_head(data, _extract_njav_head_meta(page.html or "", final_url))
             data["_final_url"] = final_url
-            _print_scraped_preview(data)
             return data
         except Exception as e:
             msg = str(e).encode('utf-8', 'replace').decode('utf-8', 'replace')

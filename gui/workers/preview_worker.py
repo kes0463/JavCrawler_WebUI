@@ -34,7 +34,6 @@ class PreviewWorker(CancellableQThread):
 
             from javstory.library.highlight.video_preview import create_golden_preview
             from javstory.utils.derived_cache import is_up_to_date, mark_up_to_date
-            from javstory.utils.perf_log import perf_span
             from javstory.utils.process_limit import ffmpeg_semaphore
 
             self.progressUpdated.emit(1, "기존 프리뷰 확인 중...")
@@ -55,20 +54,14 @@ class PreviewWorker(CancellableQThread):
                     self.resultReady.emit(False, "cancelled")
                     return
                 self.progressUpdated.emit(10, "프리뷰(WebP) 생성 시작...")
-                with perf_span(
-                    "preview.create",
+                res = create_golden_preview(
                     product_code=self.product_code,
-                    video=str(self.video_path),
-                    out=str(self.output_path),
-                ):
-                    res = create_golden_preview(
-                        product_code=self.product_code,
-                        video_path=self.video_path,
-                        output_path=self.output_path,
-                        progress_callback=lambda p: self.progressUpdated.emit(int(p), "인코딩 중..."),
-                        duration_sec=8.0,
-                        seed=self.seed,
-                    )
+                    video_path=self.video_path,
+                    output_path=self.output_path,
+                    progress_callback=lambda p: self.progressUpdated.emit(int(p), "인코딩 중..."),
+                    duration_sec=8.0,
+                    seed=self.seed,
+                )
             if self.is_cancelled():
                 self.resultReady.emit(False, "cancelled")
                 return

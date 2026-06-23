@@ -36,7 +36,7 @@ Base = declarative_base()
 # - SQLite `PRAGMA user_version`에 저장한다.
 # - 테이블/컬럼 마이그레이션 로직을 변경하면 이 값을 올려서 1회 재실행되게 한다.
 # - v9+ 스키마는 Alembic only — `upgrade_alembic_head()` (init_db 이후 호출)
-_APP_DB_SCHEMA_VERSION = 13
+_APP_DB_SCHEMA_VERSION = 17
 _ALEMBIC_HEAD_REVISION = "0001_stamp_v8"
 _SCHEMA_USER_VERSION_ALEMBIC = 9
 
@@ -182,6 +182,8 @@ class Actress(Base):
     watch_count = Column(Integer, default=0)
     last_watched = Column(Date, nullable=True)
     memo = Column(Text, nullable=True)
+    work_count = Column(Integer, default=0, nullable=False)
+    works_updated_at = Column(DateTime, nullable=True)
     # created_at / updated_at will be added via Alembic migration (using server_default for SQLite compatibility)
 
     created_at = Column(DateTime, nullable=True, default=datetime.datetime.now)
@@ -219,6 +221,19 @@ class ActressAlias(Base):
     created_at = Column(DateTime, default=datetime.datetime.now)
 
     actress = relationship("Actress", back_populates="aliases")
+
+
+class ActressWork(Base):
+    """배우 ↔ 작품 품번 연결 (출연작 조회·작품수 정렬용)."""
+    __tablename__ = "actress_works"
+
+    actress_id = Column(Integer, ForeignKey("actresses.id", ondelete="CASCADE"), primary_key=True)
+    product_code = Column(String(50), ForeignKey("jav_metadata.product_code", ondelete="CASCADE"), primary_key=True)
+    match_source = Column(String(32), nullable=True)
+    matched_token = Column(Text, nullable=True)
+    updated_at = Column(DateTime, nullable=True, default=datetime.datetime.now, onupdate=datetime.datetime.now)
+
+    actress = relationship("Actress", backref="work_links")
 
 
 class Genre(Base):
@@ -310,6 +325,8 @@ class FileFlagCache(Base):
     lamp_sub      = Column(Integer, nullable=False, default=0)
     has_canonical = Column(Integer, nullable=False, default=0)
     has_story     = Column(Integer, nullable=False, default=0)
+    cover_path    = Column(Text, nullable=True)
+    preview_path  = Column(Text, nullable=True)
     scanned_at    = Column(Text, nullable=True)
 
 
@@ -380,6 +397,11 @@ def _sqlite_on_connect(dbapi_connection, connection_record):  # type: ignore[no-
         cur.execute("PRAGMA busy_timeout=60000;")
         # WAL에서 체크포인트 과도 누적 방지(기본값도 있지만 명시)
         cur.execute("PRAGMA wal_autocheckpoint=1000;")
+        # 읽기 가속: 페이지 캐시 64MB(음수=KiB) + mmap 256MB.
+        # DB가 작아 사실상 전체를 메모리/매핑에 올려 NullPool 신규 연결마다의
+        # 페이지 폴트를 줄인다(쓰기 의미론 변화 없음, 읽기 전용 가속).
+        cur.execute("PRAGMA cache_size=-65536;")
+        cur.execute("PRAGMA mmap_size=268435456;")
         cur.close()
     except Exception:
         pass
@@ -625,6 +647,8 @@ def init_db():
     _migrate_v8_watch_history_part_positions()
     _migrate_v11_watch_later_columns()
     _migrate_v12_file_flag_cache()
+    _migrate_v13_file_flag_cover_path()
+    _migrate_v14_file_flag_preview_path()
     _ensure_indexes_and_optimize()
     try:
         with sqlite3.connect(DB_PATH) as conn:
@@ -1001,6 +1025,38 @@ def _migrate_v12_file_flag_cache():
         print(f"[DB Migration v12] 실패: {e}")
 
 
+def _migrate_v13_file_flag_cover_path():
+    """v13: file_flag_cache.cover_path — 라이브러리 목록 커버 경로 캐시(행당 stat I/O 제거)."""
+    import sqlite3
+
+    try:
+        with sqlite3.connect(DB_PATH) as conn:
+            cursor = conn.cursor()
+            cols = [row[1] for row in cursor.execute("PRAGMA table_info(file_flag_cache)")]
+            if "cover_path" not in cols:
+                cursor.execute("ALTER TABLE file_flag_cache ADD COLUMN cover_path TEXT")
+                print("[DB Migration v13] file_flag_cache.cover_path 컬럼 추가 완료")
+            conn.commit()
+    except Exception as e:
+        print(f"[DB Migration v13] 실패: {e}")
+
+
+def _migrate_v14_file_flag_preview_path():
+    """v14: file_flag_cache.preview_path — 그리드 preview.webp 경로 캐시(행당 stat I/O 제거)."""
+    import sqlite3
+
+    try:
+        with sqlite3.connect(DB_PATH) as conn:
+            cursor = conn.cursor()
+            cols = [row[1] for row in cursor.execute("PRAGMA table_info(file_flag_cache)")]
+            if "preview_path" not in cols:
+                cursor.execute("ALTER TABLE file_flag_cache ADD COLUMN preview_path TEXT")
+                print("[DB Migration v14] file_flag_cache.preview_path 컬럼 추가 완료")
+            conn.commit()
+    except Exception as e:
+        print(f"[DB Migration v14] 실패: {e}")
+
+
 def _migrate_v6_actress_translation_note():
     """v6: actresses.translation_note — 배우 단위 번역 노트(페르소나/말투/표기 가이드)"""
     import sqlite3
@@ -1035,6 +1091,8 @@ def _ensure_indexes_and_optimize() -> None:
         "CREATE INDEX IF NOT EXISTS idx_jav_metadata_folder_path ON jav_metadata(folder_path);",
         # 인기도 정렬
         "CREATE INDEX IF NOT EXISTS idx_jav_favorite_score ON jav_metadata(favorite_score);",
+        "CREATE INDEX IF NOT EXISTS idx_actress_works_actress_id ON actress_works(actress_id);",
+        "CREATE INDEX IF NOT EXISTS idx_actress_works_product_code ON actress_works(product_code);",
         "CREATE INDEX IF NOT EXISTS idx_fav_hist_pc_time ON favorite_score_history(product_code, observed_at);",
         "CREATE INDEX IF NOT EXISTS idx_watch_history_watch_later ON watch_history(watch_later, watch_later_added_at);",
     ]

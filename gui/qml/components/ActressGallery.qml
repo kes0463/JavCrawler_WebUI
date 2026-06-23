@@ -31,9 +31,16 @@ Item {
         return n > 0 ? Math.ceil(n / galleryColumns) : 1
     }
     readonly property int galleryGridHeight: galleryRows * galleryThumbSize + Math.max(0, galleryRows - 1) * gallerySpacing
+    readonly property int galleryViewportRows: 3
+    readonly property int galleryViewportHeight:
+        galleryViewportRows * galleryThumbSize + Math.max(0, galleryViewportRows - 1) * gallerySpacing
+    readonly property int galleryScrollHeight: Math.max(
+        galleryThumbSize,
+        Math.min(galleryGridHeight, galleryViewportHeight)
+    )
 
     implicitWidth: 720
-    implicitHeight: Math.max(300, galleryGridHeight + 72)
+    implicitHeight: Math.max(300, galleryScrollHeight + 72)
 
     Rectangle {
         anchors.fill: parent
@@ -73,6 +80,10 @@ Item {
                     fillMode: Image.PreserveAspectFit
                     asynchronous: true
                     visible: root.profileImageUrl !== ""
+                    sourceSize: Qt.size(
+                        Math.min(480, Math.max(1, profileFrame.width) * 2),
+                        Math.min(720, Math.max(1, profileFrame.height) * 2)
+                    )
                 }
 
                 Column {
@@ -193,18 +204,30 @@ Item {
             Item {
                 id: galleryArea
                 Layout.fillWidth: true
-                Layout.preferredHeight: root.galleryGridHeight
+                Layout.preferredHeight: root.galleryScrollHeight
 
-                Grid {
-                    width: parent.width
-                    columns: root.galleryColumns
-                    rowSpacing: root.gallerySpacing
-                    columnSpacing: root.gallerySpacing
+                AppScrollView {
+                    id: galleryScroll
+                    anchors.fill: parent
+                    clip: true
+                    ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
 
-                    Repeater {
+                    GridView {
+                        id: galleryGrid
+                        width: galleryScroll.availableWidth > 8
+                            ? galleryScroll.availableWidth
+                            : galleryArea.width
+                        height: root.galleryGridHeight
+                        cellWidth: root.galleryThumbSize + root.gallerySpacing
+                        cellHeight: root.galleryThumbSize + root.gallerySpacing
                         model: root.galleryImages || []
+                        interactive: false
+                        cacheBuffer: root.galleryThumbSize * 4
 
                         delegate: Rectangle {
+                            required property var modelData
+                            required property int index
+
                             width: root.galleryThumbSize
                             height: root.galleryThumbSize
                             radius: Theme.radiusSm
@@ -217,9 +240,16 @@ Item {
                             Image {
                                 anchors.fill: parent
                                 anchors.margins: 2
-                                source: modelData.image_url ? Theme.pathToUrl(modelData.image_url) : ""
+                                source: {
+                                    var thumb = modelData.thumb_url || modelData.image_url || ""
+                                    return thumb ? Theme.pathToUrl(thumb) : ""
+                                }
                                 fillMode: Image.PreserveAspectFit
                                 asynchronous: true
+                                sourceSize: Qt.size(
+                                    root.galleryThumbSize * 2,
+                                    root.galleryThumbSize * 2
+                                )
                             }
 
                             MouseArea {

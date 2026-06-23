@@ -16,6 +16,39 @@ def _now_iso() -> str:
     return datetime.datetime.now().replace(microsecond=0).isoformat()
 
 
+def _resolve_preview_path(product_code: str) -> str | None:
+    """그리드용 preview.webp 경로 해석(base 품번 기준). 없으면 None.
+
+    gui 레이어에 의존하지 않도록 경로 규칙을 인라인한다
+    (gui.models.library.search.preview_path_for 와 동일 규칙).
+    """
+    try:
+        from javstory.config.app_config import DATA_ROOT, E_MEDIA_ROOT
+        from javstory.utils.product_code import strip_split_suffixes
+    except Exception:
+        return None
+
+    code = (product_code or "").strip().upper()
+    if not code:
+        return None
+    try:
+        base = strip_split_suffixes(code) or code
+    except Exception:
+        base = code
+
+    cands = [
+        Path(E_MEDIA_ROOT) / base / "Preview" / "preview.webp",
+        Path(DATA_ROOT) / "media" / base / "Preview" / "preview.webp",
+    ]
+    for p in cands:
+        try:
+            if p.is_file() and p.stat().st_size > 0:
+                return str(p.resolve())
+        except Exception:
+            continue
+    return None
+
+
 def scan_one(product_code: str, folder_path: str | None, is_hardcoded: bool = False) -> dict:
     """작품 1개의 파일 상태를 스캔해 dict 반환 (스레드 안전)."""
     from javstory.library.video_discovery import guess_video_path_for_product_fast
@@ -72,6 +105,16 @@ def scan_one(product_code: str, folder_path: str | None, is_hardcoded: bool = Fa
     except Exception:
         pass
 
+    cover_path: str | None = None
+    try:
+        from javstory.library.cover_cache import resolve_cover_path
+        eff = resolve_cover_path(pc)
+        cover_path = str(eff) if eff else None
+    except Exception:
+        cover_path = None
+
+    preview_path = _resolve_preview_path(pc)
+
     return {
         "product_code": pc,
         "has_video": int(has_video),
@@ -80,6 +123,8 @@ def scan_one(product_code: str, folder_path: str | None, is_hardcoded: bool = Fa
         "lamp_sub": int(lamp_sub),
         "has_canonical": int(has_canonical),
         "has_story": int(has_story),
+        "cover_path": cover_path,
+        "preview_path": preview_path,
         "scanned_at": _now_iso(),
     }
 
@@ -91,9 +136,9 @@ def _bulk_upsert(db_path: str, rows: list[dict]) -> None:
         conn.executemany(
             """INSERT OR REPLACE INTO file_flag_cache
                (product_code, has_video, video_path, lamp_stt, lamp_sub,
-                has_canonical, has_story, scanned_at)
+                has_canonical, has_story, cover_path, preview_path, scanned_at)
                VALUES (:product_code, :has_video, :video_path, :lamp_stt, :lamp_sub,
-                       :has_canonical, :has_story, :scanned_at)""",
+                       :has_canonical, :has_story, :cover_path, :preview_path, :scanned_at)""",
             rows,
         )
         conn.commit()
@@ -159,6 +204,8 @@ def load_all_flags_as_dict(session) -> dict[str, dict]:
             "lamp_sub": r.lamp_sub,
             "has_canonical": r.has_canonical,
             "has_story": r.has_story,
+            "cover_path": getattr(r, "cover_path", None),
+            "preview_path": getattr(r, "preview_path", None),
         }
         for r in rows
     }
@@ -181,6 +228,8 @@ def load_flags_for_codes(session, product_codes: list[str]) -> dict[str, dict]:
             "lamp_sub": r.lamp_sub,
             "has_canonical": r.has_canonical,
             "has_story": r.has_story,
+            "cover_path": getattr(r, "cover_path", None),
+            "preview_path": getattr(r, "preview_path", None),
         }
         for r in rows
     }

@@ -170,9 +170,120 @@ class WorkListModel(QAbstractListModel):
         WatchLaterAddedAtRole: "watch_later_added_iso",
     }
 
+    chunkedUpdateActiveChanged = Signal()
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self._items: list[dict] = []
+        self._chunked_updating = False
+        self._chunk_queue: list[dict] = []
+        self._chunk_cursor = 0
+
+    @Property(bool, notify=chunkedUpdateActiveChanged)
+    def chunkedUpdating(self) -> bool:
+        return bool(self._chunked_updating)
+
+    def _set_chunked_updating(self, v: bool) -> None:
+        if bool(v) != self._chunked_updating:
+            self._chunked_updating = bool(v)
+            self.chunkedUpdateActiveChanged.emit()
+
+    def _chunk_step(self) -> None:
+        if not self._chunk_queue:
+            self._set_chunked_updating(False)
+            return
+        start = self._chunk_cursor
+        end = min(start + _MODEL_APPEND_CHUNK_SIZE, len(self._chunk_queue))
+        if start >= end:
+            self._chunk_queue = []
+            self._set_chunked_updating(False)
+            return
+        batch = self._chunk_queue[start:end]
+        pos = len(self._items)
+        self.beginInsertRows(QModelIndex(), pos, pos + len(batch) - 1)
+        self._items.extend(batch)
+        self.endInsertRows()
+        self._chunk_cursor = end
+        if end < len(self._chunk_queue):
+            QTimer.singleShot(0, self, self._chunk_step)
+        else:
+            self._chunk_queue = []
+            self._set_chunked_updating(False)
+
+    def _begin_chunked_append(self, tail: list[dict]) -> None:
+        if not tail:
+            return
+        if len(tail) <= _APPEND_CHUNK_THRESHOLD:
+            pos = len(self._items)
+            self.beginInsertRows(QModelIndex(), pos, pos + len(tail) - 1)
+            self._items.extend(tail)
+            self.endInsertRows()
+            return
+        self._set_chunked_updating(True)
+        self._chunk_queue = list(tail)
+        self._chunk_cursor = 0
+        QTimer.singleShot(0, self, self._chunk_step)
+
+    def appendItems(self, items: list[dict]) -> None:
+        """목록 끝에 배치 추가(loadMore 전용 — replace/refresh 없이 tail만 삽입)."""
+        self._begin_chunked_append(list(items or []))
+
+    def patchWatchFields(self, watch_map: dict) -> None:
+        """watch_map만 반영(대량 목록에서 전체 _rebuild 생략)."""
+        from gui.library_data import preference_score
+
+        wm = watch_map or {}
+        changed = False
+        for i, item in enumerate(self._items):
+            base = str(item.get("product_code") or "").strip().upper()
+            rec = wm.get(base) or {}
+            rating = int(rec.get("rating") or 0)
+            liked = bool(rec.get("liked"))
+            watch_later = bool(rec.get("watch_later"))
+            wl_iso = str(rec.get("watch_later_added_iso") or "")
+            pref = preference_score(
+                item.get("favorite_score"),
+                liked=liked,
+                rating=rating,
+            )
+            if (
+                int(item.get("user_rating") or 0) == rating
+                and bool(item.get("user_liked")) == liked
+                and bool(item.get("watch_later")) == watch_later
+                and str(item.get("watch_later_added_iso") or "") == wl_iso
+                and float(item.get("preference_score") or 0) == float(pref)
+            ):
+                continue
+            patched = dict(item)
+            patched["user_rating"] = rating
+            patched["user_liked"] = liked
+            patched["watch_later"] = watch_later
+            patched["watch_later_added_iso"] = wl_iso
+            patched["preference_score"] = pref
+            self._items[i] = patched
+            changed = True
+        if changed and self._items:
+            top = self.index(0, 0)
+            bottom = self.index(len(self._items) - 1, 0)
+            self.dataChanged.emit(top, bottom)
+
+    def patchPreviewPaths(self, preview_cache: dict) -> None:
+        """preview_path 캐시만 그리드에 반영."""
+        cache = preview_cache or {}
+        changed = False
+        for i, item in enumerate(self._items):
+            base = str(item.get("product_code") or "").strip().upper()
+            pv = cache.get(base) or ""
+            if str(item.get("preview_path") or "") == pv:
+                continue
+            patched = dict(item)
+            patched["preview_path"] = pv
+            self._items[i] = patched
+            changed = True
+        if changed and self._items:
+            top = self.index(0, 0)
+            bottom = self.index(len(self._items) - 1, 0)
+            self.dataChanged.emit(top, bottom)
 
     def roleNames(self):
         return {
@@ -214,11 +325,11 @@ class WorkListModel(QAbstractListModel):
     def refresh(self, items: list[dict]):
         if self._append_if_prefix(items):
             return
-        self.beginResetModel()
-        self._items = items
-        self.endResetModel()
+        self.replace(items)
 
     def replace(self, items: list[dict]):
+        self._set_chunked_updating(False)
+        self._chunk_queue = []
         self.beginResetModel()
         self._items = list(items or [])
         self.endResetModel()
@@ -237,9 +348,7 @@ class WorkListModel(QAbstractListModel):
                 idx = self.index(i, 0)
                 self.dataChanged.emit(idx, idx)
         if len(new_items) > old_len:
-            self.beginInsertRows(QModelIndex(), old_len, len(new_items) - 1)
-            self._items.extend(new_items[old_len:])
-            self.endInsertRows()
+            self._begin_chunked_append(new_items[old_len:])
         return True
 
     def upsertOrAppend(self, items: list[dict]):
@@ -423,6 +532,11 @@ class LibraryReloadWorker(QThread):
             if str(pc or "").strip()
         }
         self._cancelled = False
+        # 워커 스레드에서 미리 계산한 preview 경로 캐시(base_pc -> path).
+        # 메인 스레드의 첫 _rebuild()가 디스크 stat 없이 캐시 히트만 하도록 한다.
+        self.preview_map: dict[str, str] = {}
+        self.has_more: bool = False
+        self.rank_advanced: int = 0
 
     def stop(self) -> None:
         self._cancelled = True
@@ -431,27 +545,91 @@ class LibraryReloadWorker(QThread):
     def is_cancelled(self) -> bool:
         return bool(self._cancelled or self.isInterruptionRequested())
 
+    def _compute_preview_map(self, summaries) -> dict[str, str]:
+        """preview.webp 경로를 워커 스레드에서 미리 계산(메인 스레드 디스크 I/O 방지).
+
+        우선 file_flag_cache.preview_path 캐시에서 읽고, 캐시에 없는 base만
+        디스크에서 1회 폴백 계산한다(Tier 2: 매 로드의 디스크 stat 제거).
+        """
+        out: dict[str, str] = {}
+        if not summaries:
+            return out
+        try:
+            from gui.models.library.sort_filter import LibrarySortFilter
+        except Exception:
+            return out
+
+        raw_codes: list[str] = []
+        base_seen: list[str] = []
+        base_set: set[str] = set()
+        raw_to_base: dict[str, str] = {}
+        for s in summaries:
+            pc = (getattr(s, "product_code", "") or "").strip().upper()
+            if not pc:
+                continue
+            raw_codes.append(pc)
+            base = LibrarySortFilter.base_product_code(pc)
+            raw_to_base[pc] = base
+            if base and base not in base_set:
+                base_set.add(base)
+                base_seen.append(base)
+
+        # 1) 캐시에서 preview_path 로드 (단일 쿼리)
+        try:
+            from javstory.harvest.database import get_db_session
+            from javstory.library.file_flag_scanner import load_flags_for_codes
+
+            with get_db_session() as session:
+                flags = load_flags_for_codes(session, raw_codes)
+            for raw, f in (flags or {}).items():
+                base = raw_to_base.get(str(raw or "").strip().upper())
+                if not base or base in out:
+                    continue
+                pv = f.get("preview_path")
+                if pv:
+                    out[base] = pv
+        except Exception:
+            pass
+
+        # 2) 캐시 미스(base)만 디스크에서 1회 폴백
+        missing = [b for b in base_seen if b not in out]
+        if missing:
+            try:
+                from pathlib import Path as _Path
+                from javstory.config.app_config import DATA_ROOT, E_MEDIA_ROOT
+                from gui.models.library.search import preview_path_for
+
+                e_root = _Path(E_MEDIA_ROOT)
+                legacy_root = _Path(DATA_ROOT) / "media"
+                for base in missing:
+                    try:
+                        out[base] = preview_path_for(base, e_root, legacy_root)
+                    except Exception:
+                        out[base] = ""
+            except Exception:
+                pass
+        return out
+
     def run(self):
         if self.is_cancelled():
             return
-        t0 = time.perf_counter()
         try:
             from javstory.harvest.database import get_db_session
             from gui.library_data import load_library_summaries_fast_priority_paged
-            from javstory.utils.common import log_ts
             with get_db_session() as session:
-                summaries = load_library_summaries_fast_priority_paged(
+                summaries, has_more, rank_advanced = load_library_summaries_fast_priority_paged(
                     session,
                     limit=self._limit,
                     offset=self._offset,
                     exclude_product_codes=self._exclude_product_codes,
                 )
-                log_ts(
-                    f"priority page offset={self._offset} limit={self._limit} "
-                    f"rows={len(summaries)} elapsed={time.perf_counter() - t0:.3f}s",
-                    tag="LibraryLoad",
-                )
-                self.finished.emit(summaries)
+            self.has_more = bool(has_more)
+            self.rank_advanced = int(rank_advanced)
+            if self.is_cancelled():
+                return
+            # preview 경로는 DB 세션 밖에서(파일 I/O) 워커 스레드가 계산
+            self.preview_map = self._compute_preview_map(summaries)
+            self.finished.emit(summaries)
         except Exception as e:
             self.error.emit(str(e))
 
@@ -486,6 +664,35 @@ class FileFlagRebuildWorker(QThread):
                 on_progress=lambda done, total: self.progress.emit(done, total),
             )
             self.finished.emit(saved)
+        except Exception as e:
+            self.error.emit(str(e))
+
+
+class LibraryDetailLoadWorker(QThread):
+    """상세 화면 데이터 조립 — 파일 glob·JSON I/O를 UI 스레드 밖에서 수행."""
+
+    finished = Signal(str, object)
+    error = Signal(str)
+
+    def __init__(self, summary, *, favorite_delta_days: int = 0, parent=None):
+        super().__init__(parent)
+        self._summary = summary
+        self._favorite_delta_days = int(favorite_delta_days or 0)
+
+    def run(self):
+        try:
+            from gui.models.library.detail_service import LibraryDetailService
+
+            s = self._summary
+            pc = str(getattr(s, "product_code", "") or "").strip().upper()
+            if not pc:
+                self.error.emit("missing product code")
+                return
+            data = LibraryDetailService.build_detail_data(
+                s,
+                favorite_delta_days=self._favorite_delta_days,
+            )
+            self.finished.emit(pc, data)
         except Exception as e:
             self.error.emit(str(e))
 
@@ -759,6 +966,16 @@ class MetadataResyncWorker(QThread):
             self.error.emit(str(e))
 
 
+# idle 프리페치 throttle
+_IDLE_LOAD_INTERVAL_MS = 1000
+_PREFETCH_CHAIN_DELAY_MS = 50
+# loadMore 등 대량 append만 청크 삽입(초기 replace는 즉시 전체 갱신으로 속도 유지)
+_APPEND_CHUNK_THRESHOLD = 80
+_MODEL_APPEND_CHUNK_SIZE = 96
+# 이 건수 이상이면 watch/preview 갱신 시 전체 _rebuild 대신 그리드 필드만 패치
+_LIGHTWEIGHT_GRID_PATCH_THRESHOLD = 200
+
+
 class LibraryModel(QObject):
     _instance = None
 
@@ -799,6 +1016,8 @@ class LibraryModel(QObject):
     detailEditingChanged = Signal()
     translationNoteGeneratingChanged = Signal()
     isLoadingChanged = Signal()
+    isLoadingMoreChanged = Signal()
+    bulkGridUpdatingChanged = Signal()
     canLoadMoreChanged = Signal()
     loadedCountChanged = Signal()
 
@@ -833,12 +1052,13 @@ class LibraryModel(QObject):
         self._note_gen_worker = None
         self._is_loading = False
         self._reload_worker = None
-        # 첫 진입은 선호도 상위 카드만 빠르게 표시하고 나머지는 유휴 시간에 배치 로드한다.
+        # 선호도 상위부터 420건씩 로드(배치가 작으면 loadMore·rebuild 오버헤드만 늘어남).
         self._page_size = 420
         self._page_offset = 0
         self._can_load_more = False
         self._is_loading_more = False
         self._load_more_worker = None
+        self._pending_append_batches: list[list[dict]] = []
         self._added_only_worker = None
         self._flag_rebuild_worker = None
         self._known_db_codes: set[str] = set()
@@ -846,6 +1066,8 @@ class LibraryModel(QObject):
         # (base_pc -> preview_path) 캐시: `_rebuild()`에서 per-item disk stat 폭탄 방지용
         self._preview_path_cache: dict[str, str] = {}
         self._detail_history: list[str] = []
+        self._detail_load_worker: LibraryDetailLoadWorker | None = None
+        self._detail_load_token = 0
         # availableGenres() 빈도 집계 캐시 — _all_summaries 길이가 바뀌면 무효화
         self._genres_cache_sig: int = -1
         self._genres_cache: list[dict] = []
@@ -861,12 +1083,16 @@ class LibraryModel(QObject):
         self._debounce = QTimer(self)
         self._debounce.setSingleShot(True)
         self._debounce.setInterval(180)
-        self._debounce.timeout.connect(self._rebuild)
+        self._rebuild_prefer_append = False
+        self._debounce.timeout.connect(self._rebuild_from_debounce)
 
         self._idle_load_timer = QTimer(self)
         self._idle_load_timer.setSingleShot(True)
-        self._idle_load_timer.setInterval(750)
+        self._idle_load_timer.setInterval(_IDLE_LOAD_INTERVAL_MS)
         self._idle_load_timer.timeout.connect(self._idle_load_more)
+
+        self._works.chunkedUpdateActiveChanged.connect(self.bulkGridUpdatingChanged.emit)
+        self._works.chunkedUpdateActiveChanged.connect(self._on_chunked_grid_update_changed)
 
         # 앱 시작 즉시 watch_map 비동기 로드 → 첫 _rebuild 시 동기 I/O 없음
         self._refresh_watch_map()
@@ -893,6 +1119,14 @@ class LibraryModel(QObject):
 
     @Property(bool, notify=isLoadingChanged)
     def isLoading(self): return self._is_loading
+
+    @Property(bool, notify=isLoadingMoreChanged)
+    def isLoadingMore(self) -> bool:
+        return bool(self._is_loading_more)
+
+    @Property(bool, notify=bulkGridUpdatingChanged)
+    def bulkGridUpdating(self) -> bool:
+        return bool(self._works.chunkedUpdating)
 
     @Property(bool, notify=canLoadMoreChanged)
     def canLoadMore(self) -> bool:
@@ -1084,6 +1318,13 @@ class LibraryModel(QObject):
         self._is_loading = True
         self.isLoadingChanged.emit()
 
+        # 수동 새로고침 시 선호도 랭킹 캐시를 무효화해 최신 데이터로 재계산
+        try:
+            from gui.library_data import invalidate_priority_ranking_cache
+            invalidate_priority_ranking_cache()
+        except Exception:
+            pass
+
         if self._reload_worker and self._reload_worker.isRunning():
             from gui.utils.qt_worker import stop_qthread
 
@@ -1091,41 +1332,41 @@ class LibraryModel(QObject):
 
         self._page_offset = 0
         self._can_load_more = True
+        self._pending_append_batches.clear()
         self._idle_load_timer.stop()
         self.canLoadMoreChanged.emit()
         self.loadedCountChanged.emit()
 
-        self._reload_worker = LibraryReloadWorker(limit=self._page_size, offset=self._page_offset, parent=self)
+        self._reload_worker = LibraryReloadWorker(
+            limit=self._page_size, offset=self._page_offset, parent=self
+        )
         self._reload_worker.finished.connect(self._on_reload_finished)
         self._reload_worker.error.connect(self._on_reload_error)
-        self._reload_started_at = time.perf_counter()
         self._reload_worker.start()
 
     def _on_reload_finished(self, summaries):
-        elapsed = time.perf_counter() - float(getattr(self, "_reload_started_at", time.perf_counter()))
         self._all_summaries = list(summaries or [])
-        self._page_offset = len(self._all_summaries)
-        self._can_load_more = len(self._all_summaries) >= self._page_size
+        worker = self.sender() or self._reload_worker
+        rank_adv = int(getattr(worker, "rank_advanced", len(self._all_summaries)) or 0)
+        self._page_offset = rank_adv if rank_adv else len(self._all_summaries)
+        self._can_load_more = bool(getattr(worker, "has_more", len(self._all_summaries) >= self._page_size))
         self._is_loading = False
         self.isLoadingChanged.emit()
         self.canLoadMoreChanged.emit()
         self.loadedCountChanged.emit()
-        # 로드 결과가 바뀌면 preview cache도 초기화
+        # 로드 결과가 바뀌면 preview cache도 초기화하고, 워커가 미리 계산한 경로로 채운다.
         self._preview_path_cache.clear()
+        try:
+            pmap = getattr(worker, "preview_map", None)
+            if pmap:
+                self._preview_path_cache.update(pmap)
+        except Exception:
+            pass
         self._snapshot_known_db_codes()
         self._rebuild()
         self.summariesReloaded.emit()
         self.toastMessage.emit(f"{len(self._all_summaries)}건 우선 로드 완료", "success")
-        try:
-            from javstory.utils.common import log_ts
-            log_ts(
-                f"initial visible={self._works.rowCount()} summaries={len(self._all_summaries)} "
-                f"elapsed={elapsed:.3f}s can_more={self._can_load_more}",
-                tag="LibraryLoad",
-            )
-        except Exception:
-            pass
-        self._schedule_idle_load_more()
+        self._chain_prefetch_if_needed()
         self._maybe_start_flag_rebuild(summaries)
         self._refresh_watch_map()
         self._warmup_preview_cache()
@@ -1134,18 +1375,112 @@ class LibraryModel(QObject):
             self._refresh_deltas_map(eff_days if eff_days > 0 else 7)
 
     def _maybe_start_flag_rebuild(self, summaries) -> None:
-        """file_flag_cache가 jav_metadata 전체 건수 대비 95% 미만이면 백그라운드 재스캔."""
+        """file_flag_cache 커버리지 점검 — COUNT 쿼리는 백그라운드 스레드에서 수행.
+
+        메인 스레드에서 COUNT(*)를 돌리면 대형 DB·동시 수집 중 UI가 멈출 수 있어
+        판단만 워커에서 하고, 재스캔 시작은 메인 스레드로 마샬링한다.
+        """
         if self._flag_rebuild_worker and self._flag_rebuild_worker.isRunning():
             return
+
+        import threading
+
+        def _job():
+            try:
+                from javstory.harvest.database import get_db_session, FileFlagCache, JAVMetadata
+
+                with get_db_session() as session:
+                    cached_count = session.query(FileFlagCache).count()
+                    total_count = session.query(JAVMetadata).count()
+                    cover_cached = (
+                        session.query(FileFlagCache)
+                        .filter(FileFlagCache.cover_path.isnot(None))
+                        .count()
+                    )
+                    preview_cached = (
+                        session.query(FileFlagCache)
+                        .filter(FileFlagCache.preview_path.isnot(None))
+                        .count()
+                    )
+                if total_count <= 0:
+                    return
+                need = (
+                    (cached_count < total_count * 0.95)
+                    or (cover_cached < cached_count * 0.5)
+                    or (preview_cached < cached_count * 0.5)
+                )
+                if need:
+                    QTimer.singleShot(0, self, self._start_flag_rebuild)
+            except Exception:
+                pass
+
+        threading.Thread(target=_job, daemon=True, name="flag-rebuild-check").start()
+
+    def _append_visible_page(self, new_summaries: list) -> None:
+        """loadMore: 신규 페이지만 정렬·병합 후 그리드 tail에 추가(전체 재빌드 생략)."""
+        visible_items = LibrarySortFilter.rebuild(
+            ListRebuildOptions(
+                all_summaries=new_summaries,
+                search_query=self._search_query,
+                filter_mode=self._filter_mode,
+                month_filter=self._month_filter,
+                unknown_only=self._unknown_only,
+                sort_mode=self._sort_mode,
+                favorite_delta_days=self._favorite_delta_days,
+                preview_path_cache=self._preview_path_cache,
+                watch_map=self._watch_map,
+                deltas_map=self._deltas_map,
+            )
+        )
+        if not visible_items:
+            return
+        self._pending_append_batches.append(visible_items)
+        self._flush_append_queue()
+
+    def _flush_append_queue(self) -> None:
+        if self._works.chunkedUpdating or not self._pending_append_batches:
+            return
+        batch = self._pending_append_batches.pop(0)
+        self._works.appendItems(batch)
+        self.workCountChanged.emit()
+        if self._pending_append_batches and not self._works.chunkedUpdating:
+            QTimer.singleShot(0, self, self._flush_append_queue)
+
+    def _should_lightweight_grid_patch(self) -> bool:
         try:
-            from javstory.harvest.database import get_db_session, FileFlagCache, JAVMetadata
-            with get_db_session() as session:
-                cached_count = session.query(FileFlagCache).count()
-                total_count = session.query(JAVMetadata).count()
-            if total_count > 0 and cached_count < total_count * 0.95:
-                self._start_flag_rebuild()
+            return (
+                self._works.rowCount() >= _LIGHTWEIGHT_GRID_PATCH_THRESHOLD
+                or len(self._all_summaries or []) >= _LIGHTWEIGHT_GRID_PATCH_THRESHOLD
+            )
         except Exception:
-            pass
+            return False
+
+    def _maybe_patch_watch_on_grid(self) -> None:
+        if not self._all_summaries or self._works.rowCount() <= 0:
+            self._schedule_rebuild()
+            return
+        if self._should_lightweight_grid_patch():
+            self._works.patchWatchFields(self._watch_map)
+            self.workCountChanged.emit()
+        else:
+            self._schedule_rebuild()
+
+    def _maybe_patch_preview_on_grid(self) -> None:
+        if not self._all_summaries or self._works.rowCount() <= 0:
+            self._schedule_rebuild()
+            return
+        if self._should_lightweight_grid_patch():
+            self._works.patchPreviewPaths(self._preview_path_cache)
+        else:
+            self._schedule_rebuild()
+
+    def _chain_prefetch_if_needed(self) -> None:
+        if not self._can_load_more or self._is_loading or self._is_loading_more:
+            return
+        if self._should_idle_prefetch():
+            QTimer.singleShot(_PREFETCH_CHAIN_DELAY_MS, self, self._idle_load_more)
+        else:
+            self._schedule_idle_load_more()
 
     def _start_flag_rebuild(self) -> None:
         """file_flag_cache 전체 재스캔 워커를 백그라운드로 시작한다."""
@@ -1185,15 +1520,22 @@ class LibraryModel(QObject):
             return
 
         self._is_loading_more = True
+        self.isLoadingMoreChanged.emit()
         self.canLoadMoreChanged.emit()
 
         w = LibraryReloadWorker(limit=self._page_size, offset=self._page_offset, parent=self)
         self._load_more_worker = w
-        load_more_started_at = time.perf_counter()
 
         def _done(new_items):
             try:
                 raw_items = list(new_items or [])
+                # 워커가 미리 계산한 preview 경로를 캐시에 반영(메인 스레드 디스크 I/O 방지)
+                try:
+                    pmap = getattr(w, "preview_map", None)
+                    if pmap:
+                        self._preview_path_cache.update(pmap)
+                except Exception:
+                    pass
                 existing = {
                     str(getattr(s, "product_code", "") or "").strip().upper()
                     for s in (self._all_summaries or [])
@@ -1202,31 +1544,27 @@ class LibraryModel(QObject):
                     it for it in raw_items
                     if str(getattr(it, "product_code", "") or "").strip().upper() not in existing
                 ]
-                if raw_items:
+                rank_adv = int(getattr(w, "rank_advanced", len(raw_items)) or 0)
+                if rank_adv:
+                    self._page_offset += rank_adv
+                elif raw_items:
                     self._page_offset += len(raw_items)
                 if items:
                     self._all_summaries.extend(items)
-                # 페이지가 가득 안 찼으면 더 이상 없음
-                self._can_load_more = bool(len(raw_items) >= self._page_size)
+                self._can_load_more = bool(getattr(w, "has_more", len(raw_items) >= self._page_size))
             finally:
                 self._is_loading_more = False
+                self.isLoadingMoreChanged.emit()
                 if self._load_more_worker is w:
                     self._load_more_worker = None
                 self.canLoadMoreChanged.emit()
                 self.loadedCountChanged.emit()
-                self._rebuild(prefer_append=True)
-                self.summariesReloaded.emit()
-                self._warmup_preview_cache()
-                try:
-                    from javstory.utils.common import log_ts
-                    log_ts(
-                        f"append raw={len(raw_items)} new={len(items)} visible={self._works.rowCount()} "
-                        f"elapsed={time.perf_counter() - load_more_started_at:.3f}s can_more={self._can_load_more}",
-                        tag="LibraryLoad",
-                    )
-                except Exception:
-                    pass
-                self._schedule_idle_load_more()
+                if items:
+                    if self._should_idle_prefetch():
+                        self._append_visible_page(items)
+                    else:
+                        self._rebuild(prefer_append=True)
+                self._chain_prefetch_if_needed()
                 try:
                     w.deleteLater()
                 except Exception:
@@ -1234,6 +1572,7 @@ class LibraryModel(QObject):
 
         def _err(msg):
             self._is_loading_more = False
+            self.isLoadingMoreChanged.emit()
             if self._load_more_worker is w:
                 self._load_more_worker = None
             self.canLoadMoreChanged.emit()
@@ -1283,6 +1622,21 @@ class LibraryModel(QObject):
         if self._can_load_more and not self._is_loading and not self._is_loading_more:
             self._idle_load_timer.start()
 
+    def _on_chunked_grid_update_changed(self) -> None:
+        if not self._works.chunkedUpdating:
+            self._flush_append_queue()
+            self._chain_prefetch_if_needed()
+
+    def _schedule_rebuild(self, *, prefer_append: bool = False) -> None:
+        if prefer_append:
+            self._rebuild_prefer_append = True
+        self._debounce.start()
+
+    def _rebuild_from_debounce(self) -> None:
+        prefer_append = bool(self._rebuild_prefer_append)
+        self._rebuild_prefer_append = False
+        self._rebuild(prefer_append=prefer_append)
+
     def _idle_load_more(self) -> None:
         if not self._should_idle_prefetch():
             return
@@ -1307,12 +1661,44 @@ class LibraryModel(QObject):
         s = LibraryDetailService.find_summary(self._all_summaries, product_code)
         if not s:
             return
-        data = LibraryDetailService.build_detail_data(
+
+        pc = str(product_code or "").strip().upper()
+        self._detail_load_token += 1
+        token = self._detail_load_token
+
+        if self._detail_load_worker is not None:
+            try:
+                if self._detail_load_worker.isRunning():
+                    self._detail_load_worker.requestInterruption()
+            except RuntimeError:
+                self._detail_load_worker = None
+
+        worker = LibraryDetailLoadWorker(
             s,
             favorite_delta_days=int(self._favorite_delta_days or 0),
+            parent=self,
         )
-        self._detail.load(data)
-        self.detailLoaded.emit()
+        self._detail_load_worker = worker
+
+        def _done(loaded_pc: str, data: dict, t=token, w=worker):
+            if t != self._detail_load_token:
+                return
+            if str(loaded_pc or "").strip().upper() != pc:
+                return
+            if self._detail_load_worker is w:
+                self._detail_load_worker = None
+            self._detail.load(data)
+            self.detailLoaded.emit()
+
+        def _err(_msg: str, t=token, w=worker):
+            if t != self._detail_load_token:
+                return
+            if self._detail_load_worker is w:
+                self._detail_load_worker = None
+
+        worker.finished.connect(_done)
+        worker.error.connect(_err)
+        worker.start()
 
     @Slot()
     def clearDetailHistory(self):
@@ -1825,6 +2211,12 @@ class LibraryModel(QObject):
 
         def _done(items):
             try:
+                try:
+                    pmap = getattr(w, "preview_map", None)
+                    if pmap:
+                        self._preview_path_cache.update(pmap)
+                except Exception:
+                    pass
                 added = self._append_new_summaries(list(items or []))
                 if added:
                     self.toastMessage.emit(f"새 작품 {added}건을 추가했습니다.", "success")
@@ -3069,6 +3461,8 @@ class LibraryModel(QObject):
             m = build_watch_feedback_by_base()
             self._watch_map = m
             self._watch_map_dirty = False
+            if self._all_summaries:
+                self._maybe_patch_watch_on_grid()
 
         threading.Thread(target=_job, daemon=True).start()
 
@@ -3112,6 +3506,7 @@ class LibraryModel(QObject):
         cache = self._preview_path_cache
 
         def _job():
+            added = 0
             for pc in base_codes:
                 if pc in cache:
                     continue
@@ -3119,6 +3514,10 @@ class LibraryModel(QObject):
                     cache[pc] = preview_path_for(pc, e_root, legacy_root)
                 except Exception:
                     cache[pc] = ""
+                added += 1
+            # 새로 채운 preview가 있으면 메인 스레드에서 1회 재빌드(디스크 I/O 없음)
+            if added and self._all_summaries:
+                self._maybe_patch_preview_on_grid()
 
         threading.Thread(target=_job, daemon=True).start()
 
@@ -3160,12 +3559,9 @@ class LibraryModel(QObject):
         threading.Thread(target=_job, daemon=True).start()
 
     def _rebuild(self, *, prefer_append: bool = False):
-        if self._watch_map_dirty:
-            # 처음 한 번은 동기로 로드하여 빈 watch_map으로 _rebuild가 실행되지 않도록 한다.
-            # 이후에는 비동기 갱신이므로 항상 캐시가 존재한다.
-            from gui.models.library.search import build_watch_feedback_by_base
-            self._watch_map = build_watch_feedback_by_base()
-            self._watch_map_dirty = False
+        # watch_map은 백그라운드 갱신 전까지 빈 dict로 진행(UI 스레드 DB 블록 방지).
+        if self._watch_map_dirty and not self._watch_map:
+            pass
 
         eff_days = int(self._favorite_delta_days or 0)
         if eff_days <= 0 and int(self._sort_mode or 0) in (11, 12):

@@ -11,6 +11,137 @@ def test_streaming_chat_worker_parses_openai_sse_line():
     assert StreamingChatWorker._parse_stream_line("") == ""
 
 
+def test_streaming_chat_worker_parses_reasoning_delta():
+    from javstory.insight.insight_model import StreamingChatWorker
+
+    line = 'data: {"choices":[{"delta":{"reasoning_content":"생각 중","content":""}}]}'
+    event = StreamingChatWorker._parse_stream_event(line)
+    assert event.get("reasoning") == "생각 중"
+    assert "content" not in event
+
+
+def test_streaming_chat_worker_recovers_reasoning_only_stream(monkeypatch):
+    from javstory.insight.insight_model import StreamingChatWorker
+
+    emitted: list[str] = []
+    worker = StreamingChatWorker("테스트", service=object())
+    worker._record_memory = lambda _content: None
+    worker.response_completed.connect(emitted.append)
+
+    class DummyResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def raise_for_status(self):
+            return None
+
+        def iter_lines(self):
+            yield 'data: {"choices":[{"delta":{"reasoning_content":"Draft: ignore\\nFinal Answer: 스트림 답변입니다."}}]}'
+            yield 'data: {"choices":[{"finish_reason":"stop"}]}'
+
+    class DummyClient:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def close(self):
+            return None
+
+        def stream(self, *_args, **_kwargs):
+            return DummyResponse()
+
+    class DummyService:
+        temperature = 0.78
+        max_tokens = 1200
+        timeout_sec = 1
+
+        def _resolve_backend(self):
+            return "http://test/v1", "model", "key"
+
+        def _build_payload(self, **_kwargs):
+            return {"messages": []}
+
+    monkeypatch.setattr("javstory.insight.insight_model.httpx.Client", DummyClient)
+    worker.service = DummyService()
+    worker.run()
+
+    assert emitted
+    assert "스트림 답변입니다." in emitted[-1]
+
+
+def test_streaming_chat_worker_preserves_longer_streamed_reasoning(monkeypatch):
+    from javstory.insight.insight_model import StreamingChatWorker
+
+    emitted: list[str] = []
+    worker = StreamingChatWorker("테스트", service=object())
+    worker._record_memory = lambda _content: None
+    worker.response_completed.connect(emitted.append)
+
+    long_answer = (
+        "첫 문장입니다. "
+        "둘째 문장은 추천 이유를 길게 설명합니다. "
+        "셋째 문장까지 스트리밍으로 보여준 뒤 최종 본문이 짧아지면 안 됩니다."
+    )
+
+    class DummyResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def raise_for_status(self):
+            return None
+
+        def iter_lines(self):
+            yield f'data: {{"choices":[{{"delta":{{"reasoning_content":"Draft\\nFinal Answer: {long_answer}"}}}}]}}'
+            yield 'data: {"choices":[{"delta":{"content":"짧음"}}]}'
+            yield 'data: {"choices":[{"finish_reason":"stop"}]}'
+
+    class DummyClient:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def close(self):
+            return None
+
+        def stream(self, *_args, **_kwargs):
+            return DummyResponse()
+
+    class DummyService:
+        temperature = 0.78
+        max_tokens = 1200
+        timeout_sec = 1
+
+        def _resolve_backend(self):
+            return "http://test/v1", "model", "key"
+
+        def _build_payload(self, **_kwargs):
+            return {"messages": []}
+
+    monkeypatch.setattr("javstory.insight.insight_model.httpx.Client", DummyClient)
+    worker.service = DummyService()
+    worker.run()
+
+    assert emitted
+    assert len(emitted[-1]) >= len(long_answer) - 5
+    assert "짧음" not in emitted[-1] or long_answer in emitted[-1]
+
+
 def test_streaming_chat_worker_sentence_boundary():
     from javstory.insight.insight_model import StreamingChatWorker
 

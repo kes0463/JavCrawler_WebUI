@@ -1369,7 +1369,6 @@ Item {
             })
             // 상세 정보 로드 시 영상은 있는데 스크린샷이 없으면 자동 추출 시작
             if (LibraryModel.detail.stillPaths.length === 0 && LibraryModel.detail.videoPath !== "") {
-                console.log("[UI] 스냅샷이 없어 자동 추출을 시작합니다: " + LibraryModel.detail.productCode)
                 LibraryModel.generateSnapshots(LibraryModel.detail.productCode, LibraryModel.detail.videoPath)
             }
         }
@@ -1380,7 +1379,7 @@ Item {
 
         function onSnapshotFinished(success, msg) {
             if (!success) {
-                console.error("[UI] Snapshot extraction failed: " + msg)
+                LibraryModel.toastMessage("스냅샷 추출 실패: " + msg, "error")
             }
         }
 

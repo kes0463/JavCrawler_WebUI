@@ -13,20 +13,38 @@ from javstory.llm.llamacpp_backend import llamacpp_request_scope
 from javstory.persona.persona_chat import (
     ENHANCED_PERSONA_MEMORY_PATH,
     PersonaChatService,
+    _deterministic_rated_works_pattern_summary,
+    _deterministic_rating_list_response,
     _deterministic_recommendation_response,
     _format_chat_response_text,
     _is_incomplete_stage_direction_response,
+    _is_recommendation_request,
     _looks_truncated_response,
     _persona_chat_max_tokens_for_context,
+    _persona_chat_stream_max_tokens,
+    _prefer_streamed_over_final,
     _recommendation_candidates_from_payload,
+    _rated_works_analysis_response_needs_replacement,
     _recommendation_response_needs_replacement,
+    _should_use_full_chat_pipeline,
     _situational_temperature,
+    _response_still_has_reasoning_leak,
     _strip_reasoning_leak,
     _with_truncation_note,
 )
+from javstory.persona.user_rating_list import fetch_user_rated_products, is_user_rating_list_request
 
 
 _SENTENCE_ENDINGS = {".", "!", "?", "\n", "。", "！", "？"}
+
+
+def _longest_nonempty_text(*parts: str) -> str:
+    best = ""
+    for part in parts:
+        text = str(part or "").strip()
+        if len(text) > len(best):
+            best = text
+    return best
 
 
 class StreamingChatWorker(QThread):
@@ -99,9 +117,34 @@ class StreamingChatWorker(QThread):
                 self.response_completed.emit("")
                 return
 
-            base_url, model, api_key = self.service._resolve_backend()
+            if is_user_rating_list_request(self.user_message):
+                rated = fetch_user_rated_products(limit=40)
+                content = _deterministic_rating_list_response(rated)
+                self._record_memory(content)
+                self.response_completed.emit(content)
+                return
+
+            try:
+                base_url, model, api_key = self.service._resolve_backend()
+            except Exception:
+                degraded = self.service._degraded_chat_response(
+                    self.user_message,
+                    history=self.history,
+                    product_code=self.product_code,
+                )
+                content = (
+                    ((degraded.get("choices") or [{}])[0].get("message") or {}).get("content")
+                    if isinstance(degraded, dict)
+                    else ""
+                )
+                if content:
+                    self._record_memory(content)
+                self.response_completed.emit(content or "지금은 로컬 LLM을 사용할 수 없어.")
+                return
+
             req_temperature = _situational_temperature(self.user_message, self.service.temperature)
-            req_max_tokens = _persona_chat_max_tokens_for_context(self.user_message, self.service.max_tokens)
+            req_max_tokens = _persona_chat_stream_max_tokens(self.user_message, self.service.max_tokens)
+            full_pipeline = _should_use_full_chat_pipeline(self.user_message)
             payload = self.service._build_payload(
                 model=model,
                 text=self.user_message,
@@ -109,7 +152,8 @@ class StreamingChatWorker(QThread):
                 product_code=self.product_code,
                 temperature=req_temperature,
                 max_tokens=req_max_tokens,
-                compact=False,
+                compact=not full_pipeline,
+                fast=not full_pipeline,
             )
             payload["stream"] = True
             headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
@@ -120,6 +164,8 @@ class StreamingChatWorker(QThread):
 
             full_text = ""
             sentence_buffer = ""
+            reasoning_buffer = ""
+            last_visible_emitted = ""
             finish_reason = "stop"
             try:
                 with httpx.Client(timeout=httpx.Timeout(self.service.timeout_sec, connect=5.0)) as client:
@@ -139,6 +185,20 @@ class StreamingChatWorker(QThread):
                                 event = self._parse_stream_event(line)
                                 if event.get("finish_reason"):
                                     finish_reason = str(event.get("finish_reason") or "stop")
+                                reasoning_chunk = str(event.get("reasoning") or "")
+                                if reasoning_chunk:
+                                    reasoning_buffer += reasoning_chunk
+                                    visible = _strip_reasoning_leak(reasoning_buffer)
+                                    if len(visible) > len(full_text):
+                                        full_text = visible
+                                    if len(visible) > len(last_visible_emitted):
+                                        delta = visible[len(last_visible_emitted) :]
+                                        last_visible_emitted = visible
+                                        if delta:
+                                            sentence_buffer += delta
+                                            if self._should_emit(sentence_buffer):
+                                                self.token_received.emit(sentence_buffer)
+                                                sentence_buffer = ""
                                 chunk = str(event.get("content") or "")
                                 if not chunk:
                                     continue
@@ -155,13 +215,32 @@ class StreamingChatWorker(QThread):
                 self.cancelled.emit()
                 return
 
-            full_text = _strip_reasoning_leak(full_text)
-            if not full_text:
-                full_text = self._retry_non_streaming_final()
+            if sentence_buffer.strip():
+                self.token_received.emit(sentence_buffer)
+                sentence_buffer = ""
+
+            raw_best = _longest_nonempty_text(
+                full_text,
+                last_visible_emitted,
+                _strip_reasoning_leak(reasoning_buffer),
+            )
+            if not raw_best and reasoning_buffer.strip():
+                raw_best = reasoning_buffer.strip()
+            full_text = _strip_reasoning_leak(raw_best)
+            if not full_text.strip():
+                full_text = _longest_nonempty_text(last_visible_emitted, raw_best)
             if full_text and _is_incomplete_stage_direction_response(full_text):
                 full_text = self._retry_non_streaming_final()
                 sentence_buffer = full_text
-            full_text = _format_chat_response_text(full_text)
+            formatted = _format_chat_response_text(full_text)
+            streamed_formatted = _format_chat_response_text(last_visible_emitted)
+            full_text = _prefer_streamed_over_final(
+                streamed_formatted,
+                formatted,
+                user_message=self.user_message,
+            )
+            if not full_text:
+                full_text = self._retry_non_streaming_final()
             if _looks_truncated_response(full_text) and not self._retried_non_streaming:
                 retry_text = self._retry_non_streaming_final()
                 if retry_text:
@@ -184,6 +263,13 @@ class StreamingChatWorker(QThread):
                     recent_codes,
                 )
                 finish_reason = "stop"
+            if _rated_works_analysis_response_needs_replacement(self.user_message, full_text):
+                rated = fetch_user_rated_products(limit=25)
+                full_text = _deterministic_rated_works_pattern_summary(rated)
+            if _response_still_has_reasoning_leak(full_text):
+                retry_text = self._retry_non_streaming_final()
+                if retry_text:
+                    full_text = retry_text
             if full_text and not self._retried_non_streaming:
                 self._record_memory(full_text)
             self.response_completed.emit(full_text)
@@ -208,6 +294,23 @@ class StreamingChatWorker(QThread):
             if self._cancelled:
                 self.cancelled.emit()
             else:
+                try:
+                    degraded = self.service._degraded_chat_response(
+                        self.user_message,
+                        history=self.history,
+                        product_code=self.product_code,
+                    )
+                    content = (
+                        ((degraded.get("choices") or [{}])[0].get("message") or {}).get("content")
+                        if isinstance(degraded, dict)
+                        else ""
+                    )
+                    if content:
+                        self._record_memory(content)
+                        self.response_completed.emit(content)
+                        return
+                except Exception:
+                    pass
                 self.error_occurred.emit(str(exc))
 
     def _retry_context_limited_final(self) -> str:
@@ -249,7 +352,11 @@ class StreamingChatWorker(QThread):
     def _record_memory(self, content: str) -> None:
         try:
             self.service.enhanced_memory_store.record_turn(self.user_message, content)
-            self.service.enhanced_memory_store.save_to_json(str(ENHANCED_PERSONA_MEMORY_PATH))
+            threading.Thread(
+                target=self.service.enhanced_memory_store.save_to_json,
+                args=(str(ENHANCED_PERSONA_MEMORY_PATH),),
+                daemon=True,
+            ).start()
         except Exception:
             pass
 
@@ -289,8 +396,25 @@ class StreamingChatWorker(QThread):
         content = delta.get("content")
         finish_reason = choice.get("finish_reason") if isinstance(choice, Mapping) else None
         event: dict[str, str] = {}
-        if isinstance(content, str):
+        if isinstance(content, str) and content:
             event["content"] = content
+        reasoning_parts: list[str] = []
+        if isinstance(delta, Mapping):
+            for key in ("reasoning_content", "reasoning"):
+                rv = delta.get(key)
+                if isinstance(rv, str) and rv:
+                    reasoning_parts.append(rv)
+        message = choice.get("message") if isinstance(choice, Mapping) else {}
+        if isinstance(message, Mapping):
+            mc = message.get("content")
+            if isinstance(mc, str) and mc:
+                event["content"] = f"{event.get('content') or ''}{mc}"
+            for key in ("reasoning_content", "reasoning"):
+                rv = message.get(key)
+                if isinstance(rv, str) and rv:
+                    reasoning_parts.append(rv)
+        if reasoning_parts:
+            event["reasoning"] = "".join(reasoning_parts)
         if finish_reason:
             event["finish_reason"] = str(finish_reason)
         return event

@@ -11,6 +11,7 @@ ColumnLayout {
 
     property var nextWatch: []
     property var hiddenGems: []
+    property var favoriteActorPicks: []
     property var recs: []
 
     property int segmentIndex: 0
@@ -135,6 +136,36 @@ ColumnLayout {
                 message: tab.emptyMessage.split("\n")[0]
                 hint: tab.emptyMessage.indexOf("\n") >= 0
                     ? tab.emptyMessage.split("\n").slice(1).join("\n") : ""
+            }
+        }
+    }
+
+    Item { Layout.preferredHeight: Theme.spacingLg }
+
+    GlassCard {
+        Layout.fillWidth: true
+        Layout.bottomMargin: Theme.spacingLg
+        autoSize: true
+        visible: tab.favoriteActorPicks.length > 0
+
+        ColumnLayout {
+            width: parent.width
+            spacing: Theme.spacingMd
+
+            InsightSectionHeader {
+                Layout.fillWidth: true
+                icon: "⭐"
+                title: "좋아하는 배우의 추천작"
+                subtitle: "즐겨찾는 배우의 미시청 작품 중 취향에 맞는 작품"
+            }
+
+            RecommendationRow {
+                Layout.fillWidth: true
+                items: tab.favoriteActorPicks
+                maxItems: 6
+                cardHeight: 300
+                coverHeight: 200
+                showReason: true
             }
         }
     }

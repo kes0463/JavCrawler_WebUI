@@ -264,21 +264,24 @@ class TranslationQueueController(QAbstractListModel):
         QTimer.singleShot(0, self, lambda: QTimer.singleShot(500, self, self._process_next))
         self._schedule_persist()
 
-    @Slot(str, str)
-    def enqueue(self, sku, video_path: str) -> None:
+    @Slot(str, str, bool)
+    def enqueue(self, sku, video_path: str, force_rebuild: bool = False) -> None:
         """UI 스레드(컨트롤러의 스레드)가 아닌 곳(예: 수집 워커)에서 호출되면 메인에 위임한다."""
         s = (sku or "").strip().upper()
         vp = str(video_path or "")
+        fr = bool(force_rebuild)
         if not is_on_app_main_thread():
-            QTimer.singleShot(0, self, lambda s2=s, v2=vp: self._enqueue_on_main(s2, v2))
+            QTimer.singleShot(0, self, lambda s2=s, v2=vp, f2=fr: self._enqueue_on_main(s2, v2, f2))
             return
-        self._enqueue_on_main(s, vp)
+        self._enqueue_on_main(s, vp, fr)
 
-    def _enqueue_on_main(self, sku: str, video_path: str) -> None:
+    def _enqueue_on_main(self, sku: str, video_path: str, force_rebuild: bool = False) -> None:
         sku = (sku or "").strip().upper()
         # 중복 체크
         for item in self._items:
             if item["sku"] == sku:
+                if force_rebuild and not item.get("force_rebuild"):
+                    item["force_rebuild"] = True
                 return
 
         start = len(self._items)
@@ -289,6 +292,7 @@ class TranslationQueueController(QAbstractListModel):
                 "video_path": video_path,
                 "status": "queued",
                 "progress": 0,
+                "force_rebuild": bool(force_rebuild),
             }
         )
         self.endInsertRows()
@@ -332,7 +336,7 @@ class TranslationQueueController(QAbstractListModel):
         
         log_ts(f"[TranslationQueue] Starting translation for: {sku}")
         
-        worker = TranslationWorker(sku, vp)
+        worker = TranslationWorker(sku, vp, force_rebuild=bool(item.get("force_rebuild")))
         # 지연 cleanup으로 dict에만 남아 있는 종료된 워커 참조 제거
         for _k, _w in list(self._active_workers.items()):
             try:

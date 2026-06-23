@@ -7,6 +7,7 @@ from __future__ import annotations
 import os
 import re
 import time
+import json
 from dataclasses import asdict, dataclass, field
 from typing import Any, Dict, List, Optional
 from urllib.parse import urljoin
@@ -23,15 +24,21 @@ from bs4 import BeautifulSoup
 
 BASE_URL = "https://123av.com"
 VIDEO_PATH_TEMPLATE = "/ja/v/{product_id}"
+LOCALE_PATH_TEMPLATE = "/{locale}/v/{product_id}"
+_SUPPORTED_LOCALES = ("ko", "ja")
 
-# テストスナップと同じ DOM（ page-video 配下 ）
+# 레거시 DOM (page-video) + 2026 watch 레이아웃
 SELECTORS = {
     "page_root": "#page-video",
     "title": "#page-video h1",
+    "title_watch": "h1.watch__title",
     "player": "#player",
+    "player_watch": ".player",
     "description": "#details .description.short p",
     "detail_item": "#details .detail-item",
+    "watch_info": "dl.watch__info",
     "favourite": "button.btn-action.favourite[data-code]",
+    "favourite_watch": "button.watch__save span",
 }
 
 # to_dict(한국어 키) 출력用 — 내부 dataclass 필드명은 그대로 둔다
@@ -63,6 +70,7 @@ _TEXT_FIELD_ORDER = [
 class VideoInfo:
     code: str = ""
     title: str = ""
+    title_ja: str = ""
     description: str = ""
     poster_url: str = ""
     actresses: List[Dict[str, str]] = field(
@@ -119,6 +127,172 @@ def _text(el: Any) -> str:
     return re.sub(r"\s+", " ", el.get_text(" ", strip=True) or "").strip()
 
 
+def _has_hangul(text: str) -> bool:
+    return bool(re.search(r"[\uAC00-\uD7A3]", text or ""))
+
+
+def _is_boilerplate_title(text: str) -> bool:
+    """missav→123av 리다이렉트 안내·도메인 이전 문구는 작품 제목이 아님."""
+    t = (text or "").strip()
+    if not t:
+        return True
+    lower = t.casefold()
+    needles = (
+        "123av.com",
+        "移転しました",
+        "に移転",
+        "으로 이적",
+        "으로 이전",
+        "이전했습니다",
+        "새 도메인을 기억",
+        "moved to 123av",
+    )
+    if any(n.casefold() in lower for n in needles):
+        return True
+    if re.match(r"^123av\.com\b", t, re.I) and "—" not in t and "-" not in t:
+        return True
+    return False
+
+
+def _normalize_scraped_title(raw: str, code: str = "") -> str:
+    """`SNOS-275 — 제목 — 123AV` 형태를 정리."""
+    title = (raw or "").strip()
+    if not title:
+        return ""
+    title = re.sub(r"\s*—\s*123AV\s*$", "", title, flags=re.I).strip()
+    title = re.sub(r"\s*-\s*123AV\s*$", "", title, flags=re.I).strip()
+    code_key = (code or "").strip().upper()
+    if code_key:
+        prefix = re.compile(
+            rf"^{re.escape(code_key)}\s*(?:—|-)\s*",
+            re.I,
+        )
+        title = prefix.sub("", title).strip()
+    else:
+        m = re.match(r"^[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*\s*(?:—|-)\s*(.+)$", title)
+        if m:
+            title = m.group(1).strip()
+    return title
+
+
+def _title_from_soup(soup: BeautifulSoup) -> str:
+    candidates: List[str] = []
+    for sel in (
+        SELECTORS["title_watch"],
+        SELECTORS["title"],
+        "#video-info h1.title",
+    ):
+        el = soup.select_one(sel)
+        if el:
+            candidates.append(_text(el))
+    og = soup.find("meta", property="og:title")
+    if og and (og.get("content") or "").strip():
+        candidates.append((og.get("content") or "").strip())
+    if soup.title and soup.title.string:
+        candidates.append(soup.title.string.strip())
+    for el in soup.select("h1"):
+        t = _text(el)
+        if t:
+            candidates.append(t)
+    for cand in candidates:
+        if cand and not _is_boilerplate_title(cand):
+            return cand
+    return ""
+
+
+def _poster_from_soup(soup: BeautifulSoup, *, base_url: str) -> str:
+    player = soup.select_one(SELECTORS["player"])
+    if player:
+        poster = (player.get("data-poster") or "").strip()
+        if poster:
+            return urljoin(base_url, poster) if poster.startswith("/") else poster
+    watch_player = soup.select_one(SELECTORS["player_watch"])
+    if watch_player:
+        style = watch_player.get("style") or ""
+        m = re.search(r"background-image\s*:\s*url\(['\"]?([^'\"()]+)['\"]?\)", style, re.I)
+        if m:
+            poster = m.group(1).strip()
+            return urljoin(base_url, poster) if poster.startswith("/") else poster
+    og = soup.find("meta", property="og:image")
+    if og and (og.get("content") or "").strip():
+        poster = (og.get("content") or "").strip()
+        return urljoin(base_url, poster) if poster.startswith("/") else poster
+    return ""
+
+
+def _favourite_count_from_soup(soup: BeautifulSoup) -> int:
+    for sel in (SELECTORS["favourite_watch"], "button.btn-action.favourite[data-code] span"):
+        span = soup.select_one(sel)
+        if not span:
+            continue
+        raw = span.get_text(strip=True).replace(",", "").replace(".", "")
+        if not raw:
+            continue
+        try:
+            return int(raw)
+        except (ValueError, TypeError):
+            continue
+    return 0
+
+
+def _code_from_soup(soup: BeautifulSoup) -> str:
+    btn = soup.select_one(SELECTORS["favourite"])
+    if btn:
+        code = (btn.get("data-code") or "").strip()
+        if code:
+            return code
+    return ""
+
+
+def _parse_watch_info_dl(soup: BeautifulSoup, info: VideoInfo) -> None:
+    dl = soup.select_one(SELECTORS["watch_info"])
+    if not dl:
+        return
+    label_map = {
+        "コード": "code", "코드": "code",
+        "リリース日": "release_date", "発売日": "release_date", "출시일": "release_date",
+        "女優": "actresses", "出演者": "actresses", "출연진": "actresses",
+        "ジャンル": "genres", "장르": "genres",
+        "メーカー": "maker", "제작사": "maker",
+    }
+    for row in dl.select(".watch__info-row"):
+        dt = row.find("dt")
+        dd = row.find("dd")
+        if not dt or not dd:
+            continue
+        label = _text(dt).rstrip("：:").strip()
+        field = label_map.get(label)
+        if field == "code":
+            t = _text(dd)
+            if t and not info.code:
+                info.code = t
+        elif field == "release_date":
+            info.release_date = _text(dd)
+        elif field == "actresses":
+            actresses: List[Dict[str, str]] = []
+            for a in dd.find_all("a", href=True):
+                href = (a.get("href") or "").strip()
+                if "actresses" not in href:
+                    continue
+                name = _text(a)
+                if name:
+                    actresses.append({"name": name, "href": href})
+            if actresses:
+                info.actresses = actresses
+        elif field == "genres":
+            genres: List[str] = []
+            for a in dd.find_all("a", href=True):
+                t = _text(a)
+                if t:
+                    genres.append(t)
+            if genres:
+                info.genres = genres
+        elif field == "maker":
+            maker = _parse_maker(dd)
+            if maker:
+                info.maker = maker
+
+
 def _iter_detail_rows(soup: BeautifulSoup) -> List[Any]:
     node = soup.select_one(SELECTORS["detail_item"])
     if not node:
@@ -172,6 +346,9 @@ def _parse_maker(value_node: Any) -> str:
 
 
 def _code_from_favourite(soup: BeautifulSoup) -> str:
+    code = _code_from_soup(soup)
+    if code:
+        return code
     btn = soup.select_one(SELECTORS["favourite"])
     if not btn:
         return ""
@@ -179,13 +356,7 @@ def _code_from_favourite(soup: BeautifulSoup) -> str:
 
 
 def _favourite_count_from_button(soup: BeautifulSoup) -> int:
-    span = soup.select_one("button.btn-action.favourite[data-code] span")
-    if not span:
-        return 0
-    try:
-        return int(span.get_text(strip=True).replace(",", "").replace(".", "") or 0)
-    except (ValueError, TypeError):
-        return 0
+    return _favourite_count_from_soup(soup)
 
 
 def _slug_candidates(product_id: str) -> List[str]:
@@ -225,22 +396,41 @@ def _detail_has_content(info: VideoInfo) -> bool:
     return bool(title or code)
 
 
+def _merge_locale_pages(info_ja: VideoInfo, info_ko: VideoInfo) -> VideoInfo:
+    """ja/ko 페이지 파싱 결과 병합 — 표시 제목은 한국어 우선."""
+    base = info_ja if info_ja.code or info_ja.actresses else info_ko
+    other = info_ko if base is info_ja else info_ja
+    merged = VideoInfo(
+        code=base.code or other.code,
+        description=base.description or other.description,
+        poster_url=base.poster_url or other.poster_url,
+        actresses=base.actresses or other.actresses,
+        genres=base.genres or other.genres,
+        release_date=base.release_date or other.release_date,
+        maker=base.maker or other.maker,
+        favourite_count=max(base.favourite_count, other.favourite_count),
+    )
+    title_ja_raw = info_ja.title_ja or info_ja.title or ""
+    title_ko_raw = info_ko.title or ""
+    merged.title_ja = title_ja_raw
+    if _has_hangul(title_ko_raw):
+        merged.title = title_ko_raw
+    else:
+        merged.title = title_ja_raw or title_ko_raw
+    return merged
+
+
 def parse_video_html(
     html: str,
     *,
     base_url: str = BASE_URL,
+    locale: str = "",
 ) -> VideoInfo:
     soup = BeautifulSoup(html, "lxml")
     info = VideoInfo()
-    h1 = soup.select_one(SELECTORS["title"])
-    if h1:
-        info.title = _text(h1)
 
-    player = soup.select_one(SELECTORS["player"])
-    if player:
-        info.poster_url = (player.get("data-poster") or "").strip()
-        if info.poster_url and info.poster_url.startswith("/"):
-            info.poster_url = urljoin(base_url, info.poster_url)
+    raw_title = _title_from_soup(soup)
+    info.poster_url = _poster_from_soup(soup, base_url=base_url)
 
     desc = soup.select_one(SELECTORS["description"])
     if desc:
@@ -248,6 +438,8 @@ def parse_video_html(
 
     info.code = _code_from_favourite(soup)
     info.favourite_count = _favourite_count_from_button(soup)
+
+    _parse_watch_info_dl(soup, info)
 
     for row in _iter_detail_rows(soup):
         label, value_node = _row_label_and_value_container(row)
@@ -257,16 +449,78 @@ def parse_video_html(
             t = _text(value_node)
             if t and not info.code:
                 info.code = t
-        if label in ("リリース日",):
+        if label in ("リリース日", "発売日"):
             info.release_date = _text(value_node)
         if label in ("女優",):
-            info.actresses = _parse_actresses(value_node)
+            parsed = _parse_actresses(value_node)
+            if parsed:
+                info.actresses = parsed
         if label in ("ジャンル",):
-            info.genres = _parse_genre_span(value_node)
+            parsed = _parse_genre_span(value_node)
+            if parsed:
+                info.genres = parsed
         if label in ("メーカー",):
-            info.maker = _parse_maker(value_node)
+            maker = _parse_maker(value_node)
+            if maker:
+                info.maker = maker
+
+    norm = _normalize_scraped_title(raw_title, info.code)
+    if _is_boilerplate_title(norm):
+        norm = ""
+    info.title = norm
+    loc = (locale or "").lower()
+    if loc == "ja" or (loc != "ko" and not _has_hangul(norm)):
+        info.title_ja = norm
 
     return info
+
+
+def _http_get(
+    url: str,
+    *,
+    headers: dict,
+    timeout: float,
+    session=None,
+    disable_cffi: bool,
+) -> Optional[Any]:
+    max_tries = 3
+    backoffs = (0.0, 0.8, 1.6)
+    last_exc: Optional[BaseException] = None
+    for i in range(max_tries):
+        if i > 0:
+            try:
+                time.sleep(backoffs[min(i, len(backoffs) - 1)])
+            except Exception:
+                pass
+        try:
+            if _USE_CFFI and (session is None) and (not disable_cffi):
+                r = _cffi_requests.get(
+                    url,
+                    headers=headers,
+                    timeout=timeout,
+                    impersonate="chrome131",
+                )
+            else:
+                sess = session or requests.Session()
+                r = sess.get(url, headers=headers, timeout=timeout)
+                r.encoding = r.apparent_encoding or "utf-8"
+            return r
+        except Exception as e:
+            last_exc = e
+            msg = str(e)
+            is_curl_reset = ("curl:" in msg.lower()) and ("(35)" in msg or "recv failure" in msg.lower())
+            if is_curl_reset and (_USE_CFFI and (session is None)) and (not disable_cffi):
+                try:
+                    sess = requests.Session()
+                    r = sess.get(url, headers=headers, timeout=timeout)
+                    r.encoding = r.apparent_encoding or "utf-8"
+                    return r
+                except Exception as e2:
+                    last_exc = e2
+            continue
+    if last_exc is not None:
+        raise last_exc
+    return None
 
 
 def fetch_video_info(
@@ -286,80 +540,55 @@ def fetch_video_info(
             "AppleWebKit/537.36 (KHTML, like Gecko) "
             "Chrome/120.0.0.0 Safari/537.36"
         ),
-        "Accept-Language": "ja,en-US;q=0.9,en;q=0.8",
+        "Accept-Language": "ko-KR,ko;q=0.9,ja;q=0.8,en;q=0.7",
     }
     last_exc: Optional[BaseException] = None
     candidates = _slug_candidates(product_id)
     if not candidates:
         raise ValueError("product_id is empty")
 
-    for slug in candidates:
-        path = path_template.format(product_id=slug)
-        url = base_url.rstrip("/") + path
-        # 네트워크/WAF 환경에서 curl_cffi가 curl(35)로 자주 죽는 케이스가 있어
-        # - 짧은 재시도
-        # - curl_cffi 실패 시 requests로 폴백
-        max_tries = 3
-        backoffs = (0.0, 0.8, 1.6)
-        disable_cffi = (os.environ.get("JAVSTORY_CURL_CFFI_DISABLED", "") or "").strip().lower() in (
-            "1",
-            "true",
-            "yes",
-            "on",
-        )
+    disable_cffi = (os.environ.get("JAVSTORY_CURL_CFFI_DISABLED", "") or "").strip().lower() in (
+        "1", "true", "yes", "on",
+    )
 
-        r = None
-        for i in range(max_tries):
-            if i > 0:
-                try:
-                    time.sleep(backoffs[min(i, len(backoffs) - 1)])
-                except Exception:
-                    pass
+    for slug in candidates:
+        info_ja: Optional[VideoInfo] = None
+        info_ko: Optional[VideoInfo] = None
+        for locale in _SUPPORTED_LOCALES:
+            path = LOCALE_PATH_TEMPLATE.format(locale=locale, product_id=slug)
+            url = base_url.rstrip("/") + path
             try:
-                if _USE_CFFI and (session is None) and (not disable_cffi):
-                    r = _cffi_requests.get(
-                        url,
-                        headers=headers,
-                        timeout=timeout,
-                        impersonate="chrome131",
-                    )
-                else:
-                    sess = session or requests.Session()
-                    r = sess.get(url, headers=headers, timeout=timeout)
-                    r.encoding = r.apparent_encoding or "utf-8"
-                break
+                r = _http_get(url, headers=headers, timeout=timeout, session=session, disable_cffi=disable_cffi)
             except Exception as e:
                 last_exc = e
-                # curl_cffi 경로에서 리셋이 나면 requests로 1회 즉시 폴백
-                msg = str(e)
-                is_curl_reset = ("curl:" in msg.lower()) and ("(35)" in msg or "recv failure" in msg.lower())
-                if is_curl_reset and (_USE_CFFI and (session is None)) and (not disable_cffi):
-                    try:
-                        sess = requests.Session()
-                        r = sess.get(url, headers=headers, timeout=timeout)
-                        r.encoding = r.apparent_encoding or "utf-8"
-                        break
-                    except Exception as e2:
-                        last_exc = e2
                 continue
+            if r is None or r.status_code == 404:
+                continue
+            try:
+                r.raise_for_status()
+            except Exception as e:
+                last_exc = e
+                continue
+            try:
+                parsed = parse_video_html(r.text, base_url=base_url, locale=locale)
+            except Exception as e:
+                last_exc = e
+                continue
+            if locale == "ja":
+                info_ja = parsed
+            else:
+                info_ko = parsed
 
-        if r is None:
-            continue
-        if r.status_code == 404:
-            continue
-        try:
-            r.raise_for_status()
-        except Exception as e:
-            last_exc = e
-            continue
-        try:
-            info = parse_video_html(r.text, base_url=base_url)
-        except Exception as e:
-            last_exc = e
-            continue
-        if _detail_has_content(info):
-            return info
-        # For redirect/empty pages, continue to next slug (including siro2735)
+        merged: Optional[VideoInfo] = None
+        if info_ja and info_ko:
+            merged = _merge_locale_pages(info_ja, info_ko)
+        elif info_ja:
+            merged = info_ja
+        elif info_ko:
+            merged = info_ko
+
+        if merged and _detail_has_content(merged):
+            return merged
 
     if last_exc is not None:
         raise last_exc

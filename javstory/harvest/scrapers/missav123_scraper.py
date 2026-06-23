@@ -26,6 +26,12 @@ except ImportError:
 import requests
 from bs4 import BeautifulSoup
 
+from javstory.harvest.scrapers.av123_scraper import (
+    _is_boilerplate_title,
+    _normalize_scraped_title,
+    _title_from_soup,
+)
+
 BASE_URL = "https://missav123.to"
 VIDEO_PATH_TEMPLATE = "/ja/v/{product_id}"
 
@@ -178,29 +184,25 @@ def _slug_candidates(product_id: str) -> List[str]:
 
 
 def _missav_detail_has_content(info: MissavVideoInfo) -> bool:
-    """Missav redirect pages have title but no code/player; treat as valid if title present (fav count is main goal)."""
     title = str(getattr(info, "title", "") or "").strip()
     code = str(getattr(info, "code", "") or "").strip()
-    # For SIRO series redirect pages, title alone is sufficient for FavoritesOnlyWorker
-    return bool(title)
+    if title and _is_boilerplate_title(title):
+        title = ""
+    return bool(title or code)
 
 
 def parse_video_html(html: str, *, base_url: str = BASE_URL) -> MissavVideoInfo:
     soup = BeautifulSoup(html, "lxml")
     info = MissavVideoInfo()
 
-    # title - missav123.to often redirects or uses different structure (e.g. to 123av)
-    h1 = soup.select_one(SELECTORS["title"]) or soup.select_one("h1") or soup.select_one("title")
-    if h1:
-        raw_title = _text(h1)
-        info.title = raw_title
-        # If it's a redirect page to 123av (common for SIRO series), extract the real title
-        if any(k in raw_title for k in ["移転しました", "123av.com", "SIRO-2735"]):
-            # The full title often appears after "—"
-            if "—" in raw_title:
-                parts = [p.strip() for p in raw_title.split("—", 1)]
-                if len(parts) > 1 and parts[1]:
-                    info.title = parts[1]
+    raw_title = _title_from_soup(soup)
+    if raw_title:
+        m = re.match(r"^([A-Za-z0-9]+-\d+)\b", raw_title)
+        if m and not info.code:
+            info.code = m.group(1)
+    info.title = _normalize_scraped_title(raw_title, info.code)
+    if _is_boilerplate_title(info.title):
+        info.title = ""
 
     # player attrs: code / cover
     player = soup.select_one(SELECTORS["player"])

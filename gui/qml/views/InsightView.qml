@@ -52,6 +52,8 @@ Item {
 
         root.hiddenGems = root.parseJson(InsightModel.hiddenGems, [])
 
+        root.favoriteActorPicks = root.parseJson(InsightModel.favoriteActorPicks, [])
+
         root.actorCollections = root.parseJson(InsightModel.actorCollections, {actors:[]})
 
         root.tasteData = root.parseJson(InsightModel.tasteVector, {axes:[]})
@@ -87,6 +89,8 @@ Item {
     property var nextWatch:   parseJson(InsightModel.nextWatchRecs, [])
 
     property var hiddenGems:  parseJson(InsightModel.hiddenGems, [])
+
+    property var favoriteActorPicks: parseJson(InsightModel.favoriteActorPicks, [])
 
     property var actorCollections: parseJson(InsightModel.actorCollections, {actors:[]})
 
@@ -493,6 +497,8 @@ Item {
                     nextWatch: root.nextWatch
 
                     hiddenGems: root.hiddenGems
+
+                    favoriteActorPicks: root.favoriteActorPicks
 
                     recs: root.recs
 

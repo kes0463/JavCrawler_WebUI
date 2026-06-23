@@ -426,7 +426,7 @@ class PreviewQueueController(QObject):
         """DB를 스캔해 preview.webp 누락 작품만 큐 등록."""
         try:
             from javstory.harvest.database import get_db_session, JAVMetadata
-            from gui.library_data import guess_video_path_for_product_debug
+            from gui.library_data import guess_video_path_for_product
 
             from javstory.config.app_config import E_MEDIA_ROOT
 
@@ -442,7 +442,7 @@ class PreviewQueueController(QObject):
             added = 0
             skipped_no_video = 0
             skipped_exists = 0
-            no_video_items: list[dict] = []
+            no_video_pcs: list[str] = []
             for pc_raw, folder_path in (rows or []):
                 pc = (pc_raw or "").strip().upper()
                 if not pc:
@@ -452,44 +452,24 @@ class PreviewQueueController(QObject):
                     skipped_exists += 1
                     continue
 
-                vp, searched_dirs, matched = guess_video_path_for_product_debug(pc, folder_path or None)
+                vp = guess_video_path_for_product(pc, folder_path or None)
                 if not vp or not vp.is_file():
                     skipped_no_video += 1
-                    no_video_items.append(
-                        {
-                            "pc": pc,
-                            "folder_path": (folder_path or "").strip(),
-                            "searched_dirs": searched_dirs,
-                            "matched_videos": matched,
-                        }
-                    )
+                    no_video_pcs.append(pc)
                     continue
                 self.enqueue(pc, str(vp))
                 added += 1
 
-            if no_video_items:
-                # 로그에 상세를 남기고, 토스트는 요약만 출력
-                for it in no_video_items[:200]:
-                    fp = it.get("folder_path") or ""
-                    sd = it.get("searched_dirs") or []
-                    mv = it.get("matched_videos") or []
-                    self.logMessage.emit(
-                        "[프리뷰 백필] 영상 없음: "
-                        f"{it.get('pc')} | folder_path={fp or '(없음)'} | "
-                        f"searched={len(sd)} | matched={len(mv)}"
-                    )
-                    if sd:
-                        self.logMessage.emit(f"  - searched_dirs: {sd}")
-                    if mv:
-                        self.logMessage.emit(f"  - matched_videos: {mv}")
+            if no_video_pcs:
+                sample = ", ".join(no_video_pcs[:5])
+                self.logMessage.emit(
+                    f"[프리뷰 백필] 영상 없음 {len(no_video_pcs)}건"
+                    + (f" — 예: {sample}" if sample else "")
+                )
 
             self.toastMessage.emit(
                 f"[프리뷰 백필] 추가 {added}건 (존재 {skipped_exists} / 영상없음 {skipped_no_video})"
-                + (
-                    f" — 예: {', '.join(x.get('pc') for x in no_video_items[:5] if x.get('pc'))}"
-                    if no_video_items
-                    else ""
-                ),
+                + (f" — 예: {', '.join(no_video_pcs[:5])}" if no_video_pcs else ""),
                 "success" if added > 0 else "info",
             )
         except Exception as e:
@@ -500,7 +480,7 @@ class PreviewQueueController(QObject):
         """DB를 스캔해 가능한 모든 작품을 프리뷰 '강제 재생성'으로 큐 등록."""
         try:
             from javstory.harvest.database import get_db_session, JAVMetadata
-            from gui.library_data import guess_video_path_for_product_debug
+            from gui.library_data import guess_video_path_for_product
 
             session = get_db_session()
             try:
@@ -513,48 +493,29 @@ class PreviewQueueController(QObject):
 
             added = 0
             skipped_no_video = 0
-            no_video_items: list[dict] = []
+            no_video_pcs: list[str] = []
             for pc_raw, folder_path in (rows or []):
                 pc = (pc_raw or "").strip().upper()
                 if not pc:
                     continue
-                vp, searched_dirs, matched = guess_video_path_for_product_debug(pc, folder_path or None)
+                vp = guess_video_path_for_product(pc, folder_path or None)
                 if not vp or not vp.is_file():
                     skipped_no_video += 1
-                    no_video_items.append(
-                        {
-                            "pc": pc,
-                            "folder_path": (folder_path or "").strip(),
-                            "searched_dirs": searched_dirs,
-                            "matched_videos": matched,
-                        }
-                    )
+                    no_video_pcs.append(pc)
                     continue
                 self.regenerate(pc, str(vp))
                 added += 1
 
-            if no_video_items:
-                for it in no_video_items[:200]:
-                    fp = it.get("folder_path") or ""
-                    sd = it.get("searched_dirs") or []
-                    mv = it.get("matched_videos") or []
-                    self.logMessage.emit(
-                        "[프리뷰 일괄 재생성] 영상 없음: "
-                        f"{it.get('pc')} | folder_path={fp or '(없음)'} | "
-                        f"searched={len(sd)} | matched={len(mv)}"
-                    )
-                    if sd:
-                        self.logMessage.emit(f"  - searched_dirs: {sd}")
-                    if mv:
-                        self.logMessage.emit(f"  - matched_videos: {mv}")
+            if no_video_pcs:
+                sample = ", ".join(no_video_pcs[:5])
+                self.logMessage.emit(
+                    f"[프리뷰 일괄 재생성] 영상 없음 {len(no_video_pcs)}건"
+                    + (f" — 예: {sample}" if sample else "")
+                )
 
             self.toastMessage.emit(
                 f"[프리뷰 일괄 재생성] 추가 {added}건 (영상없음 {skipped_no_video})"
-                + (
-                    f" — 예: {', '.join(x.get('pc') for x in no_video_items[:5] if x.get('pc'))}"
-                    if no_video_items
-                    else ""
-                ),
+                + (f" — 예: {', '.join(no_video_pcs[:5])}" if no_video_pcs else ""),
                 "success" if added > 0 else "info",
             )
         except Exception as e:

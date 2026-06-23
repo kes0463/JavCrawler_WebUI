@@ -288,8 +288,30 @@ class HarvestView(QWidget):
         # 기존 워커 정리
         if key in self.workers:
             old = self.workers.pop(key)
-            if old in self._active_threads: self._active_threads.remove(old)
-            old.stop(); old.wait(); old.deleteLater()
+            if old in self._active_threads:
+                self._active_threads.remove(old)
+            try:
+                old.stop()
+            except Exception:
+                pass
+            if old not in self._active_threads:
+                self._active_threads.append(old)
+
+            def _cleanup_old(w=old) -> None:
+                if w in self._active_threads:
+                    self._active_threads.remove(w)
+                self._finished_workers.append(w)
+                try:
+                    w.deleteLater()
+                except Exception:
+                    pass
+                if len(self._finished_workers) > 30:
+                    self._finished_workers.pop(0)
+
+            try:
+                old.finished.connect(_cleanup_old)
+            except Exception:
+                _cleanup_old()
 
         # [수정] parent=self 를 전달하여 소유권 관계 명시
         worker = HarvestWorker(entries, parent=self)
@@ -370,9 +392,10 @@ class HarvestView(QWidget):
         os.environ["JAVSTORY_STORY_ANALYSIS_ENABLED"] = "1" if checked else "0"
 
     def closeEvent(self, event):
-        """화면 종료 시 모든 작업 안전하게 정지"""
+        """화면 종료 시 모든 작업 안전하게 정지(협력적 대기, UI 무한 블록 방지)."""
+        from gui.utils.qt_worker import stop_qthread
+
         for worker in self._active_threads[:]:
-            worker.stop()
-            worker.wait()
+            stop_qthread(worker, context="HarvestView.close", cooperative_timeout_ms=3000)
         self._active_threads.clear()
         super().closeEvent(event)

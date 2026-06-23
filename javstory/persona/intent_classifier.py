@@ -5,6 +5,7 @@
   intense_sensual   강한 관능·롤플레이 요청
   recommendation    추천 요청
   factual_search    검색·사실 정보 요청
+  user_rating_list  사용자 평점/별점 목록 요청
   general_analysis  분석·취향 대화 (기본)
 """
 
@@ -61,8 +62,16 @@ INTENT_EXAMPLES: Dict[str, List[str]] = {
         "어떤 작품이야",
         "시놉시스 알려줘",
         "제목 뭐야",
-        "목록 알려줘",
         "작품 검색해줘",
+    ],
+    "user_rating_list": [
+        "내가 점수 준 작품 리스트 알려줘",
+        "별점 준 작품 목록 보여줘",
+        "평점 부여한 작품 알려줘",
+        "내가 평가한 작품 뭐 있어",
+        "점수 매긴 작품 정리해줘",
+        "내 별점 목록",
+        "평점 준 작품들 나열해줘",
     ],
     "general_analysis": [
         "내 취향 분석해줘",
@@ -81,7 +90,8 @@ INTENT_EXAMPLES: Dict[str, List[str]] = {
 _KEYWORD_OVERRIDE: Dict[str, tuple[str, ...]] = {
     "shame_tension": ("수치플레이", "수치", "부끄럽게", "수치스럽게", "창피하게"),
     "intense_sensual": ("롤플레이", "역할극", "더 야하게", "야하게", "더 세게", "조교", "유혹", "애태"),
-    "factual_search": ("품번", "제목", "목록", "찾아", "검색"),
+    "user_rating_list": ("점수 준", "점수준", "별점 준", "별점준", "평점 준", "평점준", "평가한 작품", "내가 평가"),
+    "factual_search": ("품번", "제목", "찾아", "검색"),
 }
 
 

@@ -11,7 +11,8 @@
 from __future__ import annotations
 
 import datetime
-from typing import List, Dict, Any
+import os
+from typing import List, Dict, Any, Tuple
 
 from javstory.harvest.database import get_db_session_ctx, JAVMetadata, WatchHistory, UserPreference
 
@@ -394,11 +395,79 @@ def get_recommendations(
     return items
 
 
+def _recommendation_neg_lambda() -> float:
+    raw = (os.environ.get("JAVSTORY_REC_NEG_LAMBDA") or "0.3").strip()
+    try:
+        return max(0.0, min(1.0, float(raw)))
+    except ValueError:
+        return 0.3
+
+
+def _cluster_seed_threshold() -> int:
+    raw = (os.environ.get("JAVSTORY_REC_CLUSTER_MIN_SEEDS") or "8").strip()
+    try:
+        return max(2, int(raw))
+    except ValueError:
+        return 8
+
+
+def _collect_embedding_seed_histories(limit: int = 30) -> List[WatchHistory]:
+    with get_db_session_ctx() as session:
+        return (
+            session.query(WatchHistory)
+            .order_by(WatchHistory.updated_at.desc())
+            .limit(limit)
+            .all()
+        )
+
+
+def _split_positive_negative_seeds(
+    histories: List[WatchHistory],
+) -> Tuple[List[str], List[float], List[str], List[float]]:
+    """Return (positive_codes, positive_weights, negative_codes, negative_weights)."""
+    positive_codes: List[str] = []
+    positive_weights: List[float] = []
+    negative_codes: List[str] = []
+    negative_weights: List[float] = []
+
+    for h in histories:
+        pc = str(h.product_code or "").strip().upper()
+        if not pc:
+            continue
+        rating = int(h.rating or 0)
+        disliked = bool(getattr(h, "disliked", False))
+        is_negative = disliked or (0 < rating <= 2)
+        is_positive = (
+            bool(h.liked)
+            or bool(h.is_completed)
+            or rating >= 4
+        )
+        if is_negative:
+            if pc not in negative_codes:
+                negative_codes.append(pc)
+                negative_weights.append(max(0.5, _recent_watch_weight(h)))
+            continue
+        if is_positive:
+            if pc not in positive_codes:
+                positive_codes.append(pc)
+                positive_weights.append(_recent_watch_weight(h))
+
+    return positive_codes, positive_weights, negative_codes, negative_weights
+
+
 def _recommendations_via_embeddings(limit: int, model: str) -> List[Dict[str, Any]]:
     from javstory.library.embeddings.similarity import (
-        build_user_profile_vector,
+        build_negative_profile_vector,
+        build_weighted_user_profile_vector,
+        cluster_seed_vectors,
         find_similar_products,
-        rank_unwatched_by_vector,
+        merge_round_robin_ranked,
+        rank_unwatched_with_contrast,
+    )
+
+    histories = _collect_embedding_seed_histories(limit=30)
+    positive_codes, positive_weights, negative_codes, negative_weights = (
+        _split_positive_negative_seeds(histories)
     )
 
     with get_db_session_ctx() as session:
@@ -407,46 +476,63 @@ def _recommendations_via_embeddings(limit: int, model: str) -> List[Dict[str, An
             for r in session.query(WatchHistory.product_code).all()
             if r.product_code
         }
-        seeds: List[str] = []
-        histories = (
-            session.query(WatchHistory)
-            .filter(
-                (WatchHistory.liked == True)  # noqa: E712
-                | (WatchHistory.is_completed == True)  # noqa: E712
-                | (WatchHistory.rating >= 4)
+
+    neg_lambda = _recommendation_neg_lambda()
+    negative_profile = build_negative_profile_vector(
+        model=model,
+        seed_codes=negative_codes,
+        seed_weights=negative_weights,
+    )
+
+    ranked_results = []
+    cluster_min = _cluster_seed_threshold()
+
+    if len(positive_codes) >= cluster_min:
+        clusters = cluster_seed_vectors(positive_codes, model=model, k=3)
+        cluster_ranked = []
+        for cluster_codes, centroid in clusters:
+            cluster_ranked.append(
+                rank_unwatched_with_contrast(
+                    centroid,
+                    negative_profile,
+                    model=model,
+                    exclude_codes=watched_codes,
+                    top_k=limit * 2,
+                    neg_lambda=neg_lambda,
+                )
             )
-            .order_by(WatchHistory.updated_at.desc())
-            .limit(30)
-            .all()
+        ranked_results = merge_round_robin_ranked(cluster_ranked, limit=limit * 3)
+    else:
+        profile = build_weighted_user_profile_vector(
+            model=model,
+            seed_codes=positive_codes,
+            seed_weights=positive_weights,
         )
-        for h in histories:
-            pc = str(h.product_code or "").strip().upper()
-            if pc and pc not in seeds:
-                seeds.append(pc)
+        if profile:
+            ranked_results = rank_unwatched_with_contrast(
+                profile,
+                negative_profile,
+                model=model,
+                exclude_codes=watched_codes,
+                top_k=limit * 3,
+                neg_lambda=neg_lambda,
+            )
+        elif positive_codes:
+            for sim in find_similar_products(positive_codes[0], model=model, top_k=limit * 3):
+                if sim.product_code not in watched_codes:
+                    ranked_results.append(sim)
 
-    profile = build_user_profile_vector(model=model, seed_codes=seeds)
-    ranked: List[tuple[str, float, List[str]]] = []
-
-    if profile:
-        for r in rank_unwatched_by_vector(
-            profile, model=model, exclude_codes=watched_codes, top_k=limit * 3
-        ):
-            ranked.append((r.product_code, r.score, list(r.match_reasons)))
-    elif seeds:
-        for sim in find_similar_products(seeds[0], model=model, top_k=limit * 3):
-            if sim.product_code not in watched_codes:
-                ranked.append((sim.product_code, sim.score, list(sim.match_reasons)))
-
-    if not ranked:
+    if not ranked_results:
         return []
 
     seen: set[str] = set()
-    unique: List[tuple[str, float, List[str]]] = []
-    for pc, score, reasons in ranked:
+    unique = []
+    for item in ranked_results:
+        pc = item.product_code
         if pc in seen:
             continue
         seen.add(pc)
-        unique.append((pc, score, reasons))
+        unique.append((pc, float(item.score), list(item.match_reasons)))
     unique.sort(key=lambda x: x[1], reverse=True)
     unique = unique[:limit]
 

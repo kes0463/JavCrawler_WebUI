@@ -11,6 +11,8 @@ GlassCard {
     property string nameJa: ""
     property string profileImage: ""
     property real userScore: 0.0
+    property int workCount: 0
+    property bool showWorkCount: false
     property bool isFavorite: false
     property string genres: ""
     property bool selected: false
@@ -40,7 +42,9 @@ GlassCard {
         }
         return tags
     }
-    readonly property bool _showMetaRow: root.userScore > 0 || _genreTags.length > 0
+    readonly property bool _showMetaRow: root.showWorkCount
+        || root.userScore > 0
+        || _genreTags.length > 0
 
     Column {
         anchors.fill: parent
@@ -123,6 +127,24 @@ GlassCard {
             width: parent.width
             visible: root._showMetaRow
             spacing: Theme.spacingXs
+
+            Rectangle {
+                visible: root.showWorkCount
+                Layout.preferredHeight: 20
+                width: worksCountText.width + 12
+                radius: 10
+                color: Qt.rgba(Theme.accentNeon.r, Theme.accentNeon.g, Theme.accentNeon.b, 0.15)
+                border.color: Theme.accentNeon
+
+                Text {
+                    id: worksCountText
+                    anchors.centerIn: parent
+                    text: root.workCount + "작품"
+                    color: Theme.accentNeon
+                    font.pixelSize: 11
+                    font.bold: true
+                }
+            }
 
             RatingWidget {
                 visible: root.userScore > 0

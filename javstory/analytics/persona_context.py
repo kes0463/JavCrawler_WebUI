@@ -396,7 +396,6 @@ def _build_semantic_profile(seed_codes: List[str], exclude_codes: set[str]) -> D
     cache_key = _semantic_cache_key(seed_codes[:seed_limit], model)
     cached = _load_semantic_cache(cache_key)
     if cached is not None:
-        print("[PersonaCtx] semantic_profile: 캐시 hit")
         return cached
 
     profile = build_user_profile_vector(model=model, seed_codes=seed_codes[:seed_limit])
@@ -457,8 +456,6 @@ def build_persona_context(*, max_products: int | None = None) -> Dict[str, Any]:
     """
     페르소나 합성용 구조화 컨텍스트.
     """
-    import time as _time
-    _t_total = _time.perf_counter()
 
     n = int(max_products or persona_sample_size())
     budget = persona_context_budget()
@@ -468,13 +465,11 @@ def build_persona_context(*, max_products: int | None = None) -> Dict[str, Any]:
 
     excluded = similarity_excluded_genres_from_env()
 
-    _t = _time.perf_counter()
     stats = get_library_stats()
     taste = compute_taste_vector()
     monthly = get_monthly_genre_trend(3)
     recent = compute_recent_trend(recent_days, excluded_genres=excluded)
     short_recent = compute_recent_trend(short_days, excluded_genres=excluded)
-    print(f"[PersonaCtx] stats/trend: {_time.perf_counter()-_t:.1f}s")
 
     drift_hint = _build_drift_hint(
         monthly,
@@ -540,13 +535,9 @@ def build_persona_context(*, max_products: int | None = None) -> Dict[str, Any]:
             if pc not in positive_seed_codes and pc not in set(sample_groups.get("negative") or []):
                 positive_seed_codes.append(pc)
 
-    _t = _time.perf_counter()
     ctx["semantic_profile"] = _build_semantic_profile(positive_seed_codes, set(codes))
-    print(f"[PersonaCtx] semantic_profile: {_time.perf_counter()-_t:.1f}s")
 
-    _t = _time.perf_counter()
     meta_by_code = _watch_meta_by_codes(codes)
-    print(f"[PersonaCtx] watch_meta_by_codes: {_time.perf_counter()-_t:.1f}s")
     tag_counter: Counter = Counter()
     tone_counter: Counter = Counter()
     cues_per_min_list: List[float] = []
@@ -606,7 +597,6 @@ def build_persona_context(*, max_products: int | None = None) -> Dict[str, Any]:
     # 병렬로 각 제품 코드 로드 (I/O 바운드 작업)
     worker_count = min(len(codes), 6)
     ordered: Dict[str, Dict[str, Any]] = {}
-    _t = _time.perf_counter()
     with ThreadPoolExecutor(max_workers=worker_count) as pool:
         futures = {pool.submit(_load_one, pc): pc for pc in codes}
         for fut in as_completed(futures):
@@ -615,7 +605,6 @@ def build_persona_context(*, max_products: int | None = None) -> Dict[str, Any]:
                 ordered[pc] = entry
             except Exception:
                 pass
-    print(f"[PersonaCtx] parallel_load({len(codes)} codes, {worker_count} workers): {_time.perf_counter()-_t:.1f}s")
 
     # codes 순서를 유지하면서 집계
     for pc in codes:
@@ -662,5 +651,4 @@ def build_persona_context(*, max_products: int | None = None) -> Dict[str, Any]:
             "sample_count": len(cues_per_min_list),
         }
 
-    print(f"[PersonaCtx] TOTAL build_persona_context: {_time.perf_counter()-_t_total:.1f}s")
     return ctx

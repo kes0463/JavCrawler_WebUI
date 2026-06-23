@@ -79,8 +79,7 @@ def test_erotic_persona_engine_skip_context_independent_of_cache_only():
                                                                   "turn_ons": [], "avoidances": [],
                                                                   "affinities": [], "evidence": []}), \
          patch("javstory.persona.erotic_persona_engine._top_strong_reactions", return_value=[]), \
-         patch("javstory.persona.erotic_persona_engine.HybridLibrarySearch") as mock_search:
-        mock_search.return_value.search_with_fusion.return_value = []
+         patch("javstory.persona.erotic_persona_engine.fetch_recommendation_pool", return_value=[]):
         result = engine.build_chat_context("일반 대화")
 
     mock_ctx.assert_called_once()  # cache_only=True 여도 context_snapshot() 호출됨
@@ -101,8 +100,7 @@ def test_erotic_persona_engine_skip_context_true_skips_db():
                                                                   "turn_ons": [], "avoidances": [],
                                                                   "affinities": [], "evidence": []}), \
          patch("javstory.persona.erotic_persona_engine._top_strong_reactions", return_value=[]), \
-         patch("javstory.persona.erotic_persona_engine.HybridLibrarySearch") as mock_search:
-        mock_search.return_value.search_with_fusion.return_value = []
+         patch("javstory.persona.erotic_persona_engine.fetch_recommendation_pool", return_value=[]):
         result = engine.build_chat_context("일반 대화")
 
     mock_ctx.assert_not_called()  # skip_context=True → context_snapshot() 생략

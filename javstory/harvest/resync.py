@@ -7,6 +7,8 @@ if str(_ROOT) not in sys.path:
 
 from javstory.harvest.database import get_db_session_ctx, JAVMetadata, Actress, Genre, Maker
 from javstory.utils.common import tagify as _tagify
+from javstory.utils.actress_resolver import lookup_actress_display_names
+from javstory.utils.actress_profile import sync_actress_works_for_product
 
 
 def resync_all_metadata(product_codes=None, logger_func=None) -> dict:
@@ -46,10 +48,13 @@ def resync_all_metadata(product_codes=None, logger_func=None) -> dict:
                     ja_names = [n.strip() for n in actors_ja_raw.split(",") if n.strip()]
                     ko_list, ro_list, pending_count = [], [], 0
                     for name in ja_names:
-                        a = session.query(Actress).filter_by(japanese=name).first()
-                        if a and a.korean:
-                            ko_list.append(a.korean)
-                            ro_list.append(a.romaji or a.korean)
+                        mapped = lookup_actress_display_names(name, session=session)
+                        if mapped:
+                            _ja, ko, ro = mapped
+                            ko_list.append(ko)
+                            ro_list.append(ro)
+                            if ko == name:
+                                pending_count += 1
                         else:
                             ko_list.append(name)
                             ro_list.append(name)
@@ -113,6 +118,7 @@ def resync_all_metadata(product_codes=None, logger_func=None) -> dict:
                         changed = True
 
                 if changed:
+                    sync_actress_works_for_product(session, code, source="resync")
                     session.commit()
                     stats["updated"] += 1
                     log(f"[Resync]   갱신 완료: {code} ({i}/{total})")

@@ -103,16 +103,3 @@ def guess_video_path_for_product_fast(
             return v
     return None
 
-
-def guess_video_path_for_product_debug(
-    product_code: str,
-    folder_path: str | None = None,
-) -> tuple[Path | None, list[str], list[str]]:
-    """디버그: (첫 영상, 검색 base 목록, 매칭 목록)."""
-    pc = (product_code or "").strip().upper()
-    if not pc:
-        return None, [], []
-    bases = video_search_dirs(pc, folder_path)
-    matches = find_all_video_paths_for_product(pc, folder_path)
-    first = matches[0] if matches else None
-    return first, [str(p) for p in bases], [str(p) for p in matches]

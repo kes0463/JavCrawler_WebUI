@@ -31,6 +31,9 @@ Item {
     property bool selectMode: false
     property var selectedSkus: []
     property bool dragSelecting: false
+    // loadMore·청크 append 중에만 GridView add/displaced 애니메이션 비활성(420→840 멈춤 방지)
+    property bool gridBulkLoad: LibraryModel.isLoadingMore
+            || LibraryModel.bulkGridUpdating
 
     function _isSelected(pc) {
         for (var i = 0; i < selectedSkus.length; i++) {
@@ -1413,6 +1416,7 @@ Item {
                             color: Theme.accentGlow
                         }
                         add: Transition {
+                            enabled: !root.gridBulkLoad
                             NumberAnimation {
                                 property: "opacity"
                                 from: 0
@@ -1429,6 +1433,7 @@ Item {
                             }
                         }
                         displaced: Transition {
+                            enabled: !root.gridBulkLoad
                             NumberAnimation {
                                 properties: "x,y"
                                 duration: 100

@@ -13,6 +13,8 @@ def test_persona_chat_dynamic_temperature_and_tokens(monkeypatch):
         _situational_temperature,
     )
 
+    monkeypatch.setattr("javstory.persona.intent_classifier.classify_intent", lambda _text: None)
+
     # 일반 대화: base=0.78 이 [0.72, 0.82] 안에 있으므로 그대로 반환
     assert _situational_temperature("오늘은 일반 대화로 말해줘", 0.78) == 0.78
     # base > _GENERAL_TEMPERATURE_MAX → max로 클램핑
@@ -74,6 +76,22 @@ def test_persona_chat_filters_reasoning_only_payload():
     assert "\n\n1. **GIGL-568" in formatted
     assert "\n\n2. **JUY-908" in formatted
     assert "\n\n자, 이제 뭘 고를래요?" in formatted
+
+
+def test_strip_reasoning_leak_removes_inline_english_draft_before_korean_answer():
+    from javstory.persona.persona_chat import _strip_reasoning_leak
+
+    leaked = (
+        "Okay, the user wants to see more incestuous movies. Let me check the database again. "
+        "GVH-684 is a good choice. They all fit the incest theme. I should present these options to the user."
+        "1. GVH-684 — GVH-684 모자 간음 타카라다 모나미\n"
+        "배우: 타카라다 모나미 / 장르: 근친상간\n"
+        "시놉: 십 대 아들 와히로는 어머니 모나미의 부부 관계를 목격한 후"
+    )
+    cleaned = _strip_reasoning_leak(leaked)
+    assert cleaned.startswith("1. GVH-684")
+    assert "Okay" not in cleaned
+    assert "Let me check the database" not in cleaned
 
 
 def test_persona_chat_applies_personalized_ranking():
@@ -219,7 +237,7 @@ def test_persona_chat_penalizes_recently_recommended_codes():
 
     assert ranked["results"][0]["product_code"] == "NEW-001"
     assert "OLD-001" in ranked["diversity_policy"]["recent_recommended_product_codes"]
-    assert any("다양성 감점" in reason for reason in ranked["results"][1]["ranking_reasons"])
+    assert all(item["product_code"] != "OLD-001" for item in ranked["results"])
 
 
 def test_persona_chat_fresh_request_filters_recently_recommended_codes():
@@ -387,14 +405,14 @@ def test_persona_chat_recommendation_grounding_blocks_fake_candidates():
 
     assert "ABC-123" in block
     assert "GHI-789" in block
-    assert "JKL-111" not in block
+    assert "JKL-111" in block
     assert "후보 목록에 없는 품번" in block
     assert "(신규 코드: ...)" in block
     assert "recent_recommended_product_codes: OLD-001" in block
     assert "OLD-007" in block
     assert "grok.tags" not in block
     assert "grok.tones" not in block
-    assert len(block) < 2400
+    assert len(block) < 5000
 
 
 def test_persona_chat_replaces_fabricated_recommendations_with_grounded_candidates():

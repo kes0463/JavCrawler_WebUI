@@ -15,6 +15,9 @@ Item {
     signal requestMerge()
 
     property var _allWorks: []
+    property var _filteredWorks: []
+    property int worksPageSize: 48
+    property int worksVisibleCount: 48
     property string selectedGenreFilter: ""
     property string worksSortKey: "release_date"
     property bool worksSortAscending: false
@@ -188,8 +191,14 @@ Item {
         }
     }
 
-    function _rebuildWorksList() {
+    function _syncWorksListModel() {
         worksListModel.clear()
+        var limit = Math.min(worksVisibleCount, _filteredWorks.length)
+        for (var j = 0; j < limit; j++)
+            worksListModel.append(_workListRow(_filteredWorks[j]))
+    }
+
+    function _rebuildWorksList() {
         var filtered = []
         for (var i = 0; i < _allWorks.length; i++) {
             if (_genreMatches(_allWorks[i], selectedGenreFilter))
@@ -197,8 +206,19 @@ Item {
         }
         var anyUserRating = _filteredHasAnyRating(filtered)
         filtered.sort(function(a, b) { return _compareWorks(a, b, anyUserRating) })
-        for (var j = 0; j < filtered.length; j++)
-            worksListModel.append(_workListRow(filtered[j]))
+        _filteredWorks = filtered
+        worksVisibleCount = Math.min(worksPageSize, _filteredWorks.length)
+        _syncWorksListModel()
+    }
+
+    function loadMoreWorks() {
+        if (worksVisibleCount >= _filteredWorks.length)
+            return
+        worksVisibleCount = Math.min(
+            worksVisibleCount + worksPageSize,
+            _filteredWorks.length
+        )
+        _syncWorksListModel()
     }
 
     function setGenreFilter(genre) {
@@ -220,21 +240,27 @@ Item {
         worksListModel.clear()
         workGenresModel.clear()
         _allWorks = []
+        _filteredWorks = []
+        worksVisibleCount = worksPageSize
         selectedGenreFilter = ""
         worksSortKey = "release_date"
         worksSortAscending = false
         if (!actressModel || !actressModel.currentProfile.id) return
-        var id = actressModel.currentProfile.id
-        var works = actressModel.getLibraryWorks(id)
-        _allWorks = works.slice()
-        _rebuildWorksList()
-        var genres = actressModel.getWorkGenres(id)
-        for (var j = 0; j < genres.length; j++)
-            workGenresModel.append({ "name": genres[j] })
+        actressModel.requestLibraryWorksAndGenres(actressModel.currentProfile.id)
     }
 
     Connections {
         target: root.actressModel
+        function onLibraryWorksBundleReady(actressId, bundle) {
+            if (!root.actressModel || actressId !== root.actressModel.currentProfile.id)
+                return
+            _allWorks = ((bundle && bundle.works) ? bundle.works : []).slice()
+            _rebuildWorksList()
+            workGenresModel.clear()
+            var genres = (bundle && bundle.genres) ? bundle.genres : []
+            for (var j = 0; j < genres.length; j++)
+                workGenresModel.append({ "name": genres[j] })
+        }
         function onCurrentProfileChanged() {
             root.isEditMode = false
             root._suppressSave = true
@@ -900,11 +926,14 @@ Item {
                             Text {
                                 Layout.fillWidth: true
                                 text: {
-                                    var n = worksListModel.count
-                                    var total = root._allWorks.length
-                                    if (root.selectedGenreFilter && n !== total)
-                                        return "출연 작품 (" + n + " / " + total + ")"
-                                    return "출연 작품 (" + n + ")"
+                                    var total = root._filteredWorks.length
+                                    var shown = worksListModel.count
+                                    var allN = root._allWorks.length
+                                    if (shown < total)
+                                        return "출연 작품 (" + shown + " / " + total + ")"
+                                    if (root.selectedGenreFilter && total !== allN)
+                                        return "출연 작품 (" + total + " / " + allN + ")"
+                                    return "출연 작품 (" + total + ")"
                                 }
                                 color: Theme.textSecondary
                                 font.pixelSize: 12
@@ -947,20 +976,33 @@ Item {
                         Item {
                             id: worksGridHost
                             width: parent.width
-                            height: worksGrid.height
+                            visible: worksListModel.count > 0
 
                             readonly property int cardCellW: 210
                             readonly property int cardCellH: 310
                             readonly property int gridColumns: Math.max(1, Math.floor(width / cardCellW))
                             readonly property real gridWidth: gridColumns * cardCellW
+                            readonly property int viewportRows: 3
+                            readonly property int gridContentRows: Math.max(
+                                1,
+                                Math.ceil(worksListModel.count / Math.max(1, gridColumns))
+                            )
+                            readonly property int gridContentHeight: gridContentRows * cardCellH
+                            readonly property int viewportHeight: Math.min(
+                                gridContentHeight,
+                                viewportRows * cardCellH
+                            )
+                            height: viewportHeight
 
                             GridView {
                                 id: worksGrid
                                 anchors.horizontalCenter: parent.horizontalCenter
                                 width: worksGridHost.gridWidth
-                                height: contentHeight
+                                height: worksGridHost.viewportHeight
                                 clip: true
-                                interactive: false
+                                interactive: worksGridHost.gridContentHeight > worksGridHost.viewportHeight
+                                boundsBehavior: Flickable.StopAtBounds
+                                cacheBuffer: worksGridHost.cardCellH * 2
                                 cellWidth: worksGridHost.cardCellW
                                 cellHeight: worksGridHost.cardCellH
                                 model: worksListModel
@@ -979,6 +1021,21 @@ Item {
                                         window.navigateToLibraryDetail(pc, aid)
                                     }
                                 }
+                            }
+                        }
+
+                        Item {
+                            width: parent.width
+                            visible: loadMoreBtn.visible
+                            implicitHeight: loadMoreBtn.implicitHeight
+
+                            ActionButton {
+                                id: loadMoreBtn
+                                anchors.horizontalCenter: parent.horizontalCenter
+                                visible: worksListModel.count > 0
+                                    && worksListModel.count < root._filteredWorks.length
+                                text: "더 보기 (" + (root._filteredWorks.length - worksListModel.count) + ")"
+                                onClicked: root.loadMoreWorks()
                             }
                         }
 

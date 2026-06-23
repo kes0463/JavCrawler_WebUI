@@ -389,6 +389,7 @@ class PersonaLibrarySearch:
         *,
         product_codes: List[str] | None = None,
         fallback_seed_codes: List[str] | None = None,
+        fast: bool = False,
     ) -> Dict[str, Any]:
         terms = split_query_terms(query)
         strict_title_terms = extract_strict_title_terms(query)
@@ -415,7 +416,7 @@ class PersonaLibrarySearch:
                 rows = session.query(JAVMetadata).filter(JAVMetadata.product_code.in_(code_variants)).all()
                 for row in rows:
                     item = row_to_search_result(row, source="product_code", score=1.0)
-                    if source_policy.get("use_grok"):
+                    if source_policy.get("use_grok") and not fast:
                         item["grok"] = _load_grok_summary(item["product_code"])
                     _merge_result(results, item)
 
@@ -457,7 +458,7 @@ class PersonaLibrarySearch:
                             ]
                         ).lower()
                     ]
-                    if source_policy.get("use_grok"):
+                    if source_policy.get("use_grok") and not fast:
                         item["grok"] = _load_grok_summary(item["product_code"])
                     _merge_result(results, item)
 
@@ -505,21 +506,22 @@ class PersonaLibrarySearch:
                     source = "db_synopsis" if source_policy.get("mode") == "synopsis" else "db_text"
                     score = 0.82 if source == "db_synopsis" else 0.75
                     item = row_to_search_result(row, source=source, score=score)
-                    grok = _load_grok_summary(item["product_code"]) if source_policy.get("use_grok") else {}
-                    if grok:
-                        item["grok"] = grok
-                        if _matches_grok(grok, terms):
-                            item["source"] = "db_text+grok"
-                            item["score"] = 0.86
+                    if not fast:
+                        grok = _load_grok_summary(item["product_code"]) if source_policy.get("use_grok") else {}
+                        if grok:
+                            item["grok"] = grok
+                            if _matches_grok(grok, terms):
+                                item["source"] = "db_text+grok"
+                                item["score"] = 0.86
                     _merge_result(results, item)
 
-        if source_policy.get("use_grok") and terms and not strict_title_terms and len(results) < self.limit:
+        if not fast and source_policy.get("use_grok") and terms and not strict_title_terms and len(results) < self.limit:
             self._search_grok_cache(terms, results)
 
-        if source_policy.get("use_embedding") and codes and not strict_title_terms:
+        if not fast and source_policy.get("use_embedding") and codes and not strict_title_terms:
             self._search_embedding_similar(codes[0], results)
 
-        if not strict_title_terms and len(results) < self.limit:
+        if not fast and not strict_title_terms and len(results) < self.limit:
             for seed_code in fallback_codes:
                 if seed_code in codes:
                     continue

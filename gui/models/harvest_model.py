@@ -564,9 +564,7 @@ class HarvestModel(QObject):
             return
 
         if key in self._workers:
-            old = self._workers.pop(key)
-            old.stop()
-            old.wait()
+            self._retire_harvest_worker(self._workers.pop(key))
 
         # entries가 여러 개인 배치면 병렬 큐 실행(추천 A)
         if isinstance(entries, (list, tuple)) and len(entries) > 1:
@@ -747,6 +745,33 @@ class HarvestModel(QObject):
                 self.toastMessage.emit(msg, "success")
         except Exception:
             pass
+
+    def _retire_harvest_worker(self, worker) -> None:
+        """실행 중인 워커를 중지하고 finished 시점에 정리(UI 스레드 wait 금지)."""
+        if worker is None:
+            return
+        try:
+            worker.stop()
+        except Exception:
+            pass
+        if worker not in self._active_refs:
+            self._active_refs.append(worker)
+
+        def _cleanup(w=worker) -> None:
+            try:
+                if w in self._active_refs:
+                    self._active_refs.remove(w)
+            except Exception:
+                pass
+            try:
+                w.deleteLater()
+            except Exception:
+                pass
+
+        try:
+            worker.finished.connect(_cleanup)
+        except Exception:
+            _cleanup()
 
     def _on_thread_done(self, worker):
         # 워커 키 추출

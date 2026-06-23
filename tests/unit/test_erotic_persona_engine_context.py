@@ -22,11 +22,11 @@ def test_build_chat_context_emphasizes_sensual_priority(monkeypatch):
             }
 
     monkeypatch.setattr(engine_mod, "EnhancedPersonaMemory", lambda: DummyMemory())
-    monkeypatch.setattr(
-        engine_mod.HybridLibrarySearch,
-        "search_with_fusion",
-        lambda self, query: captured.setdefault("query", query) and [],
-    )
+    def _capture_pool(query, **kwargs):
+        captured["query"] = query
+        return []
+
+    monkeypatch.setattr(engine_mod, "fetch_recommendation_pool", _capture_pool)
 
     engine = EroticPersonaEngine()
     monkeypatch.setattr(
@@ -75,7 +75,7 @@ def test_build_chat_context_selects_persona_fields_by_intent(monkeypatch):
             return {"strong_reaction_notes": []}
 
     monkeypatch.setattr(engine_mod, "EnhancedPersonaMemory", lambda: DummyMemory())
-    monkeypatch.setattr(engine_mod.HybridLibrarySearch, "search_with_fusion", lambda self, query: [])
+    monkeypatch.setattr(engine_mod, "fetch_recommendation_pool", lambda query, **kwargs: [])
 
     engine = EroticPersonaEngine()
     monkeypatch.setattr(

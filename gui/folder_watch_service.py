@@ -6,7 +6,7 @@ import json
 import os
 import string
 import sys
-import time
+import threading
 from pathlib import Path
 
 from PySide6.QtCore import QObject, Property, QRunnable, QThreadPool, QTimer, Signal, Slot
@@ -211,8 +211,6 @@ def search_folder_candidates(
     if not roots:
         return []
 
-    t0 = time.perf_counter()
-
     seen: set[str] = set()
     raw: list[str] = []
     scanned = 0
@@ -252,8 +250,6 @@ def search_folder_candidates(
 
     ranked = _rank_candidates_by_old_path(old_path, raw)
     out = ranked[:max_results]
-    elapsed_ms = int((time.perf_counter() - t0) * 1000)
-    _ = elapsed_ms  # kept for potential future profiling without logging
     return out
 
 
@@ -305,6 +301,12 @@ class FolderMoveWatchService(QObject):
         self._poll = QTimer(self)
         self._poll.setInterval(60_000)
         self._poll.timeout.connect(self.verify_bindings)
+
+        self._refresh_db_debounce = QTimer(self)
+        self._refresh_db_debounce.setSingleShot(True)
+        self._refresh_db_debounce.setInterval(2500)
+        self._refresh_db_debounce.timeout.connect(self._refresh_paths_from_db_worker)
+        self._refresh_db_in_flight = False
 
     def _load_paused_product_codes(self) -> None:
         self._paused_product_codes = set()
@@ -377,29 +379,46 @@ class FolderMoveWatchService(QObject):
 
     @Slot()
     def refresh_paths_from_db(self) -> None:
-        """DB에서 folder_path 목록을 다시 읽고 감시 경로를 갱신한다."""
+        """DB folder_path 목록 갱신 — debounce 후 백그라운드에서 조회(메인 스레드 블록 방지)."""
         if _disabled():
             return
-        try:
-            from javstory.harvest.database import get_db_session, JAVMetadata
+        self._refresh_db_debounce.start()
 
-            session = get_db_session()
+    def _refresh_paths_from_db_worker(self) -> None:
+        if _disabled():
+            return
+        if self._refresh_db_in_flight:
+            self._refresh_db_debounce.start(800)
+            return
+        self._refresh_db_in_flight = True
+
+        def _job():
+            paths: dict[str, str] = {}
             try:
-                rows = session.query(JAVMetadata.product_code, JAVMetadata.folder_path).all()
-                self._paths = {}
-                for pc, fp in rows:
-                    if not fp or not str(fp).strip():
-                        continue
-                    self._paths[(pc or "").strip().upper()] = str(Path(fp).expanduser())
-            finally:
-                session.close()
-        except Exception as e:
-            _ = e
-            self._paths = {}
+                from javstory.harvest.database import get_db_session, JAVMetadata
 
-        self._rebuild_watcher_paths()
-        if not self._poll.isActive():
-            self._poll.start()
+                session = get_db_session()
+                try:
+                    rows = session.query(JAVMetadata.product_code, JAVMetadata.folder_path).all()
+                    for pc, fp in rows:
+                        if not fp or not str(fp).strip():
+                            continue
+                        paths[(pc or "").strip().upper()] = str(Path(fp).expanduser())
+                finally:
+                    session.close()
+            except Exception:
+                paths = {}
+
+            def _apply():
+                self._refresh_db_in_flight = False
+                self._paths = paths
+                self._rebuild_watcher_paths()
+                if not self._poll.isActive():
+                    self._poll.start()
+
+            QTimer.singleShot(0, self, _apply)
+
+        threading.Thread(target=_job, daemon=True, name="folder-watch-refresh").start()
 
     def _rebuild_watcher_paths(self) -> None:
         if not self._watcher:

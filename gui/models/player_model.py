@@ -11,11 +11,8 @@ from pathlib import Path
 
 from PySide6.QtCore import QObject, Property, Signal, Slot
 
-from gui.watch_resume import (
-    last_position_ms_for_video,
-    merge_last_positions_json,
-    normalize_watch_video_key,
-)
+from gui.utils.watch_history_writer import WatchHistoryWriter, enqueue_watch_job
+from gui.watch_resume import last_position_ms_for_video
 import javstory.harvest.database as _harvest_db
 
 class PlayerModel(QObject):
@@ -30,6 +27,7 @@ class PlayerModel(QObject):
     likeStateChanged = Signal(bool, bool)  # (liked, disliked) 변경 알림
     closePlayerRequested = Signal()     # Python 이벤트 필터 → QML 플레이어 닫기
     playbackProxyReady = Signal(str, str)  # original_path, proxy_path
+    _watchSessionReady = Signal(dict)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -40,6 +38,8 @@ class PlayerModel(QObject):
         self._is_disliked = False
         self._player_open = False
         self._proxy_jobs: set[str] = set()
+        WatchHistoryWriter.instance()
+        self._watchSessionReady.connect(self._apply_watch_session_state)
 
     def _playback_proxy_path(self, video_path: Path) -> Path:
         try:
@@ -159,38 +159,26 @@ class PlayerModel(QObject):
 
     # ── 재생 세션 시작 ───────────────────────────────────────
 
+    def _apply_watch_session_state(self, state: dict) -> None:
+        if not isinstance(state, dict):
+            return
+        self._current_rating = int(state.get("rating") or 0)
+        self._is_liked = bool(state.get("liked"))
+        self._is_disliked = bool(state.get("disliked"))
+        self.ratingChanged.emit(self._current_rating)
+        self.likeStateChanged.emit(self._is_liked, self._is_disliked)
+
     @Slot(str, int)
     def startWatch(self, product_code: str, total_sec: int):
         """재생 시작 시 호출하여 세션을 초기화합니다."""
         self._current_product = product_code
         self.currentProductChanged.emit()
-
-        with _harvest_db.get_db_session_ctx() as session:
-            history = session.query(_harvest_db.WatchHistory).filter_by(
-                product_code=product_code
-            ).first()
-            if not history:
-                history = _harvest_db.WatchHistory(
-                    product_code=product_code,
-                    total_duration=total_sec,
-                    session_count=1,
-                    created_at=datetime.datetime.now(),
-                )
-                session.add(history)
-            else:
-                history.session_count = (history.session_count or 0) + 1
-                if total_sec > 0:
-                    history.total_duration = total_sec
-                history.updated_at = datetime.datetime.now()
-            session.commit()
-
-            # 현재 별점 & 좋아요 상태 로드
-            self._current_rating = history.rating or 0
-            self._is_liked = bool(history.liked)
-            self._is_disliked = bool(history.disliked)
-
-        self.ratingChanged.emit(self._current_rating)
-        self.likeStateChanged.emit(self._is_liked, self._is_disliked)
+        enqueue_watch_job(
+            "start_watch",
+            product_code,
+            payload={"total_sec": int(total_sec or 0)},
+            done=lambda state: self._watchSessionReady.emit(state or {}),
+        )
 
     # ── 진척도 업데이트 ─────────────────────────────────────
 
@@ -203,33 +191,15 @@ class PlayerModel(QObject):
         """
         if not product_code:
             return
-
-        vkey = normalize_watch_video_key(video_path or "")
-
-        with _harvest_db.get_db_session_ctx() as session:
-            history = session.query(_harvest_db.WatchHistory).filter_by(
-                product_code=product_code
-            ).first()
-            if history:
-                history.last_position = position_ms
-                if vkey:
-                    history.last_positions_json = merge_last_positions_json(
-                        getattr(history, "last_positions_json", None),
-                        vkey,
-                        position_ms,
-                    )
-                if duration_sec > 0:
-                    progress = position_ms / (duration_sec * 1000)
-                    if progress > 0.9 and not history.is_completed:
-                        history.is_completed = True
-                        # 완독 시 취향 점수 자동 반영
-                        try:
-                            from javstory.analytics.preference_engine import score_preferences
-                            score_preferences(product_code, delta=2)
-                        except Exception:
-                            pass
-                history.updated_at = datetime.datetime.now()
-                session.commit()
+        enqueue_watch_job(
+            "progress",
+            product_code,
+            payload={
+                "position_ms": int(position_ms or 0),
+                "duration_sec": int(duration_sec or 0),
+                "video_path": str(video_path or ""),
+            },
+        )
 
     # ── 누적 시청 시간 업데이트 (30초마다) ─────────────────
 
@@ -240,15 +210,11 @@ class PlayerModel(QObject):
         """
         if not product_code or elapsed_sec <= 0:
             return
-
-        with _harvest_db.get_db_session_ctx() as session:
-            history = session.query(_harvest_db.WatchHistory).filter_by(
-                product_code=product_code
-            ).first()
-            if history:
-                history.watch_duration = (history.watch_duration or 0) + elapsed_sec
-                history.updated_at = datetime.datetime.now()
-                session.commit()
+        enqueue_watch_job(
+            "duration",
+            product_code,
+            payload={"elapsed_sec": int(elapsed_sec or 0)},
+        )
 
     # ── 스킵 감지 ───────────────────────────────────────────
 
@@ -260,18 +226,11 @@ class PlayerModel(QObject):
         """
         if not product_code:
             return
-        jump_sec = (to_ms - from_ms) / 1000
-        if jump_sec < 5:
-            return
-
-        with _harvest_db.get_db_session_ctx() as session:
-            history = session.query(_harvest_db.WatchHistory).filter_by(
-                product_code=product_code
-            ).first()
-            if history:
-                history.skip_count = (history.skip_count or 0) + 1
-                history.updated_at = datetime.datetime.now()
-                session.commit()
+        enqueue_watch_job(
+            "skip",
+            product_code,
+            payload={"from_ms": int(from_ms or 0), "to_ms": int(to_ms or 0)},
+        )
 
     # ── 명시적 피드백: 좋아요 ───────────────────────────────
 
@@ -281,34 +240,14 @@ class PlayerModel(QObject):
         if not product_code:
             return
 
-        with _harvest_db.get_db_session_ctx() as session:
-            history = session.query(_harvest_db.WatchHistory).filter_by(
-                product_code=product_code
-            ).first()
-            if not history:
-                history = _harvest_db.WatchHistory(
-                    product_code=product_code,
-                    created_at=datetime.datetime.now(),
-                )
-                session.add(history)
+        def _done(state):
+            if not isinstance(state, dict):
+                return
+            self._is_liked = bool(state.get("liked"))
+            self._is_disliked = bool(state.get("disliked"))
+            self.likeStateChanged.emit(self._is_liked, self._is_disliked)
 
-            new_liked = not bool(history.liked)
-            history.liked = new_liked
-            history.disliked = False  # 좋아요 누르면 싫어요 해제
-            history.updated_at = datetime.datetime.now()
-            session.commit()
-
-            self._is_liked = new_liked
-            self._is_disliked = False
-
-        self.likeStateChanged.emit(self._is_liked, self._is_disliked)
-
-        delta = 3 if self._is_liked else -3
-        try:
-            from javstory.analytics.preference_engine import score_preferences
-            score_preferences(product_code, delta=delta)
-        except Exception:
-            pass
+        enqueue_watch_job("like", product_code, done=_done)
 
     # ── 명시적 피드백: 싫어요 ───────────────────────────────
 
@@ -318,34 +257,14 @@ class PlayerModel(QObject):
         if not product_code:
             return
 
-        with _harvest_db.get_db_session_ctx() as session:
-            history = session.query(_harvest_db.WatchHistory).filter_by(
-                product_code=product_code
-            ).first()
-            if not history:
-                history = _harvest_db.WatchHistory(
-                    product_code=product_code,
-                    created_at=datetime.datetime.now(),
-                )
-                session.add(history)
+        def _done(state):
+            if not isinstance(state, dict):
+                return
+            self._is_liked = bool(state.get("liked"))
+            self._is_disliked = bool(state.get("disliked"))
+            self.likeStateChanged.emit(self._is_liked, self._is_disliked)
 
-            new_disliked = not bool(history.disliked)
-            history.disliked = new_disliked
-            history.liked = False  # 싫어요 누르면 좋아요 해제
-            history.updated_at = datetime.datetime.now()
-            session.commit()
-
-            self._is_disliked = new_disliked
-            self._is_liked = False
-
-        self.likeStateChanged.emit(self._is_liked, self._is_disliked)
-
-        delta = -2 if self._is_disliked else 2
-        try:
-            from javstory.analytics.preference_engine import score_preferences
-            score_preferences(product_code, delta=delta)
-        except Exception:
-            pass
+        enqueue_watch_job("dislike", product_code, done=_done)
 
     # ── 별점 ────────────────────────────────────────────────
 
@@ -354,42 +273,16 @@ class PlayerModel(QObject):
         """사용자가 부여한 별점(0~5)을 저장하고 취향 점수를 업데이트합니다."""
         if not product_code:
             return
-        rating = max(0, min(5, rating))
-
-        with _harvest_db.get_db_session_ctx() as session:
-            history = session.query(_harvest_db.WatchHistory).filter_by(
-                product_code=product_code
-            ).first()
-            if not history:
-                history = _harvest_db.WatchHistory(
-                    product_code=product_code,
-                    created_at=datetime.datetime.now(),
-                )
-                session.add(history)
-
-            old_rating = history.rating or 0
-            history.rating = rating
-            history.updated_at = datetime.datetime.now()
-            session.commit()
-
+        rating = max(0, min(5, int(rating or 0)))
         self._current_rating = rating
         self.ratingChanged.emit(rating)
 
-        # 별점 변화에 따른 취향 점수 delta 계산
-        delta = 0
-        if rating >= 4:
-            delta = 3
-        elif rating == 3:
-            delta = 1
-        elif rating <= 1 and old_rating > rating:
-            delta = -1
+        def _done(saved):
+            if isinstance(saved, int) and saved != rating:
+                self._current_rating = saved
+                self.ratingChanged.emit(saved)
 
-        if delta != 0:
-            try:
-                from javstory.analytics.preference_engine import score_preferences
-                score_preferences(product_code, delta=delta)
-            except Exception:
-                pass
+        enqueue_watch_job("rating", product_code, payload={"rating": rating}, done=_done)
 
     # ── 기존 호환 API ────────────────────────────────────────
 
@@ -444,17 +337,11 @@ class PlayerModel(QObject):
         """영상 duration 확정 시 총 길이만 업데이트합니다 (session_count 변경 없음)."""
         if not product_code or total_sec <= 0:
             return
-        try:
-            with _harvest_db.get_db_session_ctx() as session:
-                history = session.query(_harvest_db.WatchHistory).filter_by(
-                    product_code=product_code
-                ).first()
-                if history:
-                    history.total_duration = total_sec
-                    history.updated_at = datetime.datetime.now()
-                    session.commit()
-        except Exception:
-            pass
+        enqueue_watch_job(
+            "total_duration",
+            product_code,
+            payload={"total_sec": int(total_sec or 0)},
+        )
 
     @Slot(str, str, result=int)
     def getLastPosition(self, product_code: str, video_path: str) -> int:

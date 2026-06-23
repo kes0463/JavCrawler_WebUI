@@ -14,7 +14,6 @@ from javstory.library.cover_cache import cover_needs_download, resolve_cover_pat
 from javstory.library.paths import library_state_path, work_library_dir
 from javstory.library.video_discovery import (
     first_video_in_dir as _first_video_in_dir,
-    guess_video_path_for_product_debug,
     guess_video_path_for_product_fast,
     scan_videos_in_dir,
 )
@@ -443,10 +442,18 @@ def _row_to_summary_impl(row: Any, fast: bool = False, flags: dict | None = None
         has_canonical=has_c,
     )
 
-    eff = resolve_cover_path(pc, cover_local)
-    eff_s = str(eff) if eff else None
-
-    need_dl = False if fast else cover_needs_download(pc, cover_url, cover_local)
+    if fast:
+        # 고속 경로: 행당 디스크 stat 금지.
+        #  1) 플래그 캐시에 해석된 cover_path가 있으면 그대로 사용
+        #  2) 없으면 DB의 cover_local_path를 검증 없이 신뢰(파이프라인이 기록한 값)
+        #  3) 둘 다 없으면 빈 값(백그라운드 플래그 재스캔이 채움)
+        cached_cover = (flags or {}).get("cover_path") if flags is not None else None
+        eff_s = (cached_cover or "").strip() or (cover_local or None)
+        need_dl = False
+    else:
+        eff = resolve_cover_path(pc, cover_local)
+        eff_s = str(eff) if eff else None
+        need_dl = cover_needs_download(pc, cover_url, cover_local)
 
     return LibraryWorkSummary(
         product_code=pc,
@@ -516,21 +523,31 @@ def load_library_summaries_fast_paged(
     return [row_to_summary_fast(r) for r in rows]
 
 
-def load_library_summaries_fast_priority_paged(
-    session,
-    *,
-    limit: int = 400,
-    offset: int = 0,
-    exclude_product_codes: set[str] | list[str] | tuple[str, ...] | None = None,
-) -> list[LibraryWorkSummary]:
-    """선호도 점수순으로 가벼운 우선순위 페이지를 만든 뒤 해당 행만 요약화한다."""
+# 선호도 랭킹 캐시: 동일 데이터 상태에서 loadMore가 매 페이지마다 전체 테이블을
+# 재스캔·재정렬하는 O(N²)를 막는다. (모듈 전역 — reload 워커가 새 세션으로 호출)
+_PRIORITY_RANKING_CACHE: dict[str, Any] = {}
+
+
+def invalidate_priority_ranking_cache() -> None:
+    """데이터 변경(하베스트/재동기화/시청 갱신)을 알 때 강제 무효화."""
+    _PRIORITY_RANKING_CACHE.clear()
+
+
+def _priority_ranking_signature(session, excl_raw: frozenset[str]) -> tuple:
+    """랭킹 캐시 유효성 판단용 경량 시그니처(COUNT/MAX만 사용)."""
+    from sqlalchemy import func
     from javstory.harvest.database import JAVMetadata, WatchHistory
 
-    excl_raw = {
-        str(pc or "").strip().upper()
-        for pc in (exclude_product_codes or [])
-        if str(pc or "").strip()
-    }
+    meta_count = session.query(func.count(JAVMetadata.product_code)).scalar() or 0
+    meta_max = session.query(func.max(JAVMetadata.updated_at)).scalar()
+    watch_count = session.query(func.count(WatchHistory.product_code)).scalar() or 0
+    watch_max = session.query(func.max(WatchHistory.updated_at)).scalar()
+    return (int(meta_count), str(meta_max), int(watch_count), str(watch_max), excl_raw)
+
+
+def _compute_priority_ranking(session, excl_raw: set[str]) -> list[tuple[float, Any, str]]:
+    from javstory.harvest.database import JAVMetadata, WatchHistory
+
     excl_base = {_base_product_code(pc) for pc in excl_raw}
 
     watch_by_base: dict[str, dict[str, Any]] = {}
@@ -585,13 +602,84 @@ def load_library_summaries_fast_priority_paged(
         ranked.append((score, updated_at, pc))
 
     ranked.sort(key=lambda it: (it[0], it[1] or datetime.min, it[2]), reverse=True)
+    return ranked
+
+
+def load_library_summaries_fast_priority_paged(
+    session,
+    *,
+    limit: int = 400,
+    offset: int = 0,
+    exclude_product_codes: set[str] | list[str] | tuple[str, ...] | None = None,
+) -> tuple[list[LibraryWorkSummary], bool, int]:
+    """선호도 점수순으로 가벼운 우선순위 페이지를 만든 뒤 해당 행만 요약화한다.
+
+    랭킹(전체 정렬)은 데이터 상태가 같으면 재계산하지 않고 캐시에서 슬라이스해
+    loadMore() 반복 호출이 O(N²)가 되지 않도록 한다.
+
+    반환: (요약 목록, 랭킹에 다음 페이지가 더 있는지, 이번에 소비한 랭킹 슬롯 수)
+    """
+    excl_raw = {
+        str(pc or "").strip().upper()
+        for pc in (exclude_product_codes or [])
+        if str(pc or "").strip()
+    }
+    excl_key = frozenset(excl_raw)
+
+    ranked: list[tuple[float, Any, str]] | None = None
+    try:
+        sig = _priority_ranking_signature(session, excl_key)
+        cached = _PRIORITY_RANKING_CACHE.get("entry")
+        if cached and cached.get("sig") == sig:
+            ranked = cached.get("ranked")
+        else:
+            ranked = _compute_priority_ranking(session, excl_raw)
+            _PRIORITY_RANKING_CACHE["entry"] = {"sig": sig, "ranked": ranked}
+    except Exception:
+        ranked = _compute_priority_ranking(session, excl_raw)
+
     start = int(max(0, offset))
     end = start + int(max(1, limit))
-    page_codes = [pc for _, _, pc in ranked[start:end]]
+    page_codes = [pc for _, _, pc in (ranked or [])[start:end]]
     if not page_codes:
-        return []
+        return [], False, 0
 
-    rows = session.query(JAVMetadata).filter(JAVMetadata.product_code.in_(page_codes)).all()
+    from javstory.harvest.database import JAVMetadata
+    from sqlalchemy.orm import load_only
+
+    # row_to_summary_fast(flags 경로)가 실제 접근하는 컬럼만 적재한다.
+    # 누락 컬럼은 절대 접근하지 않으므로 지연로딩(N+1)이 발생하지 않고,
+    # raw_html 등 대형 미사용 컬럼 하이드레이션을 건너뛴다.
+    rows = (
+        session.query(JAVMetadata)
+        .options(
+            load_only(
+                JAVMetadata.product_code,
+                JAVMetadata.title_ko,
+                JAVMetadata.title,
+                JAVMetadata.title_ja,
+                JAVMetadata.original_title,
+                JAVMetadata.actors_ko,
+                JAVMetadata.actors,
+                JAVMetadata.maker_ko,
+                JAVMetadata.maker,
+                JAVMetadata.release_date,
+                JAVMetadata.synopsis_ko,
+                JAVMetadata.synopsis,
+                JAVMetadata.genres_ko,
+                JAVMetadata.genres,
+                JAVMetadata.cover_image_local_path,
+                JAVMetadata.cover_image_url,
+                JAVMetadata.folder_path,
+                JAVMetadata.is_hardcoded,
+                JAVMetadata.is_mopa,
+                JAVMetadata.favorite_score,
+                JAVMetadata.updated_at,
+            )
+        )
+        .filter(JAVMetadata.product_code.in_(page_codes))
+        .all()
+    )
     by_code = {
         str(getattr(row, "product_code", "") or "").strip().upper(): row
         for row in rows
@@ -605,11 +693,13 @@ def load_library_summaries_fast_priority_paged(
     except Exception:
         pass
 
-    return [
+    summaries = [
         row_to_summary_fast(by_code[pc], flags=flags_by_code.get(pc))
         for pc in page_codes
         if pc in by_code
     ]
+    has_more = end < len(ranked or [])
+    return summaries, has_more, len(page_codes)
 
 
 SortKey = Literal["updated", "product_code", "release_date", "scene_count"]

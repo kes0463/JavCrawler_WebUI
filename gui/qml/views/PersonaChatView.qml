@@ -37,7 +37,7 @@ Item {
                 }
 
                 Text {
-                    text: "취향·품번·추천을 대화형으로 분석합니다."
+                    text: "취향·품번·추천·평점 목록을 대화형으로 분석합니다."
                     font.pixelSize: Theme.fontCaption
                     color: Theme.textMuted
                     Layout.alignment: Qt.AlignVCenter
@@ -52,6 +52,8 @@ Item {
             Layout.fillHeight: true
             Layout.margins: Theme.spacingLg
             messagesJson: InsightModel.personaChatMessages
+            memoryJson: InsightModel.personaChatMemoryJson
+            tonePreset: InsightModel.personaChatTonePreset
             running: InsightModel.isPersonaChatRunning
             streamTarget: InsightModel
             onSendRequested: function(message) {
@@ -59,6 +61,20 @@ Item {
             }
             onClearRequested: InsightModel.clearPersonaChat()
             onCancelRequested: InsightModel.cancelPersonaChat()
+            onTonePresetSelected: function(preset) {
+                InsightModel.setPersonaChatTonePreset(preset)
+            }
+            onProductCodeLinkActivated: function(productCode) {
+                window.navigateToLibraryDetail(productCode)
+            }
+            onMemoryNoteRemoveRequested: function(category, index) {
+                InsightModel.removePersonaMemoryNote(category, index)
+            }
         }
+    }
+
+    Component.onCompleted: {
+        InsightModel.refreshPersonaChatMemory()
+        InsightModel.ensurePersonaChatReady()
     }
 }

@@ -6,8 +6,12 @@ import asyncio
 import math
 import os
 import re
+import threading
 from dataclasses import dataclass
 from typing import Any, Iterable, List, Sequence
+
+_docs_cache: List["_LibraryDoc"] | None = None
+_docs_cache_lock = threading.Lock()
 
 try:
     from rank_bm25 import BM25Okapi
@@ -175,9 +179,13 @@ class HybridLibrarySearch:
         ]
 
     def _load_docs(self) -> List[_LibraryDoc]:
+        global _docs_cache
+        with _docs_cache_lock:
+            if _docs_cache is not None:
+                return _docs_cache
         with get_db_session_ctx() as session:
             rows = session.query(JAVMetadata).all()
-            return [
+            docs = [
                 _LibraryDoc(
                     product_code=str(row.product_code or "").strip().upper(),
                     title=_title(row),
@@ -187,6 +195,9 @@ class HybridLibrarySearch:
                 for row in rows
                 if str(row.product_code or "").strip()
             ]
+        with _docs_cache_lock:
+            _docs_cache = docs
+            return docs
 
     def _search_bm25(self, query: str, docs: Sequence[_LibraryDoc], *, top_k: int) -> List[_SearchResult]:
         tokenized_docs = [_tokenize(doc.text) for doc in docs]
