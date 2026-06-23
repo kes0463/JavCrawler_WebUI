@@ -31,7 +31,7 @@ from javstory.persona.library_search import (
     split_query_terms,
 )
 from javstory.persona.persona_memory import EnhancedPersonaMemory
-from javstory.persona.recommendation_pool import fetch_recommendation_pool
+from javstory.persona.recommendation_pool import build_session_pool_key, fetch_recommendation_pool
 from javstory.persona.user_rating_list import fetch_user_rated_products, is_user_rating_list_request
 
 CONTEXT_SIMILARITY_THRESHOLD = 0.6
@@ -75,7 +75,7 @@ def _actress_name_candidates_from_context(persona_context: dict) -> list[str]:
 
 def _actress_db_chat_context(user_message: str, persona_context: dict) -> dict:
     """배우 프로필 DB 컨텍스트 — 즐겨찾기 + 메시지 내 이름 매칭."""
-    from javstory.utils.actress_profile import get_actress_context_by_name
+    from javstory.persona.actress_query import resolve_actresses_from_message
 
     out: dict = {
         "favorite_profiles": persona_context.get("favorite_actress_profiles") or [],
@@ -85,22 +85,8 @@ def _actress_db_chat_context(user_message: str, persona_context: dict) -> dict:
     if not msg:
         return out
 
-    seen_ids: set[int] = set()
-    mentioned: list[dict] = []
-    for name in _actress_name_candidates_from_context(persona_context):
-        if name not in msg:
-            continue
-        ctx = get_actress_context_by_name(name)
-        if not ctx:
-            continue
-        aid = int(ctx.get("id") or 0)
-        if aid > 0:
-            if aid in seen_ids:
-                continue
-            seen_ids.add(aid)
-        mentioned.append(ctx)
-
-    out["mentioned"] = mentioned
+    known_names = _actress_name_candidates_from_context(persona_context)
+    out["mentioned"] = resolve_actresses_from_message(msg, extra_names=known_names, limit=3)
     return out
 
 
@@ -348,6 +334,23 @@ def _needs_hybrid_library_search(intent: str, user_message: str) -> bool:
         return True
     lowered = str(user_message or "").lower()
     return any(h in lowered for h in ("추천", "비슷", "찾아", "골라", "볼만", "검색"))
+
+
+def _recommendation_search_sizes(
+    intent: str,
+    pipeline_mode: str,
+    *,
+    compact: bool,
+    fast: bool,
+) -> tuple[int, int]:
+    """Return (top_k, pool_k) for multi-channel recommendation retrieval."""
+    if pipeline_mode == "light" or compact or fast:
+        return 8, 32
+    if intent == "recommendation":
+        return 24, 80
+    if intent == "product":
+        return 12, 48
+    return 20, 60
 
 
 def _mix_hidden_gem_candidates(
@@ -728,28 +731,70 @@ class EroticPersonaEngine:
             for code in (recent_recommended_codes or [])
             if normalize_product_code(code)
         ]
-        if exclude_codes and pipeline_mode != "rating_list":
-            hybrid_query = (
-                f"{hybrid_query}\n"
-                f"최근 챗에서 이미 추천한 품번은 후보에서 제외: {', '.join(exclude_codes[:12])}"
-            )
+        # exclude_codes는 fetch_recommendation_pool에만 전달한다.
+        # hybrid_query 본문에 품번·제외 문구를 붙이면 SQL 토큰 검색이 오염된다.
+
+        from javstory.persona.actress_query import (
+            actress_filter_dict,
+            build_actress_work_library_search,
+            filter_results_for_actress,
+            is_actress_work_request,
+        )
+
+        actress_db_context = (
+            _actress_db_chat_context(user_message, context)
+            if pipeline_mode != "rating_list"
+            else {"favorite_profiles": [], "mentioned": []}
+        )
+        mentioned_actresses = [
+            item for item in list(actress_db_context.get("mentioned") or []) if isinstance(item, dict)
+        ]
+        primary_actress = mentioned_actresses[0] if mentioned_actresses else None
+        primary_actress_id = int(primary_actress.get("id") or 0) if primary_actress else 0
 
         if pipeline_mode == "rating_list":
             rated_items = fetch_user_rated_products(limit=40 if not compact else 20)
             library_search = _build_user_rating_library_search(user_message, rated_items)
+        elif primary_actress and (intent == "recommendation" or is_actress_work_request(user_message)):
+            search_top_k, _search_pool_k = (
+                _recommendation_search_sizes(intent, pipeline_mode, compact=compact, fast=fast)
+                if intent == "recommendation"
+                else (12, 24)
+            )
+            library_search = build_actress_work_library_search(
+                user_message,
+                primary_actress,
+                limit=max(12, search_top_k),
+            )
         elif _needs_hybrid_library_search(intent, user_message):
-            search_top_k = 8 if pipeline_mode == "light" or compact or fast else 20
+            search_top_k, search_pool_k = _recommendation_search_sizes(
+                intent,
+                pipeline_mode,
+                compact=compact,
+                fast=fast,
+            )
             search_weights = _persona_chat_search_weights()
+            pool_session_key = build_session_pool_key(
+                hybrid_query,
+                exclude_codes=exclude_codes,
+                seed_codes=combined_seed_codes,
+            )
+            prefer_actor = bool(primary_actress_id) or any(
+                hint in str(user_message or "").lower()
+                for hint in ("배우", "좋아하는 배우", "즐겨찾는 배우", "출연", "작품")
+            )
             hybrid_results = fetch_recommendation_pool(
                 hybrid_query,
                 top_k=search_top_k,
+                pool_k=search_pool_k,
                 weights=search_weights,
                 exclude_codes=exclude_codes,
-                prefer_actor_content=any(
-                    hint in str(user_message or "").lower()
-                    for hint in ("배우", "좋아하는 배우", "즐겨찾는 배우", "출연")
-                ),
+                prefer_actor_content=prefer_actor,
+                seed_codes=combined_seed_codes,
                 fast=fast,
+                include_hidden_gems=pipeline_mode == "full" and intent == "recommendation",
+                session_key=pool_session_key,
+                actress_id=primary_actress_id or None,
             )
             library_search = _adapt_hybrid_search_results(
                 user_message,
@@ -757,11 +802,15 @@ class EroticPersonaEngine:
                 product_codes=mentioned,
                 fallback_seed_codes=combined_seed_codes,
             )
-            if pipeline_mode == "full" and intent == "recommendation" and not fast:
-                library_search["results"] = _mix_hidden_gem_candidates(
+            if primary_actress:
+                actress_filter = actress_filter_dict(primary_actress)
+                library_search["actress_filter"] = actress_filter
+                library_search["results"] = filter_results_for_actress(
                     list(library_search.get("results") or []),
-                    limit=3,
+                    actress_filter,
                 )
+        elif primary_actress:
+            library_search = build_actress_work_library_search(user_message, primary_actress, limit=12)
         else:
             library_search = _adapt_hybrid_search_results(
                 user_message,
@@ -845,7 +894,7 @@ class EroticPersonaEngine:
                 "semantic_profile": context.get("semantic_profile") or {},
                 "sample_groups": context.get("sample_groups") or {},
             },
-            "actress_db_context": _actress_db_chat_context(user_message, context) if pipeline_mode != "rating_list" else {"favorite_profiles": [], "mentioned": []},
+            "actress_db_context": actress_db_context,
             "mentioned_products": products,
             "library_search": library_search,
             "pipeline_mode": pipeline_mode,

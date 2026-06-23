@@ -12,6 +12,7 @@ from pathlib import Path
 from PySide6.QtCore import QObject, Property, Signal, Slot
 
 from gui.utils.watch_history_writer import WatchHistoryWriter, enqueue_watch_job
+from gui.playback_guard import set_playback_active
 from gui.watch_resume import last_position_ms_for_video
 import javstory.harvest.database as _harvest_db
 
@@ -66,6 +67,10 @@ class PlayerModel(QObject):
         return raw
 
     def _start_playback_proxy_job(self, source: Path, proxy: Path) -> None:
+        from gui.playback_guard import is_playback_active
+
+        if is_playback_active():
+            return
         key = str(source.resolve())
         if key in self._proxy_jobs:
             return
@@ -131,6 +136,7 @@ class PlayerModel(QObject):
     def setPlayerOpen(self, is_open: bool):
         """QML playerLoader의 active 상태를 동기화한다."""
         self._player_open = bool(is_open)
+        set_playback_active(self._player_open)
 
     @Slot()
     def closePlayer(self):

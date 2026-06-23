@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import datetime
-import json
 import os
 import re
 import threading
@@ -29,6 +28,7 @@ from gui.models.library import (
     release_month_key,
 )
 from gui.library_data import find_all_video_paths_for_product
+from gui.playback_guard import is_playback_active
 from PySide6.QtCore import QThread
 from dataclasses import asdict
 
@@ -521,11 +521,13 @@ class LibraryReloadWorker(QThread):
         limit: int = 600,
         offset: int = 0,
         exclude_product_codes: list[str] | set[str] | None = None,
+        skip_disk_preview: bool = False,
         parent=None,
     ):
         super().__init__(parent)
         self._limit = int(limit)
         self._offset = int(offset)
+        self._skip_disk_preview = bool(skip_disk_preview)
         self._exclude_product_codes = {
             str(pc or "").strip().upper()
             for pc in (exclude_product_codes or [])
@@ -593,7 +595,7 @@ class LibraryReloadWorker(QThread):
 
         # 2) 캐시 미스(base)만 디스크에서 1회 폴백
         missing = [b for b in base_seen if b not in out]
-        if missing:
+        if missing and not self._skip_disk_preview:
             try:
                 from pathlib import Path as _Path
                 from javstory.config.app_config import DATA_ROOT, E_MEDIA_ROOT
@@ -1071,6 +1073,7 @@ class LibraryModel(QObject):
         # availableGenres() 빈도 집계 캐시 — _all_summaries 길이가 바뀌면 무효화
         self._genres_cache_sig: int = -1
         self._genres_cache: list[dict] = []
+        self._watch_refresh_deferred = False
 
 
         # WatchHistory 캐시 — _rebuild는 이 캐시를 읽기만 하므로 메인 스레드 DB 접근 없음
@@ -1368,7 +1371,10 @@ class LibraryModel(QObject):
         self.toastMessage.emit(f"{len(self._all_summaries)}건 우선 로드 완료", "success")
         self._chain_prefetch_if_needed()
         self._maybe_start_flag_rebuild(summaries)
-        self._refresh_watch_map()
+        if self._should_idle_prefetch():
+            self._watch_refresh_deferred = True
+        else:
+            self._refresh_watch_map()
         self._warmup_preview_cache()
         eff_days = int(self._favorite_delta_days or 0)
         if eff_days > 0 or int(self._sort_mode or 0) in (11, 12):
@@ -1459,6 +1465,9 @@ class LibraryModel(QObject):
         if not self._all_summaries or self._works.rowCount() <= 0:
             self._schedule_rebuild()
             return
+        if not self._is_grid_append_idle():
+            QTimer.singleShot(_PREFETCH_CHAIN_DELAY_MS, self, self._maybe_patch_watch_on_grid)
+            return
         if self._should_lightweight_grid_patch():
             self._works.patchWatchFields(self._watch_map)
             self.workCountChanged.emit()
@@ -1469,13 +1478,33 @@ class LibraryModel(QObject):
         if not self._all_summaries or self._works.rowCount() <= 0:
             self._schedule_rebuild()
             return
+        if not self._is_grid_append_idle():
+            QTimer.singleShot(_PREFETCH_CHAIN_DELAY_MS, self, self._maybe_patch_preview_on_grid)
+            return
         if self._should_lightweight_grid_patch():
             self._works.patchPreviewPaths(self._preview_path_cache)
         else:
             self._schedule_rebuild()
 
+    def _is_grid_append_idle(self) -> bool:
+        """True when pending grid inserts caught up with loaded summaries."""
+        if self._pending_append_batches:
+            return False
+        if self._works.chunkedUpdating:
+            return False
+        try:
+            return int(self._works.rowCount()) >= len(self._all_summaries or [])
+        except Exception:
+            return True
+
     def _chain_prefetch_if_needed(self) -> None:
+        if is_playback_active():
+            QTimer.singleShot(2000, self, self._chain_prefetch_if_needed)
+            return
         if not self._can_load_more or self._is_loading or self._is_loading_more:
+            return
+        if self._should_idle_prefetch() and not self._is_grid_append_idle():
+            QTimer.singleShot(_PREFETCH_CHAIN_DELAY_MS, self, self._chain_prefetch_if_needed)
             return
         if self._should_idle_prefetch():
             QTimer.singleShot(_PREFETCH_CHAIN_DELAY_MS, self, self._idle_load_more)
@@ -1514,6 +1543,8 @@ class LibraryModel(QObject):
 
     @Slot()
     def loadMore(self) -> None:
+        if is_playback_active():
+            return
         if self._is_loading or self._is_loading_more:
             return
         if not self._can_load_more:
@@ -1523,7 +1554,12 @@ class LibraryModel(QObject):
         self.isLoadingMoreChanged.emit()
         self.canLoadMoreChanged.emit()
 
-        w = LibraryReloadWorker(limit=self._page_size, offset=self._page_offset, parent=self)
+        w = LibraryReloadWorker(
+            limit=self._page_size,
+            offset=self._page_offset,
+            skip_disk_preview=True,
+            parent=self,
+        )
         self._load_more_worker = w
 
         def _done(new_items):
@@ -1564,6 +1600,12 @@ class LibraryModel(QObject):
                         self._append_visible_page(items)
                     else:
                         self._rebuild(prefer_append=True)
+                if not self._can_load_more:
+                    if self._watch_refresh_deferred:
+                        self._watch_refresh_deferred = False
+                        self._watch_map_dirty = True
+                        self._refresh_watch_map()
+                    self._notify_bulk_load_complete_if_ready()
                 self._chain_prefetch_if_needed()
                 try:
                     w.deleteLater()
@@ -1622,10 +1664,20 @@ class LibraryModel(QObject):
         if self._can_load_more and not self._is_loading and not self._is_loading_more:
             self._idle_load_timer.start()
 
+    def _notify_bulk_load_complete_if_ready(self) -> None:
+        if self._can_load_more or not self._is_grid_append_idle():
+            return
+        total = len(self._all_summaries or [])
+        rows = int(self._works.rowCount())
+        if total > 0 and rows >= total:
+            self.toastMessage.emit(f"{total}건 로드 완료", "success")
+
     def _on_chunked_grid_update_changed(self) -> None:
         if not self._works.chunkedUpdating:
             self._flush_append_queue()
             self._chain_prefetch_if_needed()
+            if not self._can_load_more:
+                self._notify_bulk_load_complete_if_ready()
 
     def _schedule_rebuild(self, *, prefer_append: bool = False) -> None:
         if prefer_append:
@@ -1638,7 +1690,12 @@ class LibraryModel(QObject):
         self._rebuild(prefer_append=prefer_append)
 
     def _idle_load_more(self) -> None:
+        if is_playback_active():
+            return
         if not self._should_idle_prefetch():
+            return
+        if not self._is_grid_append_idle():
+            QTimer.singleShot(_PREFETCH_CHAIN_DELAY_MS, self, self._chain_prefetch_if_needed)
             return
         if self.canLoadMore:
             self.loadMore()
@@ -3462,13 +3519,15 @@ class LibraryModel(QObject):
             self._watch_map = m
             self._watch_map_dirty = False
             if self._all_summaries:
-                self._maybe_patch_watch_on_grid()
+                QTimer.singleShot(0, self, self._maybe_patch_watch_on_grid)
 
         threading.Thread(target=_job, daemon=True).start()
 
     def _warmup_preview_cache(self) -> None:
         """reload 완료 직후 백그라운드에서 preview 경로를 미리 계산해 캐시 채움.
         _rebuild 시 is_file()+stat() 를 메인 스레드에서 수행하지 않도록 한다."""
+        if is_playback_active():
+            return
         import threading
         from gui.models.library.search import preview_path_for
 
@@ -3517,7 +3576,7 @@ class LibraryModel(QObject):
                 added += 1
             # 새로 채운 preview가 있으면 메인 스레드에서 1회 재빌드(디스크 I/O 없음)
             if added and self._all_summaries:
-                self._maybe_patch_preview_on_grid()
+                QTimer.singleShot(0, self, self._maybe_patch_preview_on_grid)
 
         threading.Thread(target=_job, daemon=True).start()
 

@@ -61,16 +61,19 @@ def test_apply_personalized_ranking_hard_excludes_recent_recommendations():
     assert "BBB-222" in codes
 
 
-def test_diversify_ranked_results_changes_order(monkeypatch):
+def test_diversify_ranked_results_prefers_genre_diversity():
     from javstory.persona import persona_chat as pc
 
     ranked = [
-        {"product_code": f"AAA-{idx}", "persona_match_score": 90 - idx, "score": 1.0}
-        for idx in range(5)
+        {"product_code": "AAA-1", "persona_match_score": 90, "genres": ["드라마"], "actors": ["A"], "score": 1.0},
+        {"product_code": "AAA-2", "persona_match_score": 89, "genres": ["드라마"], "actors": ["A"], "score": 0.9},
+        {"product_code": "BBB-1", "persona_match_score": 70, "genres": ["코미디"], "actors": ["B"], "score": 0.8},
     ]
-    monkeypatch.setattr(pc.random, "uniform", lambda _a, _b: 4.9)
-    diversified = pc._diversify_ranked_results(ranked, pool_size=5)
-    assert diversified[0]["persona_match_score"] >= diversified[1]["persona_match_score"]
+    diversified = pc._diversify_ranked_results(ranked, pool_size=2)
+    top_codes = [item["product_code"] for item in diversified[:2]]
+    assert top_codes[0] == "AAA-1"
+    assert "BBB-1" in top_codes
+    assert "AAA-2" not in top_codes
 
 
 def test_chat_intent_user_rating_list():
@@ -153,6 +156,17 @@ def test_deterministic_recommendation_response_includes_detail_fields():
     assert "ABC-456" not in text
 
 
+def test_is_actor_recommendation_intent_matches_named_work_request(monkeypatch):
+    from javstory.persona.recommendation_pool import _is_actor_recommendation_intent
+
+    monkeypatch.setattr(
+        "javstory.persona.actress_query.resolve_actress_by_name",
+        lambda name: 1 if name == "카토 모에" else None,
+    )
+    assert _is_actor_recommendation_intent("카토 모에 작품 추천해 줘")
+    assert not _is_actor_recommendation_intent("오늘 볼만한 작품 추천해 줘")
+
+
 def test_fetch_recommendation_pool_uses_sql_path_without_embedding_weights(monkeypatch):
     from javstory.persona import recommendation_pool as pool
 
@@ -184,10 +198,218 @@ def test_fetch_recommendation_pool_uses_sql_path_without_embedding_weights(monke
         "search_with_fusion",
         lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("should not use hybrid fusion")),
     )
+    monkeypatch.setattr(pool, "_taste_recommendation_channel", lambda *args, **kwargs: [])
+    monkeypatch.setattr(pool, "_semantic_profile_channel", lambda *args, **kwargs: [])
+    monkeypatch.setattr(pool, "_actor_content_channel", lambda *args, **kwargs: [])
+    pool.clear_session_pool_cache()
 
-    results = pool.fetch_recommendation_pool("비슷한 작품 추천해줘", top_k=5, weights=(0.45, 0.0, 0.55))
+    results = pool.fetch_recommendation_pool(
+        "비슷한 작품 추천해줘",
+        top_k=5,
+        pool_k=5,
+        weights=(0.45, 0.0, 0.55),
+    )
     assert results[0]["id"] == "TST-001"
     assert calls == ["limit=5"]
+
+
+def test_fetch_recommendation_pool_rrf_merges_channels(monkeypatch):
+    from javstory.persona import recommendation_pool as pool
+
+    monkeypatch.setattr(pool, "_persona_chat_embeddings_enabled", lambda: False)
+    monkeypatch.setattr(pool, "_work_embeddings_enabled", lambda: False)
+    monkeypatch.setattr(
+        pool,
+        "_search_persona_library",
+        lambda query, *, top_k, fast=True: [
+            {"id": "SQL-001", "title": "SQL", "score": 0.9, "source": "persona_sql"},
+            {"id": "BOTH-001", "title": "Both", "score": 0.8, "source": "persona_sql"},
+        ],
+    )
+    monkeypatch.setattr(
+        pool,
+        "_taste_recommendation_channel",
+        lambda limit, exclude: [
+            {"id": "TASTE-001", "title": "Taste", "score": 0.95, "source": "taste_embedding"},
+            {"id": "BOTH-001", "title": "Both", "score": 0.85, "source": "taste_embedding"},
+        ],
+    )
+    monkeypatch.setattr(pool, "_semantic_profile_channel", lambda *args, **kwargs: [])
+    monkeypatch.setattr(pool, "_actor_content_channel", lambda *args, **kwargs: [])
+    monkeypatch.setattr(pool, "_hidden_gems_channel", lambda *args, **kwargs: [])
+
+    results = pool.fetch_recommendation_pool("추천해줘", top_k=4, pool_k=4)
+    ids = [item["id"] for item in results]
+    assert "BOTH-001" in ids
+    assert ids[0] == "BOTH-001"
+    assert len(ids) == 3
+
+
+def test_fetch_recommendation_pool_expands_pool_k_by_default(monkeypatch):
+    from javstory.persona import recommendation_pool as pool
+
+    monkeypatch.setattr(pool, "_persona_chat_embeddings_enabled", lambda: False)
+    monkeypatch.setattr(pool, "_work_embeddings_enabled", lambda: False)
+    seen: list[int] = []
+
+    def _capture_sql(query, *, top_k, fast=True):
+        seen.append(top_k)
+        return [{"id": "ONLY-001", "title": "Only", "score": 1.0, "source": "persona_sql"}]
+
+    monkeypatch.setattr(pool, "_search_persona_library", _capture_sql)
+    monkeypatch.setattr(pool, "_taste_recommendation_channel", lambda *args, **kwargs: [])
+    monkeypatch.setattr(pool, "_semantic_profile_channel", lambda *args, **kwargs: [])
+    monkeypatch.setattr(pool, "_actor_content_channel", lambda *args, **kwargs: [])
+    monkeypatch.setattr(pool, "_hidden_gems_channel", lambda *args, **kwargs: [])
+
+    pool.fetch_recommendation_pool("추천해줘", top_k=5)
+    assert seen == [20]
+
+
+def test_recommendation_search_sizes_full_recommendation():
+    from javstory.persona.erotic_persona_engine import _recommendation_search_sizes
+
+    top_k, pool_k = _recommendation_search_sizes("recommendation", "full", compact=False, fast=False)
+    assert top_k == 24
+    assert pool_k == 80
+    light_top, light_pool = _recommendation_search_sizes("recommendation", "light", compact=False, fast=False)
+    assert light_top == 8
+    assert light_pool == 32
+
+
+def test_fetch_recommendation_pool_session_cache(monkeypatch):
+    from javstory.persona import recommendation_pool as pool
+
+    pool.clear_session_pool_cache()
+    monkeypatch.setattr(pool, "_persona_chat_embeddings_enabled", lambda: False)
+    monkeypatch.setattr(pool, "_work_embeddings_enabled", lambda: False)
+    calls = {"n": 0}
+
+    def _sql(query, *, top_k, fast=True):
+        calls["n"] += 1
+        return [{"id": "CACHE-001", "title": "Cached", "score": 1.0, "source": "persona_sql"}]
+
+    monkeypatch.setattr(pool, "_search_persona_library", _sql)
+    monkeypatch.setattr(pool, "_taste_recommendation_channel", lambda *args, **kwargs: [])
+    monkeypatch.setattr(pool, "_semantic_profile_channel", lambda *args, **kwargs: [])
+    monkeypatch.setattr(pool, "_actor_content_channel", lambda *args, **kwargs: [])
+    monkeypatch.setattr(pool, "_hidden_gems_channel", lambda *args, **kwargs: [])
+    monkeypatch.setattr(
+        "javstory.library.embeddings.priority_queue.ensure_priority_embeddings_async",
+        lambda *args, **kwargs: None,
+    )
+
+    key = pool.build_session_pool_key("추천해줘", exclude_codes=["AAA-111"], seed_codes=["BBB-222"])
+    first = pool.fetch_recommendation_pool("추천해줘", top_k=3, pool_k=3, session_key=key)
+    second = pool.fetch_recommendation_pool("추천해줘", top_k=3, pool_k=3, session_key=key)
+    assert first[0]["id"] == "CACHE-001"
+    assert second[0]["id"] == "CACHE-001"
+    assert calls["n"] == 1
+
+
+def test_apply_exploration_mix_injects_hidden_gems():
+    from javstory.persona.persona_chat import _apply_exploration_mix
+
+    ranked = [
+        {"product_code": f"TOP-{idx}", "persona_match_score": 90 - idx, "source": "persona_sql"}
+        for idx in range(6)
+    ] + [
+        {"product_code": "GEM-001", "persona_match_score": 40, "source": "hidden_gem"},
+        {"product_code": "GEM-002", "persona_match_score": 35, "source": "hidden_gem"},
+    ]
+    mixed = _apply_exploration_mix(ranked, epsilon=0.25)
+    top_codes = [item["product_code"] for item in mixed[:8]]
+    assert "GEM-001" in top_codes or "GEM-002" in top_codes
+
+
+def test_empty_recommendation_explanation_mentions_diagnosis():
+    from javstory.persona.persona_chat import _empty_recommendation_explanation
+
+    text = _empty_recommendation_explanation(
+        {
+            "library_search": {
+                "results": [],
+                "source_policy": {"mode": "taste_recommendation"},
+                "diversity_policy": {"recent_recommended_product_codes": ["AAA-111"]},
+            }
+        }
+    )
+    assert "후보" in text
+    assert "최근" in text or "취향" in text
+
+
+def test_sync_recommendation_watch_feedback_records_implicit_positive(monkeypatch):
+    from javstory.persona.persona_memory import EnhancedPersonaMemory
+    from javstory.persona.recommendation_feedback import sync_recommendation_watch_feedback
+
+    memory = EnhancedPersonaMemory()
+    memory.pending_recommendation_outcomes = [
+        {"product_code": "REC-001", "recommended_at": "2020-01-01T00:00:00+00:00"}
+    ]
+
+    class _Row:
+        product_code = "REC-001"
+        rating = 5
+        liked = True
+        disliked = False
+        watch_duration = 1200
+        total_duration = 3600
+        is_completed = True
+        updated_at = __import__("datetime").datetime(2026, 1, 2, tzinfo=__import__("datetime").timezone.utc)
+
+    monkeypatch.setattr(
+        "javstory.persona.recommendation_feedback.get_db_session_ctx",
+        lambda: _FakeSession(_Row()),
+    )
+
+    sync_recommendation_watch_feedback(memory)
+    assert any("REC-001" in str(note.get("text") or "") for note in memory.strong_reaction_notes)
+    assert memory.pending_recommendation_outcomes == []
+
+
+class _FakeSession:
+    def __init__(self, row):
+        self._row = row
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+    def query(self, _model):
+        return self
+
+    def filter(self, *_args, **_kwargs):
+        return self
+
+    def all(self):
+        return [self._row]
+
+
+def test_user_profile_vector_cache_roundtrip(tmp_path, monkeypatch):
+    from javstory.library.embeddings import user_profile_cache as cache
+
+    monkeypatch.setattr(cache, "_CACHE_DIR", tmp_path)
+    monkeypatch.setattr(
+        cache,
+        "embeddings_ollama_model_from_env",
+        lambda: "test-model",
+    )
+    monkeypatch.setattr(
+        cache,
+        "build_weighted_user_profile_vector",
+        lambda **kwargs: [0.1, 0.2, 0.3],
+        raising=False,
+    )
+    import javstory.library.embeddings.similarity as sim
+
+    monkeypatch.setattr(sim, "build_weighted_user_profile_vector", lambda **kwargs: [0.1, 0.2, 0.3])
+
+    first = cache.resolve_weighted_user_profile_vector(["AAA-111", "BBB-222"], [1.0, 2.0], model="test-model")
+    second = cache.resolve_weighted_user_profile_vector(["AAA-111", "BBB-222"], [1.0, 2.0], model="test-model")
+    assert first == [0.1, 0.2, 0.3]
+    assert second == [0.1, 0.2, 0.3]
 
 
 def test_enhanced_memory_tracks_recent_recommended_codes():
@@ -290,6 +512,111 @@ def test_prefer_streamed_over_final_rejects_fake_recommendation_stream():
     good_stream = "1. **START-498** — 테스트 작품\n   배우A / 드라마\n   긴장감이 좋아."
     short_final = "1. **START-498** — 테스트"
     assert _prefer_streamed_over_final(good_stream, short_final, user_message="작품 추천해 줘") == good_stream
+
+
+def test_extract_theme_query_terms_keeps_graduation_theme():
+    from javstory.persona.library_search import extract_theme_query_terms
+
+    assert extract_theme_query_terms("졸업식 작품 추천해 줘") == ["졸업식"]
+
+
+def test_apply_personalized_ranking_hard_filters_theme_miss():
+    from javstory.persona.persona_chat import _apply_personalized_ranking
+
+    ranked = _apply_personalized_ranking(
+        {
+            "library_search": {
+                "query": "졸업식 작품 추천해 줘",
+                "results": [
+                    {
+                        "product_code": "AAA-001",
+                        "title_ko": "무관한 작품",
+                        "genres": ["NTR"],
+                        "score": 0.9,
+                    },
+                    {
+                        "product_code": "BBB-002",
+                        "title_ko": "졸업식 파티",
+                        "synopsis": "졸업식 날 벌어지는 이야기",
+                        "genres": ["학원"],
+                        "score": 0.7,
+                    },
+                ],
+            },
+            "persona": {},
+            "sensual_recommendation_focus": {},
+        },
+        {},
+    )
+    results = ranked["library_search"]["results"]
+    assert len(results) == 1
+    assert results[0]["product_code"] == "BBB-002"
+    assert results[0]["matched_query_terms"] == ["졸업식"]
+
+
+def test_fetch_recommendation_pool_theme_strict_skips_taste(monkeypatch):
+    from javstory.persona import recommendation_pool as pool
+
+    monkeypatch.setattr(pool, "_persona_chat_embeddings_enabled", lambda: False)
+    taste_called = {"value": False}
+
+    def _taste(*args, **kwargs):
+        taste_called["value"] = True
+        return [{"id": "TASTE-001", "title": "taste", "score": 0.9, "source": "taste"}]
+
+    monkeypatch.setattr(pool, "_taste_recommendation_channel", _taste)
+    monkeypatch.setattr(
+        pool,
+        "_search_persona_library",
+        lambda query, *, top_k, fast=True: [
+            {"id": "GRAD-001", "title": "졸업식", "score": 0.8, "source": "persona_sql"},
+        ],
+    )
+    pool.clear_session_pool_cache()
+
+    results = pool.fetch_recommendation_pool("졸업식 작품 추천해 줘", top_k=4, pool_k=4)
+    assert taste_called["value"] is False
+    assert results and results[0]["id"] == "GRAD-001"
+
+
+def test_theme_search_ignores_recent_exclude_pollution(monkeypatch):
+    from javstory.persona import recommendation_pool as pool
+    from javstory.persona.persona_chat import PersonaChatService, _apply_personalized_ranking, _recent_assistant_product_codes
+
+    captured: list[str] = []
+
+    def _search(query, *, top_k, fast=True):
+        captured.append(query)
+        return [{"id": "JUQ-547", "title": "졸업식 이후", "score": 0.9, "source": "persona_sql"}]
+
+    monkeypatch.setattr(pool, "_persona_chat_embeddings_enabled", lambda: False)
+    monkeypatch.setattr(pool, "_search_persona_library", _search)
+    pool.clear_session_pool_cache()
+
+    polluted = (
+        "졸업식 작품 추천해줘\n"
+        "최근 챗에서 이미 추천한 품번은 후보에서 제외: SNR-004, SONE-560"
+    )
+    results = pool.fetch_recommendation_pool(polluted, top_k=4, pool_k=4)
+    assert captured == ["졸업식"]
+    assert results and results[0]["id"] == "JUQ-547"
+
+    svc = PersonaChatService()
+    recent = list(getattr(svc.enhanced_memory_store, "recent_recommended_product_codes", None) or [])[:12]
+    ctx = svc.engine.build_chat_context(
+        "졸업식 작품 추천해줘",
+        recent_recommended_codes=recent,
+        compact=True,
+        memory_store=svc.enhanced_memory_store,
+        fast=True,
+    )
+    ctx = _apply_personalized_ranking(
+        ctx,
+        {"recent_recommended_product_codes": recent},
+    )
+    codes = [item.get("product_code") for item in ctx["library_search"]["results"]]
+    assert codes
+    assert any("JUQ" in str(code or "") or "JUL" in str(code or "") or "IPX" in str(code or "") for code in codes)
 
 
 def test_extract_recommendation_query_terms_keeps_theme_not_boilerplate():

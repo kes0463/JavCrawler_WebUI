@@ -198,7 +198,7 @@ def _page_location_href(page: Any) -> str | None:
     except: pass
     return None
 
-def _page_location_href(page: Any) -> str | None:
+def _raw_has_any_content(raw: dict[str, Any]) -> bool:
     if not raw: return False
     # 단순 요청 정보나 URL 외에 실제 데이터가 있는지 확인
     #

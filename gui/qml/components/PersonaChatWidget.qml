@@ -115,9 +115,6 @@ GlassCard {
         var finalContent = content || "응답이 비어 있어서 표시할 내용이 없었어요. 같은 질문을 한 번만 다시 보내주세요."
         if (next.length > 0 && next[next.length - 1].role === "assistant") {
             var last = Object.assign({}, next[next.length - 1])
-            var streamed = (last.content || "")
-            if (streamed.length > finalContent.length && !isLikelyHallucinatedRecommendation(streamed))
-                finalContent = streamed
             last.content = finalContent
             last.status = "ok"
             next[next.length - 1] = last

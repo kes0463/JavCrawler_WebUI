@@ -319,9 +319,7 @@ Item {
 
         onPositionChanged: {
             var pos = mediaPlayer.position
-            if (playerRoot.activeSubtitleIdx >= 0)
-                playerRoot._updateSubtitle()
-            // 스킵 감지 (5초 이상 앞으로 점프)
+            // 스킵 감지 (5초 이상 앞으로 점프) — 자막은 subtitleTimer(80ms)가 갱신
             if (!playerRoot._isUserSeeking && playerRoot._prevPosition > 0) {
                 var jump = pos - playerRoot._prevPosition
                 if (jump > 5000 && jump < 3600000)

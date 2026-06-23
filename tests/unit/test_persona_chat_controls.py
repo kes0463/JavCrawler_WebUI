@@ -454,6 +454,24 @@ def test_persona_chat_replaces_fabricated_recommendations_with_grounded_candidat
     assert "신규 코드" not in replacement
 
 
+def test_prefer_streamed_over_final_rejects_hallucinated_recommendation_codes():
+    from javstory.persona.persona_chat import _prefer_streamed_over_final
+
+    streamed = (
+        "1. SNR-002 — 스에나가 아이리, 치녀 테크닉\n"
+        "2. SNR-003 — 스에나가 아이리, 치녀 테크닉 vol.2\n"
+        "3. SNR-004 — 스에나가 아이리, 치녀 테크닉 vol.3\n"
+    )
+    final = (
+        "오늘 보기 좋은 작품을 DB 검색 후보에서 골라 자세히 정리해 드릴게요.\n\n"
+        "1. **REAL-001** — 실제 후보 작품\n"
+        "   배우: 스에나가 아이리\n"
+    )
+    chosen = _prefer_streamed_over_final(streamed, final, user_message="스에나가 아이리 작품 추천해줘")
+    assert "REAL-001" in chosen
+    assert "SNR-002" not in chosen
+
+
 def test_persona_chat_replaces_recommendation_when_no_candidates():
     from javstory.persona.persona_chat import _recommendation_response_needs_replacement
 

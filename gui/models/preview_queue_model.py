@@ -276,6 +276,13 @@ class PreviewQueueController(QObject):
     def _upstream_blocks_preview(self) -> bool:
         """번역 또는 하이라이트가 진행/대기 중이면 프리뷰는 대기."""
         try:
+            from gui.playback_guard import is_playback_active
+
+            if is_playback_active():
+                return True
+        except Exception:
+            pass
+        try:
             from gui.models.translation_queue_model import TranslationQueueController
 
             tq = TranslationQueueController.instance()

@@ -714,9 +714,12 @@ class InsightModel(QObject):
                 if row.get("role") == "user":
                     user_message = str(row.get("content") or "")
                     break
-        from javstory.persona.persona_chat import _prefer_streamed_over_final
+        from javstory.persona.persona_chat import _is_recommendation_request, _prefer_streamed_over_final
 
-        text = _prefer_streamed_over_final(current, text, user_message=user_message)
+        if _is_recommendation_request(user_message):
+            text = str(content or "")
+        else:
+            text = _prefer_streamed_over_final(current, text, user_message=user_message)
         if text:
             self._upsert_streaming_assistant_message(text, status="ok")
         elif self._persona_chat_history and self._persona_chat_history[-1].get("role") == "assistant":

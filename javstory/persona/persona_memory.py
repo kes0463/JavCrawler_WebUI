@@ -392,7 +392,7 @@ class PersonaChatMemory:
         self.save(payload)
 
 
-_ENHANCED_SCHEMA_VERSION = 3  # v3: recent_recommended_product_codes 필드 추가
+_ENHANCED_SCHEMA_VERSION = 4  # v4: pending_recommendation_outcomes 필드 추가
 
 
 def _tokenize_memory_text(text: str) -> List[str]:
@@ -466,6 +466,7 @@ class EnhancedPersonaMemory:
     correction_notes: List[Dict[str, Any]] = field(default_factory=list)
     style_notes: List[Dict[str, Any]] = field(default_factory=list)
     recent_recommended_product_codes: List[str] = field(default_factory=list)
+    pending_recommendation_outcomes: List[Dict[str, Any]] = field(default_factory=list)
     max_notes: int = 24
     max_products: int = 80
     max_recent_recommended: int = 24
@@ -581,6 +582,13 @@ class EnhancedPersonaMemory:
             self.recent_recommended_product_codes = self.recent_recommended_product_codes[
                 -self.max_recent_recommended :
             ]
+
+        try:
+            from javstory.persona.recommendation_feedback import register_recommendation_outcomes
+
+            register_recommendation_outcomes(self, assistant_codes)
+        except Exception:
+            pass
 
     def load_recent_messages(self) -> List[Dict[str, str]]:
         """working_memory를 recent_messages 형식으로 반환.
@@ -732,6 +740,7 @@ class EnhancedPersonaMemory:
         self.correction_notes = []
         self.style_notes = []
         self.recent_recommended_product_codes = []
+        self.pending_recommendation_outcomes = []
 
     def save_to_json(self, path: str) -> None:
         """통합 메모리를 단일 파일로 저장한다."""
@@ -753,6 +762,7 @@ class EnhancedPersonaMemory:
             "correction_notes": self.correction_notes,
             "style_notes": self.style_notes,
             "recent_recommended_product_codes": self.recent_recommended_product_codes,
+            "pending_recommendation_outcomes": self.pending_recommendation_outcomes,
             # ── 레거시 호환 ──
             "recent_messages": self._working_memory_as_recent_messages(),
         }
@@ -825,6 +835,11 @@ class EnhancedPersonaMemory:
             for code in payload.get("recent_recommended_product_codes") or []
             if str(code or "").strip()
         ][-self.max_recent_recommended :]
+        self.pending_recommendation_outcomes = [
+            dict(item)
+            for item in payload.get("pending_recommendation_outcomes") or []
+            if isinstance(item, Mapping)
+        ][-48:]
         if not self.recent_recommended_product_codes:
             for msg in reversed(self._working_memory_as_recent_messages()):
                 if str(msg.get("role") or "") != "assistant":

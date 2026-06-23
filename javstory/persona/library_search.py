@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import Any, Dict, Iterable, List
+from typing import Any, Dict, Iterable, List, Mapping, Sequence
 
 from sqlalchemy import or_
 
@@ -32,6 +32,59 @@ _QUERY_STOPWORDS = {
     "비슷한",
 }
 _QUERY_STOPWORD_PREFIXES = ("검색", "알려", "찾아", "추천")
+_THEME_QUERY_STOPWORDS = {
+    *_QUERY_STOPWORDS,
+    "추천해",
+    "추천해줘",
+    "추천해주세요",
+    "작품",
+    "영상",
+    "오늘",
+    "오늘의",
+    "볼만",
+    "볼만한",
+    "골라",
+    "골라줘",
+    "찾아",
+    "찾아줘",
+    "비슷",
+    "비슷한",
+    "유사",
+    "같은",
+    "느낌",
+    "분위기",
+    "해줘",
+    "해주세요",
+    "주세요",
+    "줘",
+    "좀",
+    "관련",
+    "장면",
+    "다른",
+    "새",
+    "신규",
+    "또",
+    "안",
+    "본",
+    "봤",
+    "봤던",
+    "했던",
+    "내가",
+    "나는",
+    "저는",
+    "그",
+    "이",
+    "저",
+    "요즘",
+    "평소",
+    "이번",
+    "저번",
+    "방금",
+    "좋은",
+    "최고",
+    "인기",
+    "유명",
+}
 _STRICT_TITLE_PATTERNS = (
     re.compile(r"(?:제목|타이틀|작품명)\s*에\s*[\"'“”‘’]?(.+?)[\"'“”‘’]?\s*(?:이|가)?\s*(?:들어|포함)", re.IGNORECASE),
     re.compile(r"(?:제목|타이틀|작품명)\s*(?:포함|검색)\s*[\"'“”‘’]?(.+?)[\"'“”‘’]?\s*(?:작품|추천|찾)", re.IGNORECASE),
@@ -114,6 +167,57 @@ def split_query_terms(text: str, *, limit: int = 8) -> List[str]:
         if len(out) >= limit:
             break
     return out
+
+
+def extract_theme_query_terms(text: str, *, limit: int = 6) -> List[str]:
+    """Explicit theme/genre tokens from a recommendation query (e.g. 졸업식, 근친상간)."""
+    head = str(text or "").splitlines()[0].strip()
+    terms: List[str] = []
+    seen: set[str] = set()
+    for token in split_query_terms(head, limit=10):
+        lowered = str(token or "").strip().lower()
+        if len(lowered) < 2:
+            continue
+        if lowered in _THEME_QUERY_STOPWORDS:
+            continue
+        if lowered.startswith(("추천", "찾아", "골라", "알려")):
+            continue
+        if lowered in seen:
+            continue
+        seen.add(lowered)
+        terms.append(str(token).strip())
+        if len(terms) >= limit:
+            break
+    return terms
+
+
+def item_matches_theme_terms(item: Mapping[str, Any], terms: Sequence[str]) -> bool:
+    """True when any theme term appears in genres/title/synopsis/grok metadata."""
+    if not terms:
+        return True
+    genre_blob = " ".join(str(v) for v in (item.get("genres") or [])).lower()
+    grok = item.get("grok") if isinstance(item.get("grok"), Mapping) else {}
+    haystack = " ".join(
+        [
+            str(item.get("title_ko") or ""),
+            str(item.get("title_ja") or ""),
+            str(item.get("original_title") or ""),
+            " ".join(str(v) for v in (item.get("actors") or [])),
+            str(item.get("maker") or ""),
+            str(item.get("synopsis") or ""),
+            str(grok.get("summary") or ""),
+            " ".join(str(v) for v in (grok.get("tags") or [])),
+            " ".join(str(v) for v in (grok.get("tones") or [])),
+            " ".join(str(v) for v in (grok.get("labels") or [])),
+        ]
+    ).lower()
+    for term in terms:
+        lowered = str(term or "").strip().lower()
+        if not lowered:
+            continue
+        if lowered in genre_blob or lowered in haystack:
+            return True
+    return False
 
 
 def extract_strict_title_terms(text: str, *, limit: int = 3) -> List[str]:

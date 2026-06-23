@@ -169,7 +169,9 @@ def test_recommend_favorite_actor_content_empty_without_favorite_actors(monkeypa
 def test_fetch_recommendation_pool_prioritizes_actor_content(monkeypatch):
     from javstory.persona import recommendation_pool as pool
 
-    monkeypatch.setattr(pool, "_embeddings_enabled", lambda: True)
+    monkeypatch.setattr(pool, "_work_embeddings_enabled", lambda: True)
+    monkeypatch.setattr(pool, "_persona_chat_embeddings_enabled", lambda: False)
+    monkeypatch.setattr(pool, "_search_persona_library", lambda *args, **kwargs: [])
     monkeypatch.setattr(
         pool.HybridLibrarySearch,
         "search_with_fusion",

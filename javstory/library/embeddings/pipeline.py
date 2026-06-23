@@ -15,7 +15,7 @@ from typing import Any, Dict, List, Optional
 from javstory.llm.engine import ollama_ensure_model
 from javstory.llm.ollama_embeddings import ollama_embed_texts
 from javstory.library.canonical.schema import LibraryCanonical
-from javstory.library.detail_persist import load_canonical_for_product
+from javstory.library.detail_persist import apply_jav_metadata_row_to_canonical_meta, load_canonical_for_product
 from javstory.library.embeddings.document_builder import build_embedding_documents
 from javstory.library.embeddings.store import embeddings_cache_path, write_embeddings_json
 from javstory.translation.story_grok_module import story_context_cache_path_grok
@@ -49,6 +49,28 @@ def _story_context_newer_than_embedding(product_code: str, embedding_path: Path)
         return False
 
 
+def _canonical_needs_db_enrich(state: LibraryCanonical) -> bool:
+    return not any(
+        str(getattr(state, field, "") or "").strip()
+        for field in ("title_ko", "title_ja", "actress", "synopsis_short", "overall_summary")
+    )
+
+
+def _enrich_canonical_from_db(state: LibraryCanonical, product_code: str) -> LibraryCanonical:
+    if not _canonical_needs_db_enrich(state):
+        return state
+    try:
+        from javstory.harvest.database import JAVMetadata, get_db_session_ctx
+
+        with get_db_session_ctx() as session:
+            row = session.query(JAVMetadata).filter_by(product_code=product_code).first()
+            if row:
+                return apply_jav_metadata_row_to_canonical_meta(state, row)
+    except Exception:
+        pass
+    return state
+
+
 async def build_and_store_embeddings_for_product(
     product_code: str,
     *,
@@ -76,6 +98,7 @@ async def build_and_store_embeddings_for_product(
         log("♻️ 스토리 컨텍스트가 임베딩보다 최신입니다. 임베딩을 재생성합니다.")
 
     st = state if state is not None else load_canonical_for_product(pc)
+    st = _enrich_canonical_from_db(st, pc)
 
     docs = build_embedding_documents(st, include_subtitles=include_subtitles)
     if not docs:

@@ -398,7 +398,19 @@ def _build_semantic_profile(seed_codes: List[str], exclude_codes: set[str]) -> D
     if cached is not None:
         return cached
 
-    profile = build_user_profile_vector(model=model, seed_codes=seed_codes[:seed_limit])
+    profile = None
+    try:
+        from javstory.library.embeddings.user_profile_cache import resolve_weighted_user_profile_vector
+
+        profile = resolve_weighted_user_profile_vector(
+            seed_codes[:seed_limit],
+            [1.0] * min(len(seed_codes), seed_limit),
+            model=model,
+        )
+    except Exception:
+        profile = None
+    if profile is None:
+        profile = build_user_profile_vector(model=model, seed_codes=seed_codes[:seed_limit])
     if not profile:
         result: Dict[str, Any] = {"enabled": True, "model": model, "seed_count": len(seed_codes), "nearest_unwatched": []}
         _save_semantic_cache(cache_key, result)
@@ -419,6 +431,38 @@ def _build_semantic_profile(seed_codes: List[str], exclude_codes: set[str]) -> D
     }
     _save_semantic_cache(cache_key, result)
     return result
+
+
+def semantic_unwatched_candidates(
+    seed_codes: List[str],
+    *,
+    exclude_codes: set[str] | None = None,
+    top_k: int | None = None,
+) -> List[Dict[str, Any]]:
+    """Public API: nearest unwatched works from a semantic profile (disk-cached)."""
+    if not seed_codes:
+        return []
+    budget = persona_context_budget()
+    limit = int(top_k) if top_k is not None else int(budget.get("semantic_top_k") or 0)
+    if limit <= 0:
+        return []
+    profile = _build_semantic_profile(list(seed_codes), set(exclude_codes or set()))
+    out: List[Dict[str, Any]] = []
+    for item in list(profile.get("nearest_unwatched") or [])[:limit]:
+        if not isinstance(item, dict):
+            continue
+        pc = str(item.get("product_code") or "").strip().upper()
+        if not pc:
+            continue
+        out.append(
+            {
+                "id": pc,
+                "title": "",
+                "score": float(item.get("score") or 0.5),
+                "source": "semantic_profile",
+            }
+        )
+    return out
 
 
 def _build_drift_hint(

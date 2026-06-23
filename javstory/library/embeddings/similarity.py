@@ -9,11 +9,15 @@ Purpose:
 from __future__ import annotations
 
 import math
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from javstory.library.embeddings.store import embeddings_cache_dir, read_embeddings_json
+
+_vectors_by_code_cache: Dict[str, Dict[str, List[float]]] = {}
+_vectors_by_code_lock = threading.Lock()
 
 
 @dataclass(frozen=True)
@@ -168,14 +172,32 @@ def find_similar_products(
     return out[:top_k]
 
 
+def _vectors_by_product_code(*, model: str) -> Dict[str, List[float]]:
+    """Build once per model: product_code -> representative embedding vector."""
+    with _vectors_by_code_lock:
+        cached = _vectors_by_code_cache.get(model)
+        if cached is not None:
+            return cached
+
+    index: Dict[str, List[float]] = {}
+    for _p, payload in _iter_embedding_payloads(model=model):
+        pc = str(payload.get("product_code") or "").strip().upper()
+        if not pc:
+            continue
+        vec = _pick_representative_vector(payload)
+        if vec:
+            index[pc] = vec
+
+    with _vectors_by_code_lock:
+        _vectors_by_code_cache[model] = index
+    return index
+
+
 def _vector_for_product_code(product_code: str, *, model: str) -> Optional[List[float]]:
     pc = (product_code or "").strip().upper()
     if not pc:
         return None
-    for _p, payload in _iter_embedding_payloads(model=model):
-        if str(payload.get("product_code") or "").strip().upper() == pc:
-            return _pick_representative_vector(payload)
-    return None
+    return _vectors_by_product_code(model=model).get(pc)
 
 
 def average_vectors(vectors: List[List[float]]) -> Optional[List[float]]:

@@ -16,6 +16,8 @@ from javstory.harvest.database import (
     get_db_session_ctx,
 )
 
+_MAX_SCORED_ACTOR_CANDIDATES = 200
+
 
 def _actor_display_name(actress: Actress) -> str:
     return (
@@ -152,6 +154,32 @@ def _collect_unwatched_actor_works(
     return candidates
 
 
+def _trim_actor_candidates(
+    candidate_map: Dict[str, List[Dict[str, Any]]],
+    actor_by_id: Dict[int, Dict[str, Any]],
+    *,
+    max_candidates: int = _MAX_SCORED_ACTOR_CANDIDATES,
+) -> Dict[str, List[Dict[str, Any]]]:
+    """Cap unwatched actor works before embedding scoring."""
+    if len(candidate_map) <= max_candidates:
+        return candidate_map
+
+    ranked: List[tuple[str, float, List[Dict[str, Any]]]] = []
+    for pc, actor_refs in candidate_map.items():
+        actor_ids = {int(ref["actress_id"]) for ref in actor_refs}
+        best_actor = max(
+            (actor_by_id[aid] for aid in actor_ids if aid in actor_by_id),
+            key=lambda a: float(a.get("actor_pref") or 0),
+            default=None,
+        )
+        if not best_actor:
+            continue
+        ranked.append((pc, float(best_actor.get("actor_pref") or 0), actor_refs))
+
+    ranked.sort(key=lambda item: item[1], reverse=True)
+    return {pc: refs for pc, _, refs in ranked[:max_candidates]}
+
+
 def _build_content_profile_vector(model: str):
     from javstory.library.embeddings.similarity import build_weighted_user_profile_vector
 
@@ -202,6 +230,7 @@ def recommend_favorite_actor_content(
     if not candidate_map:
         return []
 
+    candidate_map = _trim_actor_candidates(candidate_map, actor_by_id)
     profile_vec = _build_content_profile_vector(model)
     scored: List[Tuple[str, float, List[str], int]] = []
 

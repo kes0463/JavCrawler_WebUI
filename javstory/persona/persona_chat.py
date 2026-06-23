@@ -21,7 +21,6 @@ from __future__ import annotations
 import json
 import logging
 import os
-import random
 import re
 import threading
 from collections import Counter
@@ -607,23 +606,137 @@ def _is_unwatched_recommendation_request(text: str) -> bool:
     return _is_recommendation_request(lowered) and any(hint in lowered for hint in _UNWATCHED_RECOMMENDATION_HINTS)
 
 
+def _item_diversity_features(item: Mapping[str, Any]) -> set[str]:
+    genres = {str(g).strip().lower() for g in (item.get("genres") or []) if str(g).strip()}
+    actors = {str(a).strip().lower() for a in (item.get("actors") or [])[:4] if str(a).strip()}
+    maker = str(item.get("maker") or "").strip().lower()
+    features = genres | actors
+    if maker:
+        features.add(f"maker:{maker}")
+    return features
+
+
+def _diversity_jaccard(left: set[str], right: set[str]) -> float:
+    if not left and not right:
+        return 0.0
+    union = left | right
+    if not union:
+        return 0.0
+    return len(left & right) / len(union)
+
+
 def _diversify_ranked_results(ranked: List[Dict[str, Any]], *, pool_size: int = 8) -> List[Dict[str, Any]]:
-    """Add light score jitter to the top pool to reduce repeated #1 picks."""
+    """MMR re-ranking on genre/actor/maker overlap for recommendation diversity."""
     if len(ranked) <= 1:
         return ranked
-    pool = [dict(item) for item in ranked[:pool_size]]
-    rest = list(ranked[pool_size:])
-    for item in pool:
-        base = float(item.get("persona_match_score") or 0)
-        item["persona_match_score"] = round(base + random.uniform(0.0, 5.0), 1)
-    pool.sort(
-        key=lambda item: (
-            float(item.get("persona_match_score") or 0),
-            float(item.get("score") or 0),
+    pool_limit = max(1, min(int(pool_size), len(ranked)))
+    features = [_item_diversity_features(item) for item in ranked]
+    candidate_indices = list(range(len(ranked)))
+    selected: List[int] = []
+
+    first_idx = max(
+        candidate_indices,
+        key=lambda idx: (
+            float(ranked[idx].get("persona_match_score") or 0),
+            float(ranked[idx].get("score") or 0),
         ),
-        reverse=True,
     )
-    return pool + rest
+    selected.append(first_idx)
+    candidate_indices.remove(first_idx)
+
+    lambda_mult = 0.72
+    while len(selected) < pool_limit and candidate_indices:
+        best_idx = candidate_indices[0]
+        best_mmr = -1.0
+        for idx in candidate_indices:
+            relevance = float(ranked[idx].get("persona_match_score") or 0) / 100.0
+            max_sim = max((_diversity_jaccard(features[idx], features[s]) for s in selected), default=0.0)
+            mmr = lambda_mult * relevance - (1.0 - lambda_mult) * max_sim
+            if mmr > best_mmr:
+                best_mmr = mmr
+                best_idx = idx
+        selected.append(best_idx)
+        candidate_indices.remove(best_idx)
+
+    diversified = [dict(ranked[idx]) for idx in selected]
+    selected_set = set(selected)
+    diversified.extend(dict(item) for idx, item in enumerate(ranked) if idx not in selected_set)
+    return diversified
+
+
+def _exploration_epsilon() -> float:
+    raw = (os.environ.get("JAVSTORY_PERSONA_REC_EXPLORATION_EPSILON", "") or "").strip()
+    if not raw:
+        return 0.2
+    try:
+        return max(0.0, min(0.5, float(raw)))
+    except ValueError:
+        return 0.2
+
+
+def _apply_exploration_mix(ranked: List[Dict[str, Any]], *, epsilon: float | None = None) -> List[Dict[str, Any]]:
+    """ε-greedy: keep top exploitation slots, inject hidden-gem / long-tail explorers."""
+    if len(ranked) < 5:
+        return ranked
+    eps = _exploration_epsilon() if epsilon is None else max(0.0, min(0.5, float(epsilon)))
+    if eps <= 0:
+        return ranked
+    window = min(8, len(ranked))
+    explore_slots = max(1, round(window * eps))
+    keep = max(2, window - explore_slots)
+    head = list(ranked[:keep])
+    pool = ranked[keep : min(len(ranked), keep + 24)]
+    gems = [item for item in pool if "hidden_gem" in str(item.get("source") or "")]
+    explorers = gems or pool
+    picks: List[Dict[str, Any]] = []
+    seen_ids = {id(item) for item in head}
+    for item in explorers:
+        if id(item) in seen_ids:
+            continue
+        picks.append(item)
+        seen_ids.add(id(item))
+        if len(picks) >= explore_slots:
+            break
+    tail = [item for item in ranked if id(item) not in seen_ids]
+    return head + picks + tail
+
+
+def _diagnose_empty_recommendation_pool(ctx: Mapping[str, Any]) -> List[str]:
+    search = ctx.get("library_search") if isinstance(ctx.get("library_search"), Mapping) else {}
+    policy = search.get("source_policy") if isinstance(search.get("source_policy"), Mapping) else {}
+    reasons: List[str] = []
+    if str(policy.get("mode") or "") == "taste_recommendation":
+        reasons.append("취향 기반 추천 모드라 미시청·고평점 시드가 부족할 수 있음")
+    try:
+        from javstory.library.embeddings.pipeline import embeddings_enabled_from_env
+
+        if not embeddings_enabled_from_env():
+            reasons.append("작품 임베딩 파이프라인이 꺼져 있음(JAVSTORY_EMBEDDINGS_ENABLED)")
+    except Exception:
+        reasons.append("작품 임베딩 상태를 확인하지 못함")
+    diversity = search.get("diversity_policy") if isinstance(search.get("diversity_policy"), Mapping) else {}
+    recent = list(diversity.get("recent_recommended_product_codes") or [])
+    if recent:
+        reasons.append("최근 챗 추천 품번 제외로 후보가 줄었을 수 있음")
+    query_terms = list(search.get("query_focus_terms") or [])
+    if query_terms:
+        reasons.append(f"요청 테마 '{', '.join(str(t) for t in query_terms[:3])}'에 맞는 미시청 후보가 부족할 수 있음")
+    theme_miss = search.get("theme_filter_miss") if isinstance(search.get("theme_filter_miss"), Mapping) else {}
+    if theme_miss.get("query_focus_terms"):
+        reasons.append("요청 테마(장르/키워드)와 메타데이터가 맞는 후보가 없음")
+    if not reasons:
+        reasons.append("현재 DB 검색·필터 조건에 맞는 후보가 없음")
+    return reasons
+
+
+def _empty_recommendation_explanation(ctx: Mapping[str, Any]) -> str:
+    reasons = _diagnose_empty_recommendation_pool(ctx)
+    joined = " / ".join(reasons[:3])
+    return (
+        "지금 조건으로는 라이브러리에서 바로 추천할 후보를 찾지 못했어요. "
+        f"가능한 이유: {joined}. "
+        "배우·장르·분위기 중 하나만 더 구체적으로 알려주시면 다시 좁혀 볼게요."
+    )
 
 
 def _normalize_tone_preset(value: str | None) -> str:
@@ -689,21 +802,9 @@ def _item_rank_text(item: Mapping[str, Any]) -> str:
 
 def _extract_recommendation_query_terms(query: str) -> List[str]:
     """Theme/genre terms explicitly requested by the user (e.g. 근친상간)."""
-    terms: List[str] = []
-    seen: set[str] = set()
-    for token in split_query_terms(query, limit=10):
-        lowered = str(token or "").strip().lower()
-        if len(lowered) < 2:
-            continue
-        if lowered in _RECOMMENDATION_QUERY_STOPWORDS or lowered in _RANKING_STOPWORDS:
-            continue
-        if lowered in seen:
-            continue
-        seen.add(lowered)
-        terms.append(str(token).strip())
-        if len(terms) >= 6:
-            break
-    return terms
+    from javstory.persona.library_search import extract_theme_query_terms
+
+    return extract_theme_query_terms(query, limit=6)
 
 
 def _query_term_hits(item: Mapping[str, Any], query_terms: Sequence[str]) -> tuple[List[str], List[str]]:
@@ -940,6 +1041,19 @@ def _apply_personalized_ranking(ctx: Mapping[str, Any], memory_context: Mapping[
         ),
         reverse=True,
     )
+    if unwatched_recommendation:
+        unwatched_ranked = [item for item in ranked if not _item_has_user_watch_signal(item)]
+        ranked = unwatched_ranked
+    if query_terms:
+        matched = [item for item in ranked if item.get("matched_query_terms")]
+        if matched:
+            ranked = matched
+        else:
+            ranked = []
+            search["theme_filter_miss"] = {
+                "query_focus_terms": query_terms,
+                "instruction": "요청 테마에 맞는 후보가 없으므로 품번을 만들거나 테마를 근거 없이 언급하지 않는다.",
+            }
     if is_recommendation and recent_recommended_codes:
         filtered = [
             item
@@ -956,21 +1070,10 @@ def _apply_personalized_ranking(ctx: Mapping[str, Any], memory_context: Mapping[
         ]
         if fresh_ranked:
             ranked = fresh_ranked
-    if unwatched_recommendation:
-        unwatched_ranked = [item for item in ranked if not _item_has_user_watch_signal(item)]
-        ranked = unwatched_ranked
-    if query_terms:
-        genre_matched = [item for item in ranked if item.get("matched_genre_terms")]
-        if genre_matched:
-            genre_ids = {id(item) for item in genre_matched}
-            ranked = genre_matched + [item for item in ranked if id(item) not in genre_ids]
-        else:
-            query_matched = [item for item in ranked if item.get("matched_query_terms")]
-            if query_matched:
-                matched_ids = {id(item) for item in query_matched}
-                ranked = query_matched + [item for item in ranked if id(item) not in matched_ids]
     if is_recommendation and len(ranked) > 1 and not query_terms:
         ranked = _diversify_ranked_results(ranked, pool_size=8)
+    if is_recommendation and len(ranked) > 4:
+        ranked = _apply_exploration_mix(ranked)
     search["ranking_policy"] = {
         "mode": "personalized_hybrid",
         "weights": [
@@ -982,6 +1085,7 @@ def _apply_personalized_ranking(ctx: Mapping[str, Any], memory_context: Mapping[
             "recent_recommendation_diversity_penalty",
             "unwatched_request_filter",
             "explicit_query_term_boost",
+            "epsilon_greedy_exploration",
         ],
     }
     if query_terms:
@@ -1472,12 +1576,26 @@ def _prefer_streamed_over_final(streamed: str, final: str, *, user_message: str 
         return final_text
     if _looks_like_fake_numeric_recommendation(streamed_text):
         return final_text
-    if _is_recommendation_request(user_message) and re.search(r"(?m)^\s*\d+\.\s", streamed_text):
-        streamed_codes = extract_product_codes(streamed_text)
-        if not streamed_codes:
+    if _is_recommendation_request(user_message):
+        streamed_codes = [
+            code.strip().upper()
+            for code in extract_product_codes(streamed_text)
+            if str(code or "").strip()
+        ]
+        final_codes = [
+            code.strip().upper()
+            for code in extract_product_codes(final_text)
+            if str(code or "").strip()
+        ]
+        if streamed_codes and final_codes and set(streamed_codes) != set(final_codes):
             return final_text
-        if _looks_like_placeholder_product_codes(streamed_codes):
+        if streamed_codes and not final_codes:
             return final_text
+        if re.search(r"(?m)^\s*\d+\.\s", streamed_text):
+            if not streamed_codes:
+                return final_text
+            if _looks_like_placeholder_product_codes(streamed_codes):
+                return final_text
     if _rated_works_analysis_response_needs_replacement(user_message, streamed_text):
         return final_text
     return streamed_text
@@ -1502,6 +1620,75 @@ def _deterministic_rating_list_response(rated_items: Sequence[Mapping[str, str]]
             meta_parts.append("완주")
         meta = " / ".join(meta_parts) if meta_parts else "기록 있음"
         lines.append(f"{idx}. **{code}** — {title} ({meta})")
+    return "\n".join(lines)
+
+
+def _is_actress_factual_request(user_message: str, ctx: Mapping[str, Any]) -> bool:
+    if extract_product_codes(user_message):
+        return False
+    if _is_recommendation_request(user_message):
+        return False
+    actress_db = ctx.get("actress_db_context") if isinstance(ctx.get("actress_db_context"), Mapping) else {}
+    mentioned = [item for item in list(actress_db.get("mentioned") or []) if isinstance(item, Mapping)]
+    return bool(mentioned)
+
+
+def _actress_factual_grounding_block(user_message: str, ctx: Mapping[str, Any]) -> str:
+    """Pin actress-only answers to DB profile + indexed filmography."""
+    if not _is_actress_factual_request(user_message, ctx):
+        return ""
+
+    actress_db = ctx.get("actress_db_context") if isinstance(ctx.get("actress_db_context"), Mapping) else {}
+    actress_items = [item for item in list(actress_db.get("mentioned") or []) if isinstance(item, Mapping)]
+    if not actress_items:
+        return ""
+
+    actress = actress_items[0]
+    name = str(actress.get("name") or actress.get("name_ja") or "").strip()
+    if not name:
+        return ""
+
+    search = ctx.get("library_search") if isinstance(ctx.get("library_search"), Mapping) else {}
+    works = [item for item in list(search.get("results") or []) if isinstance(item, Mapping)]
+
+    lines = [
+        "[배우 사실 고정 근거]",
+        "아래 DB 배우 프로필과 출연작 목록만 근거로 답한다.",
+        "목록·프로필에 없는 품번, 작품 줄거리, 신체·성향 묘사는 만들지 않는다.",
+        f"- name: {name}",
+    ]
+    if actress.get("name_ja"):
+        lines.append(f"- name_ja: {actress.get('name_ja')}")
+    if actress.get("genres"):
+        lines.append(f"- genres: {_clip_text(str(actress.get('genres')), 120)}")
+    if actress.get("memo"):
+        lines.append(f"- memo: {_clip_text(str(actress.get('memo')), 180)}")
+    if actress.get("profile_text"):
+        lines.append(f"- profile_text: {_clip_text(str(actress.get('profile_text')), 260)}")
+    wc = int(actress.get("work_count") or 0)
+    if wc > 0:
+        lines.append(f"- work_count: {wc}")
+
+    if works:
+        lines.append("library_filmography:")
+        for idx, item in enumerate(works[:10], start=1):
+            actors = ", ".join(str(v) for v in (item.get("actors") or [])[:3])
+            lines.append(
+                f"- work {idx} product_code: {item.get('product_code') or ''} | "
+                f"title_ko: {_clip_text(str(item.get('title_ko') or ''), 100)} | actors: {actors}"
+            )
+    else:
+        lines.append("library_filmography: []")
+        lines.append("응답 규칙: 출연작 목록이 비어 있으면 작품·품번을 지어내지 말고 DB에 작품이 없다고 말한다.")
+
+    lines.extend(
+        [
+            "[배우 설명 응답 규칙]",
+            "- 배우 소개는 memo/profile_text/genres만 사용한다.",
+            "- 특정 작품 설명은 library_filmography에 있는 품번만 언급한다.",
+            "- 배우 이름에 조사(가/는/을)를 붙여 다른 이름으로 부르지 않는다.",
+        ]
+    )
     return "\n".join(lines)
 
 
@@ -1553,11 +1740,32 @@ def _recommendation_grounding_block(
     if avoidances:
         lines.append(f"avoidances: {', '.join(avoidances)}")
 
+    actress_filter = search.get("actress_filter") if isinstance(search.get("actress_filter"), Mapping) else {}
+    actress_name = str(actress_filter.get("name") or "").strip()
+    if actress_name:
+        match_names = [str(n).strip() for n in (actress_filter.get("match_names") or []) if str(n).strip()]
+        lines.append(f"actress_filter_name: {actress_name}")
+        if match_names:
+            lines.append(f"actress_filter_match_names: {', '.join(match_names[:6])}")
+        lines.append(
+            "응답 규칙: 추천 품번은 반드시 위 배우의 라이브러리 출연작이어야 한다. 다른 배우 작품은 추천하지 않는다."
+        )
+
+    query_focus = [str(t).strip() for t in list(search.get("query_focus_terms") or []) if str(t).strip()]
+    if query_focus:
+        lines.append(f"query_focus_terms: {', '.join(query_focus[:6])}")
+        lines.append(
+            "응답 규칙: query_focus_terms가 있으면 matched_query_terms가 있는 후보만 추천한다. "
+            "메타데이터에 없는 테마·장면을 추천 이유에 만들지 않는다."
+        )
+
     if not results:
+        reasons = _diagnose_empty_recommendation_pool(ctx)
         lines.extend(
             [
                 "library_search.results: []",
-                "응답 규칙: 후보가 없으므로 품번을 만들지 말고 조건 보강을 요청한다.",
+                f"empty_pool_diagnosis: {' / '.join(reasons[:4])}",
+                "응답 규칙: 후보가 없으므로 품번을 만들지 말고 위 진단을 바탕으로 이유를 설명한 뒤 조건 보강을 요청한다.",
             ]
         )
         return "\n".join(lines)
@@ -1579,6 +1787,8 @@ def _recommendation_grounding_block(
                 f"  persona_match_score: {item.get('persona_match_score') or 0}",
                 f"  ranking_reasons: {', '.join(str(v) for v in (item.get('ranking_reasons') or [])[:2])}",
                 f"  matched_persona_terms: {', '.join(str(v) for v in (item.get('matched_persona_terms') or [])[:3])}",
+                f"  matched_genre_terms: {', '.join(str(v) for v in (item.get('matched_genre_terms') or [])[:3])}",
+                f"  matched_query_terms: {', '.join(str(v) for v in (item.get('matched_query_terms') or [])[:4])}",
             ]
         )
         if synopsis_summary:
@@ -1588,7 +1798,10 @@ def _recommendation_grounding_block(
     lines.extend(
         [
             "[추천 응답 규칙]",
+            "- 후보 순서(persona_match_score)는 랭커가 확정했으므로 바꾸지 말고 그 순서대로 설명만 한다.",
             "- 각 후보마다 배우 / 장르 / 한줄 요약(2문장 이내) / 추천 이유 순으로 4~5줄로 설명한다.",
+            "- 추천 이유 1문장은 matched_persona_terms·matched_genre_terms·matched_query_terms·ranking_reasons를 인용해 쓴다.",
+            "- matched_query_terms가 비어 있으면 요청 테마를 추천 이유에 넣지 않는다.",
             "- synopsis 원문을 그대로 인용하지 말고 synopsis_summary를 바탕으로 2문장 이내로 재서술한다.",
             "- 추천 이유는 한줄 요약을 반복하지 말고, 요청 테마·취향 연결을 1문장으로 쓴다.",
             "- 제목 옆 괄호 키워드만 나열하는 한 줄 추천은 금지한다.",
@@ -2243,11 +2456,55 @@ def _recommendation_candidates_from_payload(payload: Mapping[str, Any]) -> tuple
     return [item for item in candidates if item.get("product_code")], recent_codes
 
 
+def _actress_filter_from_payload(payload: Mapping[str, Any]) -> Dict[str, str]:
+    messages = payload.get("messages") or []
+    system_text = "\n".join(
+        str(message.get("content") or "")
+        for message in messages
+        if isinstance(message, Mapping) and str(message.get("role") or "") == "system"
+    )
+    name_match = re.search(r"actress_filter_name:\s*(.+)", system_text)
+    if not name_match:
+        return {}
+    names_match = re.search(r"actress_filter_match_names:\s*(.+)", system_text)
+    match_names = [
+        part.strip()
+        for part in re.split(r"[,，]\s*", names_match.group(1))
+        if part.strip()
+    ] if names_match else []
+    primary = name_match.group(1).strip()
+    if primary and primary not in match_names:
+        match_names.insert(0, primary)
+    return {"name": primary, "match_names": ",".join(match_names)}
+
+
+def _candidate_matches_theme_terms(item: Mapping[str, str], query_terms: Sequence[str]) -> bool:
+    if not query_terms:
+        return True
+    matched_raw = str(item.get("matched_query_terms") or "").strip()
+    if matched_raw:
+        return True
+    from javstory.persona.library_search import item_matches_theme_terms
+
+    actors = [part.strip() for part in str(item.get("actors") or "").split(",") if part.strip()]
+    genres = [part.strip() for part in str(item.get("genres") or "").split(",") if part.strip()]
+    payload = {
+        "title_ko": item.get("title_ko") or "",
+        "title_ja": item.get("title_ja") or "",
+        "synopsis": item.get("synopsis") or item.get("synopsis_summary") or "",
+        "actors": actors,
+        "genres": genres,
+    }
+    return item_matches_theme_terms(payload, query_terms)
+
+
 def _recommendation_response_needs_replacement(
     user_message: str,
     content: str,
     candidates: Sequence[Mapping[str, str]],
     recent_codes: Sequence[str],
+    *,
+    actress_filter: Mapping[str, str] | None = None,
 ) -> bool:
     if not _is_recommendation_request(user_message):
         return False
@@ -2279,6 +2536,41 @@ def _recommendation_response_needs_replacement(
         return True
     if any(code not in allowed_codes for code in response_codes):
         return True
+    query_terms = _extract_recommendation_query_terms(user_message)
+    if query_terms and response_codes:
+        candidate_by_code = {
+            str(item.get("product_code") or "").strip().upper(): item for item in candidates
+        }
+        if any(
+            not _candidate_matches_theme_terms(candidate_by_code.get(code) or {}, query_terms)
+            for code in response_codes
+        ):
+            return True
+        if any(term in text for term in query_terms):
+            if not any(
+                _candidate_matches_theme_terms(candidate_by_code.get(code) or {}, query_terms)
+                for code in response_codes
+            ):
+                return True
+    if actress_filter and str(actress_filter.get("name") or "").strip():
+        from javstory.persona.actress_query import actor_list_matches_actress
+
+        filter_payload = {
+            "match_names": [
+                part.strip()
+                for part in re.split(r"[,，]\s*", str(actress_filter.get("match_names") or actress_filter.get("name") or ""))
+                if part.strip()
+            ],
+        }
+        candidate_by_code = {
+            str(item.get("product_code") or "").strip().upper(): item for item in candidates
+        }
+        for code in response_codes:
+            item = candidate_by_code.get(code) or {}
+            actors_field = item.get("actors") or ""
+            actors = [part.strip() for part in str(actors_field).split(",") if part.strip()]
+            if not actor_list_matches_actress(actors, filter_payload):
+                return True
     if _recommendation_response_too_thin(text, response_codes):
         return True
     upper_text = text.upper()
@@ -2549,6 +2841,8 @@ def _deterministic_recommendation_response(
     user_message: str,
     candidates: Sequence[Mapping[str, str]],
     recent_codes: Sequence[str],
+    *,
+    actress_filter: Mapping[str, str] | None = None,
 ) -> str:
     recent = {str(code or "").strip().upper() for code in recent_codes}
     fresh_request = _is_fresh_recommendation_request(user_message)
@@ -2557,17 +2851,60 @@ def _deterministic_recommendation_response(
         for item in candidates
         if not fresh_request or str(item.get("product_code") or "").strip().upper() not in recent
     ]
+    if actress_filter and str(actress_filter.get("name") or "").strip():
+        from javstory.persona.actress_query import actor_list_matches_actress
+
+        filter_payload = {
+            "match_names": [
+                part.strip()
+                for part in re.split(r"[,，]\s*", str(actress_filter.get("match_names") or actress_filter.get("name") or ""))
+                if part.strip()
+            ],
+        }
+        filtered = [
+            item
+            for item in filtered
+            if actor_list_matches_actress(
+                [part.strip() for part in str(item.get("actors") or "").split(",") if part.strip()],
+                filter_payload,
+            )
+        ]
+    query_terms = _extract_recommendation_query_terms(user_message)
+    if query_terms:
+        from javstory.persona.library_search import item_matches_theme_terms
+
+        filtered = [
+            item
+            for item in filtered
+            if item_matches_theme_terms(item, query_terms)
+            or str(item.get("matched_query_terms") or "").strip()
+        ]
     if not filtered:
-        return (
-            "지금 검색된 후보 안에서는 방금 추천한 품번을 빼고 새로 고를 만한 작품이 부족해요. "
-            "배우, 장르, 분위기 조건을 하나만 더 주시면 실제 DB 후보 안에서 다시 좁혀 보겠습니다."
+        actress_name = str((actress_filter or {}).get("name") or "").strip()
+        if actress_name:
+            return (
+                f"지금 라이브러리에서 '{actress_name}' 출연작 후보를 찾지 못했어요. "
+                "배우 프로필이 연결돼 있는지, 해당 작품 메타데이터가 수집됐는지 확인해 주세요."
+            )
+        if query_terms:
+            return (
+                f"지금 라이브러리에서 '{', '.join(query_terms)}' 테마에 맞는 작품 후보를 찾지 못했어요. "
+                "제목·장르·시놉에 해당 키워드가 들어간 작품이 수집돼 있어야 추천할 수 있어요. "
+                "비슷한 다른 테마를 말씀해 주시면 다시 찾아볼게요."
+            )
+        return _empty_recommendation_explanation(
+            {"library_search": {"results": [], "query": user_message}}
         )
 
-    intro = (
-        "이번에는 방금 나온 품번은 빼고, DB 검색 후보에서 다시 골라 자세히 정리해 드릴게요."
-        if fresh_request
-        else "오늘 보기 좋은 작품을 DB 검색 후보에서 골라 자세히 정리해 드릴게요."
-    )
+    actress_name = str((actress_filter or {}).get("name") or "").strip()
+    if fresh_request:
+        intro = "이번에는 방금 나온 품번은 빼고, DB 검색 후보에서 다시 골라 자세히 정리해 드릴게요."
+    elif actress_name:
+        intro = f"'{actress_name}' 출연작을 DB 검색 후보에서 골라 자세히 정리해 드릴게요."
+    elif query_terms:
+        intro = f"'{', '.join(query_terms)}' 테마에 맞는 작품을 DB 검색 후보에서 골라 자세히 정리해 드릴게요."
+    else:
+        intro = "오늘 보기 좋은 작품을 DB 검색 후보에서 골라 자세히 정리해 드릴게요."
     lines = [intro, ""]
     for idx, item in enumerate(filtered[:4], start=1):
         lines.extend(_recommendation_item_detail_lines(item, idx))
@@ -2653,6 +2990,12 @@ class PersonaChatService:
         product_code: "str | None" = None,
     ) -> _ContextCache:
         """Pre-build expensive turn context once — shared across all retry attempts."""
+        try:
+            from javstory.persona.recommendation_feedback import sync_recommendation_watch_feedback
+
+            sync_recommendation_watch_feedback(self.enhanced_memory_store)
+        except Exception:
+            pass
         memory_context = self.enhanced_memory_store.prompt_context(user_message, max_items=5)
         # Skip disk-based recent message scan when UI history already covers recent turns.
         recent_from_store = (
@@ -2761,10 +3104,11 @@ class PersonaChatService:
             default=str,
         )
         factual_grounding = _product_factual_grounding_block(user_message, context)
+        actress_factual_grounding = _actress_factual_grounding_block(user_message, context)
         rating_grounding = _user_rating_list_grounding_block(user_message, context)
         rated_analysis_grounding = _rated_works_analysis_grounding_block(user_message, context)
         recommendation_grounding = _recommendation_grounding_block(user_message, context, memory_context)
-        if recommendation_grounding or rated_analysis_grounding:
+        if recommendation_grounding or rated_analysis_grounding or actress_factual_grounding:
             auto_compact = False
         elif fast and not _should_use_full_chat_pipeline(user_message):
             auto_compact = True
@@ -2775,6 +3119,8 @@ class PersonaChatService:
             if rated_analysis_grounding
             else factual_grounding
             if factual_grounding
+            else actress_factual_grounding
+            if actress_factual_grounding
             else recommendation_grounding
             if recommendation_grounding
             else (
@@ -2788,10 +3134,10 @@ class PersonaChatService:
             focused_context = (
                 f"{focused_context}\n\n{actress_append}" if focused_context else actress_append
             )
-        if auto_compact and not recommendation_grounding:
+        if auto_compact and not recommendation_grounding and not actress_factual_grounding:
             focused_context = _clip_text(focused_context, 1400)
             memory_context = _compact_memory_context_for_prompt(memory_context, max_items=1)
-        elif recommendation_grounding or rated_analysis_grounding:
+        elif recommendation_grounding or rated_analysis_grounding or actress_factual_grounding:
             focused_context = _clip_text(focused_context, 4200)
             memory_context = _compact_memory_context_for_prompt(memory_context, max_items=2)
         elif not auto_compact:
@@ -2824,6 +3170,13 @@ class PersonaChatService:
                 "메모리는 말투 선호 외에는 사실 근거로 쓰지 않는다. "
                 "[평점 작품 취향 분석 고정 근거]의 장르·배우·시놉만 사용한다.\n"
             )
+        elif actress_factual_grounding:
+            memory_instruction = (
+                "## 장기 대화 메모리\n"
+                "이번 요청은 배우 정보 질의이므로, "
+                "메모리는 말투 선호 외에는 사실 근거로 쓰지 않는다. "
+                "[배우 사실 고정 근거]의 프로필·library_filmography에 없는 품번·장면은 만들지 않는다.\n"
+            )
         elif recommendation_grounding:
             memory_instruction = (
                 "## 장기 대화 메모리\n"
@@ -2844,12 +3197,23 @@ class PersonaChatService:
             system_parts = [self.system_prompt, "\n" + focused_context]
             memory_readable = _format_memory_readable(
                 memory_context,
-                factual=bool(factual_grounding or rating_grounding or rated_analysis_grounding),
+                factual=bool(
+                    factual_grounding
+                    or rating_grounding
+                    or rated_analysis_grounding
+                    or actress_factual_grounding
+                ),
                 compact=auto_compact,
             )
             if memory_readable:
                 system_parts.append("\n" + memory_readable)
-            if factual_grounding or rating_grounding or rated_analysis_grounding or recommendation_grounding:
+            if (
+                factual_grounding
+                or rating_grounding
+                or rated_analysis_grounding
+                or recommendation_grounding
+                or actress_factual_grounding
+            ):
                 system_parts.append("\n" + memory_instruction.strip())
             if style_instruction:
                 v2_style = _tone_style_for_preset(active_tone, user_message)
@@ -2984,9 +3348,15 @@ class PersonaChatService:
         if _is_recommendation_request(text):
             search = context.get("library_search") if isinstance(context.get("library_search"), Mapping) else {}
             candidates = [item for item in list(search.get("results") or []) if isinstance(item, Mapping)]
+            actress_filter = search.get("actress_filter") if isinstance(search.get("actress_filter"), Mapping) else {}
             return _openai_compatible_response(
                 model="persona-chat-degraded",
-                content=_deterministic_recommendation_response(text, candidates, recent_recommended_codes),
+                content=_deterministic_recommendation_response(
+                    text,
+                    candidates,
+                    recent_recommended_codes,
+                    actress_filter=actress_filter,
+                ),
             )
 
         persona = context.get("persona") if isinstance(context.get("persona"), Mapping) else {}
@@ -3157,8 +3527,20 @@ class PersonaChatService:
 
         if content:
             candidates, recent_codes = _recommendation_candidates_from_payload(payload)
-            if _recommendation_response_needs_replacement(text, content, candidates, recent_codes):
-                content = _deterministic_recommendation_response(text, candidates, recent_codes)
+            actress_filter = _actress_filter_from_payload(payload)
+            if _recommendation_response_needs_replacement(
+                text,
+                content,
+                candidates,
+                recent_codes,
+                actress_filter=actress_filter or None,
+            ):
+                content = _deterministic_recommendation_response(
+                    text,
+                    candidates,
+                    recent_codes,
+                    actress_filter=actress_filter or None,
+                )
             if _rated_works_analysis_response_needs_replacement(text, content):
                 rated = fetch_user_rated_products(limit=25)
                 content = _deterministic_rated_works_pattern_summary(rated)
