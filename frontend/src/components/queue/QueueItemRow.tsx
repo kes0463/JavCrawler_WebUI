@@ -61,19 +61,19 @@ export function QueueItemRow({ item, onRemove, disabled }: QueueItemRowProps) {
 
       <StatusIcon status={item.status} />
 
-      <span className="font-mono text-sm text-indigo-300/90 shrink-0 min-w-[7rem] truncate">
+      <span className="font-mono text-base text-indigo-300/90 shrink-0 min-w-[7rem] truncate">
         {item.label}
       </span>
 
       <div className="flex-1 min-w-0 space-y-1.5">
         {isRunning ? (
           <>
-            <p className="text-xs text-[#c8c8e0]/80 truncate">{item.message || "처리 중..."}</p>
+            <p className="text-sm text-[#c8c8e0]/80 truncate">{item.message || "처리 중..."}</p>
             <ProgressIndicator value={item.progress ?? 0} size="sm" />
           </>
         ) : (
           <p className={cn(
-            "text-xs truncate",
+            "text-sm truncate",
             isDone  && "text-emerald-400/80",
             isError && "text-rose-400",
             !isDone && !isError && "text-muted-foreground/70",
@@ -84,7 +84,7 @@ export function QueueItemRow({ item, onRemove, disabled }: QueueItemRowProps) {
       </div>
 
       {isRunning && (
-        <span className="text-xs tabular-nums text-indigo-400 font-medium shrink-0 min-w-[2.5rem] text-right">
+        <span className="text-sm tabular-nums text-indigo-400 font-medium shrink-0 min-w-[2.5rem] text-right">
           {item.progress ?? 0}%
         </span>
       )}

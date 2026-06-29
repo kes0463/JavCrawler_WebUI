@@ -10,7 +10,7 @@ export const AppScrollView = forwardRef<HTMLDivElement, AppScrollViewProps>(
     <div
       ref={ref}
       className={cn(
-        "overflow-auto",
+        "overflow-auto app-scroll",
         horizontal ? "overflow-y-hidden overflow-x-auto" : "overflow-x-hidden overflow-y-auto",
         "no-scrollbar",
         className,

@@ -269,6 +269,8 @@ def _parse_watch_info_dl(soup: BeautifulSoup, info: VideoInfo) -> None:
         elif field == "release_date":
             info.release_date = _text(dd)
         elif field == "actresses":
+            from javstory.utils.actress_profile import strip_actor_parenthetical_alias
+
             actresses: List[Dict[str, str]] = []
             for a in dd.find_all("a", href=True):
                 href = (a.get("href") or "").strip()
@@ -276,7 +278,7 @@ def _parse_watch_info_dl(soup: BeautifulSoup, info: VideoInfo) -> None:
                     continue
                 name = _text(a)
                 if name:
-                    actresses.append({"name": name, "href": href})
+                    actresses.append({"name": strip_actor_parenthetical_alias(name), "href": href})
             if actresses:
                 info.actresses = actresses
         elif field == "genres":
@@ -310,6 +312,8 @@ def _row_label_and_value_container(row: Any) -> tuple[str, Any]:
 
 
 def _parse_actresses(value_node: Any) -> List[Dict[str, str]]:
+    from javstory.utils.actress_profile import strip_actor_parenthetical_alias
+
     out: List[Dict[str, str]] = []
     if not value_node:
         return out
@@ -319,7 +323,7 @@ def _parse_actresses(value_node: Any) -> List[Dict[str, str]]:
             continue
         name = _text(a)
         if name:
-            out.append({"name": name, "href": href})
+            out.append({"name": strip_actor_parenthetical_alias(name), "href": href})
     return out
 
 
@@ -404,7 +408,7 @@ def _merge_locale_pages(info_ja: VideoInfo, info_ko: VideoInfo) -> VideoInfo:
         code=base.code or other.code,
         description=base.description or other.description,
         poster_url=base.poster_url or other.poster_url,
-        actresses=base.actresses or other.actresses,
+        actresses=_merge_actress_lists(base.actresses, other.actresses),
         genres=base.genres or other.genres,
         release_date=base.release_date or other.release_date,
         maker=base.maker or other.maker,
@@ -418,6 +422,44 @@ def _merge_locale_pages(info_ja: VideoInfo, info_ko: VideoInfo) -> VideoInfo:
     else:
         merged.title = title_ja_raw or title_ko_raw
     return merged
+
+
+def _actress_href_key(item: dict[str, str]) -> str:
+    href = (item.get("href") or "").strip().rstrip("/").lower()
+    if "/actresses/" in href:
+        return href.split("/actresses/", 1)[-1].split("?")[0]
+    if href:
+        return href
+    return (item.get("name") or "").strip().lower()
+
+
+def _merge_actress_lists(
+    primary: List[Dict[str, str]],
+    secondary: List[Dict[str, str]],
+) -> List[Dict[str, str]]:
+    """ja/ko 배우 목록 — href 기준 합집합, 동일 인물은 한글 표기 우선."""
+    merged: dict[str, Dict[str, str]] = {}
+    order: List[str] = []
+    for item in (primary or []) + (secondary or []):
+        if not isinstance(item, dict):
+            continue
+        name = (item.get("name") or "").strip()
+        if not name:
+            continue
+        key = _actress_href_key(item)
+        if not key:
+            continue
+        if key not in merged:
+            merged[key] = {"name": name, "href": (item.get("href") or "").strip()}
+            order.append(key)
+            continue
+        existing = merged[key]
+        if _has_hangul(name) and not _has_hangul(existing.get("name") or ""):
+            merged[key] = {
+                "name": name,
+                "href": existing.get("href") or item.get("href") or "",
+            }
+    return [merged[k] for k in order]
 
 
 def parse_video_html(

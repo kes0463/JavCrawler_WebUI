@@ -15,22 +15,21 @@ class MetadataTranslator:
     """
     [Phase 5] 제목·시놉시스 전용 일본어→한국어 번역 엔진.
     - 배우·장르·메이커는 DB 마스터(리졸버)로만 저장하며 LLM이 건드리지 않는다.
-    - DeepSeek V3 -> Hermes fallback 파이프라인 사용.
+    - DeepSeek V3 -> Hermes fallback 파이프라인 사용 (OpenRouter tier).
+    - 기본: llama.cpp Gemma-4-E4B (`harvest_translation_llm_tier`).
     - 성인 콘텐츠 특화 프롬프트 적용 (검열 회피 및 로컬라이징).
     """
 
     def __init__(self, api_key: Optional[str] = None, logger_func=None):
         if not api_key:
             api_key = keyring.get_password(KEYRING_SERVICE_NAME, KEYRING_ACCOUNT_OPENROUTER)
-        
+
         self.logger = logger_func if logger_func else print
-        self.router = MultiTierRouter(api_key, logger_func=self.logger) if api_key else None
+        # llama.cpp / Ollama는 OpenRouter 키 없이도 동작
+        self.router = MultiTierRouter(api_key or "local", logger_func=self.logger)
 
     async def translate_metadata_batch(self, product_code: str, title: str, synopsis: str, actors: list = [], genres: list = [], maker: str = "", approved_terms: dict = {}) -> dict:
         """한 번의 AI 호출로 제목·시놉시스를 일본어 정제 + 한국어로만 변환. (배우/장르/제작사는 DB 테이블에서만 처리)"""
-        if not self.router:
-            return {}
-
         system_prompt = """# Role
 You are a professional JAV (Japanese Adult Video) localization expert with 15+ years of experience.
 Your only task: refine Japanese **title** and **synopsis**, and write natural **Korean** versions.

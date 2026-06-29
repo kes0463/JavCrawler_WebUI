@@ -16,6 +16,9 @@ from PySide6.QtCore import (
 )
 
 
+from javstory.config.app_config import story_analysis_enabled_from_env
+
+
 class HarvestTaskListModel(QAbstractListModel):
     SkuRole = Qt.ItemDataRole.UserRole + 1
     StatusRole = Qt.ItemDataRole.UserRole + 2
@@ -87,9 +90,7 @@ class HarvestModel(QObject):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self._grok_enabled = os.environ.get(
-            "JAVSTORY_STORY_ANALYSIS_ENABLED", "1"
-        ).strip().lower() in ("1", "true", "yes", "on")
+        self._grok_enabled = story_analysis_enabled_from_env()
         self._tasks = HarvestTaskListModel(self)
         self._workers: dict[str, object] = {}
         self._active_refs: list[object] = []

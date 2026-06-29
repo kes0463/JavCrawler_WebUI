@@ -131,6 +131,10 @@ class DetailEditDraft(QObject):
 
         row.release_date = self._release_date or None
 
+        from javstory.library.metadata_edit import mark_metadata_as_manual
+
+        mark_metadata_as_manual(row)
+
     def _split_csv(self, s: str) -> list[str]:
         if not (s or "").strip():
             return []

@@ -45,9 +45,9 @@ export function PipelineStage({ stages, orientation = "horizontal", className }:
               )}
             </div>
             <div className="pb-2">
-              <p className={cn("text-xs font-medium", STAGE_TEXT[stage.status])}>{stage.label}</p>
+              <p className={cn("text-sm font-medium", STAGE_TEXT[stage.status])}>{stage.label}</p>
               {stage.message && (
-                <p className="text-[11px] text-muted-foreground mt-0.5">{stage.message}</p>
+                <p className="text-sm text-muted-foreground mt-0.5">{stage.message}</p>
               )}
             </div>
           </div>
@@ -62,7 +62,7 @@ export function PipelineStage({ stages, orientation = "horizontal", className }:
         <div key={stage.id} className="flex items-center gap-1 min-w-0">
           <div className="flex flex-col items-center gap-0.5">
             <StageIcon status={stage.status} />
-            <span className={cn("text-[9px] text-center whitespace-nowrap", STAGE_TEXT[stage.status])}>
+            <span className={cn("text-sm text-center whitespace-nowrap", STAGE_TEXT[stage.status])}>
               {stage.label}
             </span>
           </div>

@@ -228,7 +228,7 @@ class SettingsView(QWidget):
         }
         self.trans_profile_combo.setCurrentIndex(profile_map.get(profile, 0))
 
-        grok_enabled = os.environ.get("JAVSTORY_STORY_ANALYSIS_ENABLED", "1").strip().lower()
+        grok_enabled = os.environ.get("JAVSTORY_STORY_ANALYSIS_ENABLED", "0").strip().lower()
         self.grok_switch.setChecked(grok_enabled in ("1", "true", "yes", "on"))
 
         emb_enabled = os.environ.get("JAVSTORY_EMBEDDINGS_ENABLED", "0").strip().lower()

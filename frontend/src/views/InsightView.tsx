@@ -2,8 +2,6 @@ import { TrendingUp, Award, Tag, Calendar } from "lucide-react";
 import { GlassCard } from "@/components/ui/GlassCard";
 import { ProgressIndicator } from "@/components/ui/ProgressIndicator";
 
-// ── Mock data ────────────────────────────────────────────────────
-
 const GENRE_STATS = [
   { label: "단독 작품",  count: 842, pct: 100 },
   { label: "레즈비언",   count: 721, pct: 86 },
@@ -42,18 +40,15 @@ const LABEL_STATS = [
   { label: "Moodyz", count: 176, color: "bg-emerald-500" },
 ];
 
-// ── Component ────────────────────────────────────────────────────
-
 export default function InsightView() {
   return (
     <div className="space-y-5 animate-fade-in">
 
       <div>
-        <h1 className="text-xl font-bold text-white">인사이트</h1>
-        <p className="text-sm text-muted-foreground mt-0.5">라이브러리 분석 · 통계</p>
+        <h1 className="text-2xl font-bold text-white">인사이트</h1>
+        <p className="text-base text-muted-foreground mt-0.5">라이브러리 분석 · 통계</p>
       </div>
 
-      {/* ── 상단 요약 ── */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
         {[
           { label: "전체 작품",   value: "2,847", sub: "총 수집량",    icon: "📚", color: "text-white" },
@@ -64,11 +59,11 @@ export default function InsightView() {
           <GlassCard key={label} hoverable>
             <div className="flex items-start justify-between">
               <div>
-                <p className="text-xs text-muted-foreground">{label}</p>
-                <p className={`text-2xl font-bold tabular-nums mt-1 ${color}`}>{value}</p>
-                <p className="text-[11px] text-muted-foreground mt-0.5">{sub}</p>
+                <p className="text-sm text-muted-foreground">{label}</p>
+                <p className={`text-3xl font-bold tabular-nums mt-1 ${color}`}>{value}</p>
+                <p className="text-sm text-muted-foreground mt-0.5">{sub}</p>
               </div>
-              <span className="text-2xl">{icon}</span>
+              <span className="text-3xl">{icon}</span>
             </div>
           </GlassCard>
         ))}
@@ -76,11 +71,10 @@ export default function InsightView() {
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
 
-        {/* ── 월별 수집 추이 ── */}
         <GlassCard className="lg:col-span-2 space-y-4">
           <div className="flex items-center gap-2">
-            <TrendingUp className="w-4 h-4 text-muted-foreground" />
-            <h2 className="text-sm font-semibold text-[#d0d0e8]">월별 수집 추이</h2>
+            <TrendingUp className="w-5 h-5 text-muted-foreground" />
+            <h2 className="text-lg font-semibold text-[#d0d0e8]">월별 수집 추이</h2>
           </div>
 
           <div className="flex items-end gap-3 h-32">
@@ -89,30 +83,29 @@ export default function InsightView() {
               const isMax = count === MONTHLY_MAX;
               return (
                 <div key={month} className="flex-1 flex flex-col items-center gap-1.5">
-                  <span className="text-[10px] text-muted-foreground tabular-nums">{count}</span>
+                  <span className="text-sm text-muted-foreground tabular-nums">{count}</span>
                   <div
                     className={`w-full rounded-t-md transition-all duration-500 ${
                       isMax ? "bg-accent" : "bg-accent/40"
                     }`}
                     style={{ height: `${height}%` }}
                   />
-                  <span className="text-[10px] text-muted-foreground">{month}</span>
+                  <span className="text-sm text-muted-foreground">{month}</span>
                 </div>
               );
             })}
           </div>
         </GlassCard>
 
-        {/* ── 레이블 분포 ── */}
         <GlassCard className="space-y-3">
           <div className="flex items-center gap-2">
-            <Tag className="w-4 h-4 text-muted-foreground" />
-            <h2 className="text-sm font-semibold text-[#d0d0e8]">레이블 TOP 5</h2>
+            <Tag className="w-5 h-5 text-muted-foreground" />
+            <h2 className="text-lg font-semibold text-[#d0d0e8]">레이블 TOP 5</h2>
           </div>
           <div className="space-y-3">
             {LABEL_STATS.map(({ label, count, color }) => (
               <div key={label} className="space-y-1">
-                <div className="flex justify-between text-xs">
+                <div className="flex justify-between text-base">
                   <span className="text-[#c8c8e0]">{label}</span>
                   <span className="text-muted-foreground tabular-nums">{count}</span>
                 </div>
@@ -131,16 +124,15 @@ export default function InsightView() {
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
 
-        {/* ── 장르 분포 ── */}
         <GlassCard className="space-y-3">
           <div className="flex items-center gap-2">
-            <Calendar className="w-4 h-4 text-muted-foreground" />
-            <h2 className="text-sm font-semibold text-[#d0d0e8]">장르 분포</h2>
+            <Calendar className="w-5 h-5 text-muted-foreground" />
+            <h2 className="text-lg font-semibold text-[#d0d0e8]">장르 분포</h2>
           </div>
           <div className="space-y-2.5">
             {GENRE_STATS.map(({ label, count, pct }) => (
               <div key={label} className="space-y-1">
-                <div className="flex justify-between text-xs">
+                <div className="flex justify-between text-base">
                   <span className="text-[#c8c8e0]">{label}</span>
                   <span className="text-muted-foreground tabular-nums">{count}</span>
                 </div>
@@ -150,23 +142,22 @@ export default function InsightView() {
           </div>
         </GlassCard>
 
-        {/* ── 인기 배우 ── */}
         <GlassCard className="space-y-3">
           <div className="flex items-center gap-2">
-            <Award className="w-4 h-4 text-muted-foreground" />
-            <h2 className="text-sm font-semibold text-[#d0d0e8]">배우 TOP 5</h2>
+            <Award className="w-5 h-5 text-muted-foreground" />
+            <h2 className="text-lg font-semibold text-[#d0d0e8]">배우 TOP 5</h2>
           </div>
           <div className="space-y-2.5">
             {TOP_ACTORS.map(({ name, count, score }, i) => (
               <div key={name} className="flex items-center gap-3">
-                <span className={`text-sm font-bold tabular-nums w-5 text-center ${
+                <span className={`text-base font-bold tabular-nums w-5 text-center ${
                   i === 0 ? "text-amber-400" : i === 1 ? "text-zinc-300" : i === 2 ? "text-orange-400" : "text-muted-foreground"
                 }`}>
                   {i + 1}
                 </span>
-                <span className="text-sm text-[#d0d0e8] flex-1">{name}</span>
-                <span className="text-xs text-muted-foreground tabular-nums">{count}편</span>
-                <span className="text-xs text-amber-400 font-medium tabular-nums">★ {score}</span>
+                <span className="text-base text-[#c8c8e0] flex-1">{name}</span>
+                <span className="text-sm text-muted-foreground tabular-nums">{count}편</span>
+                <span className="text-sm text-amber-400 font-medium tabular-nums">★ {score}</span>
               </div>
             ))}
           </div>

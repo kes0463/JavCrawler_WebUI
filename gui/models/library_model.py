@@ -509,6 +509,26 @@ class LibraryDetailObject(QObject):
         return int(self._get("favorite_site_delta_days", 0) or 0)
 
 
+class StaleActorsBulkSyncWorker(QThread):
+    """앱 시작 시 actors_ko 일본어 잔여분 전체 재매핑."""
+
+    finished = Signal(int)
+
+    def run(self):
+        try:
+            from javstory.harvest.database import get_db_session
+            from javstory.utils.actress_profile import refresh_all_stale_metadata_actors
+
+            session = get_db_session()
+            try:
+                updated = refresh_all_stale_metadata_actors(session)
+            finally:
+                session.close()
+            self.finished.emit(len(updated))
+        except Exception:
+            self.finished.emit(0)
+
+
 class LibraryReloadWorker(QThread):
     """라이브러리 목록 로드 — 협력적 취소 지원."""
 
@@ -980,6 +1000,7 @@ _LIGHTWEIGHT_GRID_PATCH_THRESHOLD = 200
 
 class LibraryModel(QObject):
     _instance = None
+    _STALE_ACTORS_SYNC_VERSION = 2
 
     @staticmethod
     def instance() -> LibraryModel | None:
@@ -1074,6 +1095,9 @@ class LibraryModel(QObject):
         self._genres_cache_sig: int = -1
         self._genres_cache: list[dict] = []
         self._watch_refresh_deferred = False
+        self._stale_actors_sync_version_done = 0
+        self._stale_actors_sync_worker = None
+        self._reload_after_stale_sync = False
 
 
         # WatchHistory 캐시 — _rebuild는 이 캐시를 읽기만 하므로 메인 스레드 DB 접근 없음
@@ -1317,6 +1341,14 @@ class LibraryModel(QObject):
     def reload(self):
         if self._is_loading:
             return
+
+        if self._stale_actors_sync_version_done < LibraryModel._STALE_ACTORS_SYNC_VERSION:
+            if self._stale_actors_sync_worker and self._stale_actors_sync_worker.isRunning():
+                self._reload_after_stale_sync = True
+                return
+            self._reload_after_stale_sync = True
+            self._start_stale_actors_bulk_sync()
+            return
         
         self._is_loading = True
         self.isLoadingChanged.emit()
@@ -1346,6 +1378,26 @@ class LibraryModel(QObject):
         self._reload_worker.finished.connect(self._on_reload_finished)
         self._reload_worker.error.connect(self._on_reload_error)
         self._reload_worker.start()
+
+    def _start_stale_actors_bulk_sync(self) -> None:
+        if self._stale_actors_sync_worker and self._stale_actors_sync_worker.isRunning():
+            return
+        self._stale_actors_sync_worker = StaleActorsBulkSyncWorker(parent=self)
+        self._stale_actors_sync_worker.finished.connect(self._on_stale_actors_bulk_sync_done)
+        self._stale_actors_sync_worker.start()
+
+    def _on_stale_actors_bulk_sync_done(self, updated_count: int) -> None:
+        self._stale_actors_sync_version_done = LibraryModel._STALE_ACTORS_SYNC_VERSION
+        self._stale_actors_sync_worker = None
+        if updated_count > 0:
+            try:
+                from gui.library_data import invalidate_priority_ranking_cache
+                invalidate_priority_ranking_cache()
+            except Exception:
+                pass
+        if self._reload_after_stale_sync:
+            self._reload_after_stale_sync = False
+            self.reload()
 
     def _on_reload_finished(self, summaries):
         self._all_summaries = list(summaries or [])

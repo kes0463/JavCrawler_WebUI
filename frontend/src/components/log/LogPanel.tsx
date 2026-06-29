@@ -33,13 +33,13 @@ export function LogPanel({ entries, autoScroll = true, maxHeight = "240px", clas
   return (
     <div
       className={cn(
-        "rounded-xl border border-white/[0.06] bg-bg-base overflow-y-auto no-scrollbar font-mono text-[11px]",
+        "rounded-xl border border-white/[0.06] bg-bg-base overflow-y-auto no-scrollbar font-mono text-sm",
         className,
       )}
       style={{ maxHeight }}
     >
       {entries.length === 0 ? (
-        <div className="flex items-center justify-center h-16 text-muted-foreground text-xs">
+        <div className="flex items-center justify-center h-16 text-muted-foreground text-base">
           로그 없음
         </div>
       ) : (

@@ -7,8 +7,6 @@ import { QueueItemRow, type QueueItem } from "@/components/queue/QueueItemRow";
 import { LogPanel, type LogEntry } from "@/components/log/LogPanel";
 import { PipelineStage, type Stage } from "@/components/library/PipelineStage";
 
-// ── Mock data ────────────────────────────────────────────────────
-
 const MOCK_STT_QUEUE: QueueItem[] = [
   { id: "1", label: "STARS-001.mp4", status: "running",  progress: 62, message: "음성 추출 중..." },
   { id: "2", label: "IPX-789.mkv",   status: "pending",  message: "대기 중" },
@@ -36,8 +34,6 @@ const MOCK_LOGS: LogEntry[] = [
   { id: 5, text: "MIDE-456 SRT 저장: ./subs/MIDE-456.srt", level: "success", ts: "14:29:00" },
 ];
 
-// ── Component ────────────────────────────────────────────────────
-
 export default function ProcessingView() {
   const [input, setInput] = useState("");
   const [sttQueue, setSttQueue] = useState<QueueItem[]>(MOCK_STT_QUEUE);
@@ -51,20 +47,19 @@ export default function ProcessingView() {
 
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-xl font-bold text-white">전사 · 자막</h1>
-          <p className="text-sm text-muted-foreground mt-0.5">STT 전사 및 자막 번역 파이프라인</p>
+          <h1 className="text-2xl font-bold text-white">전사 · 자막</h1>
+          <p className="text-base text-muted-foreground mt-0.5">STT 전사 및 자막 번역 파이프라인</p>
         </div>
         {runningCount > 0 && (
           <div className="flex items-center gap-2 px-3 py-1.5 rounded-full bg-indigo-500/15 border border-indigo-500/25">
             <span className="w-1.5 h-1.5 rounded-full bg-indigo-400 animate-pulse" />
-            <span className="text-xs text-indigo-300">{runningCount}개 처리 중</span>
+            <span className="text-sm text-indigo-300">{runningCount}개 처리 중</span>
           </div>
         )}
       </div>
 
-      {/* ── 파이프라인 개요 ── */}
       <GlassCard className="space-y-3">
-        <h2 className="text-xs font-semibold uppercase tracking-widest text-muted-foreground">
+        <h2 className="text-sm font-semibold uppercase tracking-widest text-muted-foreground">
           처리 파이프라인
         </h2>
         <PipelineStage stages={PIPELINE_STAGES} orientation="horizontal" />
@@ -72,12 +67,11 @@ export default function ProcessingView() {
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-5">
 
-        {/* ── 입력 패널 ── */}
         <div className="space-y-4">
           <GlassCard className="space-y-3">
             <div className="flex items-center gap-2">
-              <FileAudio className="w-4 h-4 text-muted-foreground" />
-              <h3 className="text-xs font-semibold uppercase tracking-widest text-muted-foreground">
+              <FileAudio className="w-5 h-5 text-muted-foreground" />
+              <h3 className="text-sm font-semibold uppercase tracking-widest text-muted-foreground">
                 파일 추가
               </h3>
             </div>
@@ -86,16 +80,16 @@ export default function ProcessingView() {
               onChange={e => setInput(e.target.value)}
               placeholder={"파일 경로 또는 품번 입력\n\nD:\\media\\STARS-001.mp4\nIPX-789\n\nCtrl+Enter로 추가"}
               rows={7}
-              className="w-full px-3 py-2.5 text-sm rounded-xl resize-none bg-bg-base border border-white/[0.08] text-white placeholder:text-muted-foreground focus:outline-none focus:border-accent/50 focus:ring-1 focus:ring-accent/30 transition-all duration-150"
+              className="w-full px-3 py-2.5 text-base rounded-xl resize-none bg-bg-base border border-white/[0.08] text-white placeholder:text-muted-foreground focus:outline-none focus:border-accent/50 focus:ring-1 focus:ring-accent/30 transition-all duration-150"
             />
             <div className="grid grid-cols-2 gap-2">
-              <ActionButton variant="secondary" className="w-full text-xs">
+              <ActionButton variant="secondary" className="w-full">
                 STT만
               </ActionButton>
               <ActionButton
                 variant="primary"
                 className="w-full"
-                icon={<Plus className="w-3.5 h-3.5" />}
+                icon={<Plus className="w-4 h-4" />}
                 disabled={!input.trim()}
               >
                 추가
@@ -103,7 +97,7 @@ export default function ProcessingView() {
             </div>
           </GlassCard>
 
-          <GlassCard variant="subtle" className="text-xs text-muted-foreground space-y-1.5">
+          <GlassCard variant="subtle" className="text-base text-muted-foreground space-y-1.5">
             <p className="text-[#c8c8e0] font-medium">처리 순서</p>
             <ol className="space-y-1 list-decimal list-inside">
               <li>파일 경로 또는 품번 입력</li>
@@ -114,7 +108,6 @@ export default function ProcessingView() {
           </GlassCard>
         </div>
 
-        {/* ── 큐 목록 ── */}
         <div className="lg:col-span-2 space-y-4">
 
           <QueueAccordionCard
@@ -126,14 +119,14 @@ export default function ProcessingView() {
               <ActionButton
                 variant="primary"
                 size="sm"
-                icon={<Play className="w-3 h-3" />}
+                icon={<Play className="w-4 h-4" />}
               >
                 시작
               </ActionButton>
             }
           >
             {sttQueue.length === 0
-              ? <p className="text-xs text-muted-foreground py-2">큐가 비어 있습니다</p>
+              ? <p className="text-base text-muted-foreground py-2">큐가 비어 있습니다</p>
               : sttQueue.map(item => (
                   <QueueItemRow
                     key={item.id}
@@ -150,7 +143,7 @@ export default function ProcessingView() {
             status={subQueue.some(i => i.status === "running") ? "running" : "inactive"}
           >
             {subQueue.length === 0
-              ? <p className="text-xs text-muted-foreground py-2">큐가 비어 있습니다</p>
+              ? <p className="text-base text-muted-foreground py-2">큐가 비어 있습니다</p>
               : subQueue.map(item => (
                   <QueueItemRow
                     key={item.id}
@@ -161,7 +154,7 @@ export default function ProcessingView() {
           </QueueAccordionCard>
 
           <GlassCard className="space-y-2">
-            <h3 className="text-xs font-semibold uppercase tracking-widest text-muted-foreground">
+            <h3 className="text-sm font-semibold uppercase tracking-widest text-muted-foreground">
               처리 로그
             </h3>
             <LogPanel entries={MOCK_LOGS} maxHeight="180px" />

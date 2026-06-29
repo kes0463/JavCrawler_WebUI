@@ -14,6 +14,7 @@ from javstory.utils.process_limit import ffmpeg_semaphore
 
 logger = logging.getLogger(__name__)
 
+
 class SnapshotQueueManager:
     _instance = None
     _lock = threading.Lock()

@@ -15,10 +15,14 @@ from sqlalchemy import (
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, relationship
 from sqlalchemy.pool import NullPool
+from sqlalchemy.exc import OperationalError
 from contextlib import contextmanager
 import datetime
+import random
 import shutil
 import sys
+import threading
+import time
 import traceback
 from dataclasses import dataclass
 from pathlib import Path
@@ -36,7 +40,7 @@ Base = declarative_base()
 # - SQLite `PRAGMA user_version`에 저장한다.
 # - 테이블/컬럼 마이그레이션 로직을 변경하면 이 값을 올려서 1회 재실행되게 한다.
 # - v9+ 스키마는 Alembic only — `upgrade_alembic_head()` (init_db 이후 호출)
-_APP_DB_SCHEMA_VERSION = 17
+_APP_DB_SCHEMA_VERSION = 18
 _ALEMBIC_HEAD_REVISION = "0001_stamp_v8"
 _SCHEMA_USER_VERSION_ALEMBIC = 9
 
@@ -147,6 +151,8 @@ class JAVMetadata(Base):
     favorite_sources = Column(Text, nullable=True)  # "123av:634,missav123:102"
     # v5: 좋아요 전용 크롤 실패 시각 — 일정 기간 재시도 스킵용 (`JAVSTORY_FAV_CRAWL_FAIL_COOLDOWN_HOURS`)
     favorite_crawl_failed_at = Column(DateTime, nullable=True)
+    # v15: WebUI/데스크톱 수동 메타 편집 — 재크롤 실패 시 FAILED_CRAWL 덮어쓰기 방지
+    metadata_manual = Column(Boolean, default=False)
 
 class Actress(Base):
     """배우 정보 테이블 (actresses)"""
@@ -385,6 +391,34 @@ engine = create_engine(
 )
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
+_SQLITE_WRITE_LOCK = threading.Lock()
+
+
+def commit_with_retry(session, *, max_attempts: int = 12, base_delay: float = 0.2) -> None:
+    """SQLite `database is locked` 발생 시 백오프 재시도 (Harvest 병렬 쓰기 대응)."""
+    last_err: Exception | None = None
+    for attempt in range(max_attempts):
+        try:
+            with _SQLITE_WRITE_LOCK:
+                session.commit()
+            return
+        except OperationalError as e:
+            last_err = e
+            msg = str(e).lower()
+            if "database is locked" not in msg and "database is busy" not in msg:
+                raise
+            try:
+                session.rollback()
+            except Exception:
+                pass
+            if attempt + 1 >= max_attempts:
+                break
+            delay = min(base_delay * (2 ** attempt) + random.uniform(0, 0.15), 8.0)
+            time.sleep(delay)
+    if last_err is not None:
+        raise last_err
+    raise RuntimeError("commit_with_retry: unknown failure")
+
 
 @event.listens_for(engine, "connect")
 def _sqlite_on_connect(dbapi_connection, connection_record):  # type: ignore[no-redef]
@@ -601,12 +635,30 @@ def clear_favorite_crawl_failed(product_code: str) -> None:
         pass
 
 
+def _run_idempotent_column_migrations() -> None:
+    """컬럼 추가 등 idempotent 마이그레이션 — user_version과 무관하게 항상 실행."""
+    _migrate_add_needs_review_columns()
+    _migrate_v3_analytics_columns()
+    _migrate_v4_favorite_columns()
+    _migrate_v5_favorite_crawl_failed_at()
+    _migrate_v6_actress_translation_note()
+    _migrate_v7_favorite_score_history()
+    _migrate_v8_watch_history_part_positions()
+    _migrate_v11_watch_later_columns()
+    _migrate_v12_file_flag_cache()
+    _migrate_v13_file_flag_cover_path()
+    _migrate_v14_file_flag_preview_path()
+    _migrate_v15_metadata_manual()
+
+
 def init_db():
     """테이블 생성 및 기존 DB 컬럼 자동 마이그레이션"""
     _DB.parent.mkdir(parents=True, exist_ok=True)
     import sqlite3
 
     print(f"[DB] Using database at: {DB_PATH}")
+
+    _run_idempotent_column_migrations()
 
     # 이미 마이그레이션이 적용된 DB면 앱 시작 시점에서 불필요한 PRAGMA/ALTER를 피한다.
     try:
@@ -638,17 +690,6 @@ def init_db():
     ]
     Base.metadata.create_all(bind=engine, tables=_v8_tables)
     print("[DB] Running migration checks...")
-    _migrate_add_needs_review_columns()
-    _migrate_v3_analytics_columns()
-    _migrate_v4_favorite_columns()
-    _migrate_v5_favorite_crawl_failed_at()
-    _migrate_v6_actress_translation_note()
-    _migrate_v7_favorite_score_history()
-    _migrate_v8_watch_history_part_positions()
-    _migrate_v11_watch_later_columns()
-    _migrate_v12_file_flag_cache()
-    _migrate_v13_file_flag_cover_path()
-    _migrate_v14_file_flag_preview_path()
     _ensure_indexes_and_optimize()
     try:
         with sqlite3.connect(DB_PATH) as conn:
@@ -1057,6 +1098,24 @@ def _migrate_v14_file_flag_preview_path():
         print(f"[DB Migration v14] 실패: {e}")
 
 
+def _migrate_v15_metadata_manual():
+    """v15: jav_metadata.metadata_manual — 수동 편집 메타데이터 크롤 실패 보호"""
+    import sqlite3
+
+    try:
+        with sqlite3.connect(DB_PATH) as conn:
+            cursor = conn.cursor()
+            cols = [row[1] for row in cursor.execute("PRAGMA table_info(jav_metadata)")]
+            if "metadata_manual" not in cols:
+                cursor.execute(
+                    "ALTER TABLE jav_metadata ADD COLUMN metadata_manual INTEGER DEFAULT 0"
+                )
+                print("[DB Migration v15] jav_metadata.metadata_manual 컬럼 추가 완료")
+            conn.commit()
+    except Exception as e:
+        print(f"[DB Migration v15] 실패: {e}")
+
+
 def _migrate_v6_actress_translation_note():
     """v6: actresses.translation_note — 배우 단위 번역 노트(페르소나/말투/표기 가이드)"""
     import sqlite3
@@ -1120,6 +1179,10 @@ def upsert_jav_metadata(session, product_code, merge_empty_only=False, **kwargs)
     if not row:
         row = JAVMetadata(product_code=product_code)
         session.add(row)
+
+    # 라이브러리 수동 편집 행: 호출자가 merge_empty_only=False(재크롤 전체 덮어쓰기)여도
+    # 빈 값으로 기존 메타데이터를 지우지 않는다.
+    merge_mode = bool(merge_empty_only or getattr(row, "metadata_manual", False))
     
     def _script_counts(s: str) -> dict[str, int]:
         txt = (s or "").strip()
@@ -1139,7 +1202,7 @@ def upsert_jav_metadata(session, product_code, merge_empty_only=False, **kwargs)
     
     for key, value in kwargs.items():
         if hasattr(row, key):
-            if merge_empty_only:
+            if merge_mode:
                 # favorite 필드는 항상 최신값으로 덮어씀 (비어있음 여부 무관)
                 if key in {"favorite_score", "favorite_sources"}:
                     setattr(row, key, value)
@@ -1163,13 +1226,13 @@ def upsert_jav_metadata(session, product_code, merge_empty_only=False, **kwargs)
             
     # 레거시 필드 자동 동기화
     if 'title_ko' in kwargs:
-        if not (merge_empty_only and row.title and row.title.strip()):
+        if not (merge_mode and row.title and row.title.strip()):
             row.title = kwargs['title_ko']
     if 'synopsis_ko' in kwargs:
-        if not (merge_empty_only and row.synopsis and row.synopsis.strip()):
+        if not (merge_mode and row.synopsis and row.synopsis.strip()):
             row.synopsis = kwargs['synopsis_ko']
     if 'actors_ja' in kwargs:
-        if not (merge_empty_only and row.actors and row.actors.strip()):
+        if not (merge_mode and row.actors and row.actors.strip()):
             row.actors = kwargs['actors_ja']
         
     # 트랜잭션 경계는 호출자가 책임진다. (여기서는 PK 할당 등 필요 시 flush만)

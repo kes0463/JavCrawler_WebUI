@@ -345,6 +345,15 @@ def probe_video_duration_seconds(video_path: Path | str) -> float:
     if not vp.is_file():
         return 0.0
 
+    if vp.suffix.lower() == ".ts":
+        from javstory.library.playback_proxy import ensure_ffmpeg_processing_source
+
+        resolved = ensure_ffmpeg_processing_source(vp)
+        if resolved:
+            vp = resolved
+        else:
+            return 0.0
+
     # 1. ffprobe first: ``-v error`` suppresses common MP4/AAC metadata warnings.
     import subprocess
     import os
@@ -363,6 +372,7 @@ def probe_video_duration_seconds(video_path: Path | str) -> float:
         if os.name == 'nt':
             startupinfo = subprocess.STARTUPINFO()
             startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        probe_timeout = 120 if Path(video_path).suffix.lower() == ".ts" else 5
         cp = subprocess.run(
             cmd,
             capture_output=True,
@@ -370,7 +380,7 @@ def probe_video_duration_seconds(video_path: Path | str) -> float:
             encoding="utf-8",
             errors="replace",
             startupinfo=startupinfo,
-            timeout=5,
+            timeout=probe_timeout,
         )
         v = (cp.stdout or "").strip()
         if v:
@@ -439,8 +449,6 @@ def extract_snapshots_cuda(
         if use_hwaccel:
             cmd += ["-hwaccel", "auto"]
         cmd += [
-            "-ignore_editlist",
-            "1",
             "-err_detect",
             "ignore_err",
             "-ss",
@@ -544,7 +552,15 @@ def extract_snapshots_auto_adaptive(
     )
     if not quiet:
         print(f"[Snapshot] Processing: {video_path}")
-    dur = probe_video_duration_seconds(video_path)
+    vp = Path(video_path)
+    if vp.suffix.lower() == ".ts":
+        from javstory.library.playback_proxy import ensure_ffmpeg_processing_source
+
+        resolved = ensure_ffmpeg_processing_source(vp)
+        if not resolved:
+            return []
+        vp = resolved
+    dur = probe_video_duration_seconds(vp)
     if not quiet:
         print(f"[Snapshot] Duration detected: {dur}s")
 
@@ -552,7 +568,7 @@ def extract_snapshots_auto_adaptive(
 
     # ffmpeg 빠른 추출(병렬·순차·소프트 디코드 내장 폴백)
     res = extract_snapshots_cuda(
-        video_path,
+        vp,
         output_dir,
         target_count=count,
         prefix=prefix,
@@ -570,7 +586,7 @@ def extract_snapshots_auto_adaptive(
             f"[Snapshot] ffmpeg 스냅샷 부족({got}/{count}). OpenCV(CPU) 방식으로 폴백합니다."
         )
     return extract_snapshots_auto(
-        video_path,
+        vp,
         output_dir,
         target_count=count,
         prefix=prefix,

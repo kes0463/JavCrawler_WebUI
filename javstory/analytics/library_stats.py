@@ -13,6 +13,10 @@ from typing import List, Dict, Any
 
 _DIST_CACHE: tuple[float, Dict[str, List[Dict[str, Any]]]] | None = None
 _DIST_CACHE_TTL_SEC = 300.0
+_STATS_CACHE: tuple[float, Dict[str, Any]] | None = None
+_STATS_CACHE_TTL_SEC = 30.0
+
+from sqlalchemy import case, func
 
 from javstory.harvest.database import get_db_session_ctx, JAVMetadata, WatchHistory
 from javstory.analytics.preference_engine import get_recommendation_score
@@ -32,25 +36,40 @@ def get_library_stats() -> Dict[str, Any]:
             "total_watch_hours": float, # 총 시청 시간(시간)
         }
     """
+    global _STATS_CACHE
+    now = time.time()
+    if _STATS_CACHE and (now - _STATS_CACHE[0]) < _STATS_CACHE_TTL_SEC:
+        return dict(_STATS_CACHE[1])
+
     with get_db_session_ctx() as session:
-        total = session.query(JAVMetadata).count()
-        histories = session.query(WatchHistory).all()
+        total = session.query(func.count(JAVMetadata.id)).scalar() or 0
+        watched_count, completed, total_watch_sec, rated_count, rating_sum = session.query(
+            func.count(WatchHistory.id),
+            func.sum(case((WatchHistory.is_completed.is_(True), 1), else_=0)),
+            func.sum(func.coalesce(WatchHistory.watch_duration, 0)),
+            func.sum(case((WatchHistory.rating > 0, 1), else_=0)),
+            func.sum(case((WatchHistory.rating > 0, WatchHistory.rating), else_=0)),
+        ).one()
 
-        watched_count = len(histories)
-        completed = sum(1 for h in histories if h.is_completed)
-        total_watch_sec = sum(h.watch_duration or 0 for h in histories)
-        rated = [h.rating for h in histories if h.rating and h.rating > 0]
-        avg_rating = round(sum(rated) / len(rated), 2) if rated else 0.0
+        watched_count = int(watched_count or 0)
+        completed = int(completed or 0)
+        total_watch_sec = int(total_watch_sec or 0)
+        rated_count = int(rated_count or 0)
+        rating_sum = int(rating_sum or 0)
+        avg_rating = round(rating_sum / rated_count, 2) if rated_count > 0 else 0.0
 
-        return {
-            "total": total,
+        result = {
+            "total": int(total),
             "completed": completed,
             "completion_rate": round(completed / watched_count, 4) if watched_count > 0 else 0.0,
             "avg_rating": avg_rating,
-            "rated_count": len(rated),
+            "rated_count": rated_count,
             "watched_count": watched_count,
             "total_watch_hours": round(total_watch_sec / 3600, 1),
         }
+
+    _STATS_CACHE = (now, result)
+    return dict(result)
 
 
 def get_today_recommendation(limit: int = 6) -> List[Dict[str, Any]]:

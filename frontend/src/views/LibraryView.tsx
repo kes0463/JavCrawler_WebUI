@@ -1,57 +1,242 @@
 import { useState, useEffect, useCallback, useRef } from "react";
-import { Search, SlidersHorizontal, FolderOpen, X, RefreshCw } from "lucide-react";
+import { Search, SlidersHorizontal, FolderOpen, FolderX, RefreshCw, Subtitles, Layers } from "lucide-react";
 import { cn } from "@/lib/utils";
-import { fetchLibrary, fetchLibraryStats, coverUrl } from "@/api/library";
+import { fetchLibrary, fetchLibraryStats, coverUrl, previewUrl, openLibraryFolder, hasRealLibraryMetadata } from "@/api/library";
 import type { LibraryItem, LibraryStats, LibraryQuery } from "@/api/library";
 import { GlassCard } from "@/components/ui/GlassCard";
 import { Skeleton } from "@/components/ui/Skeleton";
+import { PosterCard } from "@/components/library/PosterCard";
+import { LibraryDetailPanel } from "@/components/library/LibraryDetailPanel";
+import { useToast } from "@/contexts/ToastContext";
+import { usePlayer } from "@/contexts/PlayerContext";
+import { useNavigation } from "@/contexts/NavigationContext";
+import { getScrollableAncestor, useInfiniteScrollNearEnd } from "@/hooks/useGlobalDragScroll";
+import {
+  isLibrarySessionFresh,
+  loadLibrarySession,
+  useLibrarySessionCache,
+} from "@/hooks/useLibrarySessionCache";
 
 const SORT_OPTIONS = [
   { label: "최근 수정", value: "updated_at" },
   { label: "발매일", value: "release_date" },
   { label: "품번", value: "product_code" },
   { label: "제목", value: "title_ko" },
+  { label: "좋아요", value: "favorite_score" },
 ] as const;
 
+const LIBRARY_PAGE_SIZE = 64;
+const LIBRARY_PREFETCH_MARGIN_PX = 1600;
+const STATS_SESSION_KEY = "javstory.library.stats.v1";
+
+const DEFAULT_QUERY: LibraryQuery = {
+  q: "",
+  page: 1,
+  per_page: LIBRARY_PAGE_SIZE,
+  sort: "updated_at",
+  order: "desc",
+};
+
+function loadStatsSession(): LibraryStats | null {
+  if (typeof window === "undefined") return null;
+  try {
+    const raw = sessionStorage.getItem(STATS_SESSION_KEY);
+    if (!raw) return null;
+    return JSON.parse(raw) as LibraryStats;
+  } catch {
+    return null;
+  }
+}
+
+function saveStatsSession(stats: LibraryStats) {
+  if (typeof window === "undefined") return;
+  try {
+    sessionStorage.setItem(STATS_SESSION_KEY, JSON.stringify(stats));
+  } catch {
+    /* ignore */
+  }
+}
+
+function bootFromSession() {
+  const session = loadLibrarySession();
+  if (!session?.items.length) {
+    return {
+      query: DEFAULT_QUERY,
+      items: [] as LibraryItem[],
+      total: 0,
+      scrollTop: 0,
+      fromSession: false,
+    };
+  }
+  return {
+    query: { ...DEFAULT_QUERY, ...session.query, page: session.query.page ?? 1 },
+    items: session.items,
+    total: session.total,
+    scrollTop: session.scrollTop,
+    fromSession: isLibrarySessionFresh(session, session.query),
+  };
+}
+
 export default function LibraryView() {
-  const [query, setQuery] = useState<LibraryQuery>({
-    q: "", page: 1, per_page: 48, sort: "updated_at", order: "desc",
-  });
-  const [items, setItems] = useState<LibraryItem[]>([]);
-  const [total, setTotal] = useState(0);
-  const [stats, setStats] = useState<LibraryStats | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [statsLoading, setStatsLoading] = useState(true);
+  const boot = useRef(bootFromSession()).current;
+  const { showToast } = useToast();
+  const { openPlayer } = usePlayer();
+  const { libraryDetailSku, closeLibraryDetail, openActressByName, currentView } = useNavigation();
+
+  const [query, setQuery] = useState<LibraryQuery>(boot.query);
+  const [items, setItems] = useState<LibraryItem[]>(boot.items);
+  const [total, setTotal] = useState(boot.total);
+  const [stats, setStats] = useState<LibraryStats | null>(() => loadStatsSession());
+  const [loading, setLoading] = useState(!boot.items.length);
+  const [statsLoading, setStatsLoading] = useState(!loadStatsSession());
+  const [statsRefreshing, setStatsRefreshing] = useState(false);
   const [selectedCode, setSelectedCode] = useState<string | null>(null);
 
   const searchTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const appendRef = useRef(false);
+  const apiWarnedRef = useRef(false);
+  const loadMoreSentinelRef = useRef<HTMLDivElement | null>(null);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [scrollRoot, setScrollRoot] = useState<HTMLElement | null>(null);
+  const [coverRev, setCoverRev] = useState<Record<string, number>>({});
+  const skipInitialFetchRef = useRef(boot.fromSession);
+  const pendingScrollRef = useRef(boot.scrollTop);
+  const suppressCardAnimRef = useRef(boot.fromSession);
+  const queryFilterKeyRef = useRef(
+    JSON.stringify({ ...query, page: undefined }),
+  );
 
-  const refreshStats = useCallback(() => {
-    setStatsLoading(true);
+  const { clearSession, restoreScroll } = useLibrarySessionCache(
+    query,
+    items,
+    total,
+    scrollRoot,
+  );
+
+  const refreshStats = useCallback((showSkeleton = true) => {
+    if (showSkeleton && !stats) setStatsLoading(true);
+    else setStatsRefreshing(true);
     fetchLibraryStats()
-      .then(setStats)
-      .finally(() => setStatsLoading(false));
-  }, []);
-
-  useEffect(() => { refreshStats(); }, [refreshStats]);
-
-  // 목록 로드
-  const loadItems = useCallback((q: LibraryQuery, append = false) => {
-    setLoading(true);
-    fetchLibrary(q)
-      .then(({ items: newItems, total: t }) => {
-        setItems(prev => append ? [...prev, ...newItems] : newItems);
-        setTotal(t);
+      .then(next => {
+        setStats(next);
+        saveStatsSession(next);
       })
-      .finally(() => setLoading(false));
-  }, []);
+      .finally(() => {
+        setStatsLoading(false);
+        setStatsRefreshing(false);
+      });
+  }, [stats]);
+
+  useEffect(() => {
+    const run = () => refreshStats(!stats);
+    if (typeof requestIdleCallback !== "undefined") {
+      const id = requestIdleCallback(run);
+      return () => cancelIdleCallback(id);
+    }
+    const t = window.setTimeout(run, 0);
+    return () => window.clearTimeout(t);
+  }, [refreshStats, stats]);
+
+  useEffect(() => {
+    if (libraryDetailSku) setSelectedCode(libraryDetailSku);
+  }, [libraryDetailSku]);
+
+  const handleCloseDetail = useCallback(() => {
+    setSelectedCode(null);
+    closeLibraryDetail();
+  }, [closeLibraryDetail]);
+
+  const handleActorClick = useCallback(async (name: string) => {
+    try {
+      await openActressByName(name);
+    } catch (e) {
+      showToast(e instanceof Error ? e.message : "배우 정보를 불러오지 못했습니다.", "error");
+    }
+  }, [openActressByName, showToast]);
+
+  const loadItems = useCallback((
+    q: LibraryQuery,
+    append = false,
+    opts?: { silent?: boolean },
+  ) => {
+    const silent = opts?.silent ?? false;
+    if (!silent) {
+      if (append) setLoadingMore(true);
+      else setLoading(true);
+    }
+
+    const apiQuery: LibraryQuery = {
+      ...q,
+      include_total: append ? false : true,
+    };
+
+    fetchLibrary(apiQuery)
+      .then(({ items: newItems, total: t }) => {
+        if (
+          !append && !apiWarnedRef.current && newItems.length > 0
+          && !("favorite_score" in newItems[0])
+        ) {
+          apiWarnedRef.current = true;
+          showToast(
+            "레거시 API에 연결된 것 같습니다. start_web.bat으로 webapi를 재시작해 주세요.",
+            "warn",
+          );
+        }
+
+        if (append) {
+          setItems(prev => [...prev, ...newItems]);
+          if (t > 0) setTotal(t);
+        } else if (silent && (q.page ?? 1) === 1) {
+          setItems(prev => {
+            if (prev.length === 0) return newItems;
+            const next = [...prev];
+            newItems.forEach((item, i) => {
+              next[i] = item;
+            });
+            return next.length >= newItems.length ? next : newItems;
+          });
+          if (t > 0) setTotal(t);
+        } else {
+          setItems(newItems);
+          setTotal(t);
+        }
+      })
+      .catch(err => {
+        if (!append && !silent) {
+          setItems([]);
+          setTotal(0);
+        }
+        if (!silent) {
+          showToast(err instanceof Error ? err.message : "라이브러리 목록을 불러오지 못했습니다.", "error");
+        }
+      })
+      .finally(() => {
+        setLoading(false);
+        setLoadingMore(false);
+      });
+  }, [showToast]);
 
   useEffect(() => {
     const append = appendRef.current;
     appendRef.current = false;
+
+    const filterKey = JSON.stringify({ ...query, page: undefined });
+    const filterChanged = filterKey !== queryFilterKeyRef.current;
+    if (filterChanged) {
+      queryFilterKeyRef.current = filterKey;
+      clearSession();
+      skipInitialFetchRef.current = false;
+      suppressCardAnimRef.current = false;
+    }
+
+    if (skipInitialFetchRef.current) {
+      skipInitialFetchRef.current = false;
+      loadItems({ ...query, page: 1 }, false, { silent: true });
+      return;
+    }
+
     loadItems(query, append);
-  }, [query, loadItems]);
+  }, [query, loadItems, clearSession]);
 
   const [searchText, setSearchText] = useState(query.q ?? "");
 
@@ -63,21 +248,106 @@ export default function LibraryView() {
     }, 350);
   };
 
-  const handleLoadMore = () => {
+  const requestLoadMore = useCallback(() => {
+    if (loading || loadingMore || appendRef.current) return;
+    if (items.length >= total) return;
     appendRef.current = true;
     setQuery(q => ({ ...q, page: (q.page ?? 1) + 1 }));
-  };
+  }, [loading, loadingMore, items.length, total]);
 
-  const hasMore = items.length < total;
+  const hasMoreItems = !loading && items.length < total;
+  useInfiniteScrollNearEnd(scrollRoot, hasMoreItems, requestLoadMore);
+
+  useEffect(() => {
+    if (currentView !== "library") return;
+    const sentinel = loadMoreSentinelRef.current;
+    if (!sentinel) return;
+    setScrollRoot(getScrollableAncestor(sentinel));
+  }, [currentView, items.length, loading]);
+
+  useEffect(() => {
+    if (!scrollRoot || currentView !== "library") return;
+    scrollRoot.dataset.infiniteNearEndPx = String(LIBRARY_PREFETCH_MARGIN_PX);
+    return () => {
+      delete scrollRoot.dataset.infiniteNearEndPx;
+    };
+  }, [scrollRoot, currentView]);
+
+  useEffect(() => {
+    if (!scrollRoot || currentView !== "library") return;
+    const el = loadMoreSentinelRef.current;
+    if (!el) return;
+
+    const observer = new IntersectionObserver(
+      ([entry]) => {
+        if (entry?.isIntersecting) requestLoadMore();
+      },
+      { root: scrollRoot, rootMargin: `${LIBRARY_PREFETCH_MARGIN_PX}px`, threshold: 0 },
+    );
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [requestLoadMore, items.length, total, scrollRoot, currentView]);
+
+  useEffect(() => {
+    if (currentView !== "library" || loading || loadingMore || appendRef.current) return;
+    if (items.length >= total || total === 0) return;
+    const el = loadMoreSentinelRef.current;
+    const root = scrollRoot;
+    if (!el || !root) return;
+    const rootRect = root.getBoundingClientRect();
+    const elRect = el.getBoundingClientRect();
+    if (elRect.top <= rootRect.bottom + LIBRARY_PREFETCH_MARGIN_PX) {
+      requestLoadMore();
+    }
+  }, [currentView, items.length, loading, loadingMore, total, scrollRoot, requestLoadMore]);
+
+  useEffect(() => {
+    if (currentView !== "library" || !scrollRoot) return;
+    if (pendingScrollRef.current > 0) {
+      restoreScroll(pendingScrollRef.current, scrollRoot);
+      pendingScrollRef.current = 0;
+    }
+  }, [currentView, scrollRoot, restoreScroll, items.length]);
+
+  const handlePlay = useCallback((productCode: string) => {
+    void openPlayer(productCode);
+  }, [openPlayer]);
+
+  const handleDetailSaved = useCallback((updated: LibraryItem) => {
+    const pc = updated.product_code.toUpperCase();
+    setCoverRev(prev => ({ ...prev, [pc]: Date.now() }));
+    setItems(prev =>
+      prev.map(item =>
+        item.product_code.toUpperCase() === pc
+          ? { ...item, ...updated }
+          : item,
+      ),
+    );
+    refreshStats(false);
+  }, [refreshStats]);
+
+  const coverCacheKey = useCallback((item: LibraryItem) => {
+    const pc = item.product_code.toUpperCase();
+    return coverRev[pc] ?? item.updated_at ?? item.cover_image_local_path ?? undefined;
+  }, [coverRev]);
+
+  const handleOpenFolder = useCallback((productCode: string) => {
+    openLibraryFolder(productCode)
+      .then(res => showToast(`폴더 열림: ${res.path}`, "success"))
+      .catch(err => showToast(err instanceof Error ? err.message : "폴더 열기 실패", "error"));
+  }, [showToast]);
+
+  const updateQueryFilter = useCallback((patch: Partial<LibraryQuery>) => {
+    setQuery(q => ({ ...q, ...patch, page: 1 }));
+  }, []);
 
   return (
     <div className="space-y-5">
 
-      {/* ── 통계 바 ── */}
       <div className="flex items-center gap-3">
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 flex-1">
-          {statsLoading
-            ? [0,1,2,3].map(i => <GlassCard key={i}><Skeleton className="h-8 w-full" /></GlassCard>)
+          {statsLoading && !stats
+            ? [0, 1, 2, 3].map(i => <GlassCard key={i}><Skeleton className="h-8 w-full" /></GlassCard>)
             : [
                 { label: "전체", value: stats?.total, color: "text-white" },
                 { label: "메타데이터 완료", value: stats?.with_metadata, color: "text-emerald-400" },
@@ -85,33 +355,32 @@ export default function LibraryView() {
                 { label: "미수집", value: stats?.without_metadata, color: "text-amber-400" },
               ].map(({ label, value, color }) => (
                 <GlassCard key={label} className="animate-scale-in">
-                  <p className="text-[11px] text-muted-foreground">{label}</p>
-                  <p className={cn("text-2xl font-bold tabular-nums mt-0.5", color)}>
+                  <p className="text-sm text-muted-foreground">{label}</p>
+                  <p className={cn("text-3xl font-bold tabular-nums mt-0.5", color)}>
                     {value?.toLocaleString() ?? "—"}
                   </p>
                 </GlassCard>
               ))}
         </div>
         <button
-          onClick={refreshStats}
+          onClick={() => refreshStats(false)}
           title="통계 새로고침"
           className="h-9 w-9 shrink-0 rounded-xl flex items-center justify-center bg-bg-surface border border-white/[0.08] text-muted-foreground hover:text-white hover:border-white/[0.16] transition-all"
         >
-          <RefreshCw className={cn("w-3.5 h-3.5", statsLoading && "animate-spin")} />
+          <RefreshCw className={cn("w-3.5 h-3.5", statsRefreshing && "animate-spin")} />
         </button>
       </div>
 
-      {/* ── 검색 + 필터 ── */}
       <div className="flex flex-wrap items-center gap-2">
         <div className="relative flex-1 min-w-[200px]">
-          <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-muted-foreground" />
+          <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
           <input
             type="text"
             placeholder="품번, 제목, 배우 검색..."
             value={searchText}
             onChange={e => handleSearch(e.target.value)}
             className={cn(
-              "w-full h-9 pl-9 pr-4 text-sm rounded-xl",
+              "w-full h-10 pl-10 pr-4 text-base rounded-xl",
               "bg-bg-surface border border-white/[0.08] text-white placeholder:text-muted-foreground",
               "focus:outline-none focus:border-accent/50 focus:ring-1 focus:ring-accent/30",
               "transition-all duration-150",
@@ -119,11 +388,10 @@ export default function LibraryView() {
           />
         </div>
 
-        {/* 정렬 */}
         <select
           value={query.sort}
-          onChange={e => setQuery(q => ({ ...q, sort: e.target.value as LibraryQuery["sort"], page: 1 }))}
-          className="h-9 px-3 text-sm rounded-xl bg-bg-surface border border-white/[0.08] text-[#c8c8e0] focus:outline-none"
+          onChange={e => updateQueryFilter({ sort: e.target.value as LibraryQuery["sort"] })}
+          className="h-10 px-3 text-base rounded-xl bg-bg-surface border border-white/[0.08] text-[#c8c8e0] focus:outline-none"
         >
           {SORT_OPTIONS.map(o => (
             <option key={o.value} value={o.value}>{o.label}</option>
@@ -131,18 +399,19 @@ export default function LibraryView() {
         </select>
 
         <button
-          onClick={() => setQuery(q => ({ ...q, order: q.order === "desc" ? "asc" : "desc", page: 1 }))}
-          className="h-9 px-3 text-sm rounded-xl bg-bg-surface border border-white/[0.08] text-[#c8c8e0] hover:text-white transition-colors"
+          onClick={() => updateQueryFilter({ order: query.order === "desc" ? "asc" : "desc" })}
+          className="h-10 px-3 text-base rounded-xl bg-bg-surface border border-white/[0.08] text-[#c8c8e0] hover:text-white transition-colors"
         >
           {query.order === "desc" ? "↓ 내림차순" : "↑ 오름차순"}
         </button>
 
-        {/* 필터 토글 */}
         <button
-          onClick={() => setQuery(q => ({ ...q, has_folder: q.has_folder === true ? undefined : true, page: 1 }))}
+          onClick={() => updateQueryFilter({
+            has_folder: query.has_folder === true ? undefined : true,
+          })}
           className={cn(
-            "h-9 px-3 text-sm rounded-xl border transition-colors flex items-center gap-1.5",
-            query.has_folder
+            "h-10 px-3 text-base rounded-xl border transition-colors flex items-center gap-1.5",
+            query.has_folder === true
               ? "bg-indigo-500/20 border-indigo-500/40 text-indigo-300"
               : "bg-bg-surface border-white/[0.08] text-muted-foreground hover:text-white",
           )}
@@ -152,13 +421,26 @@ export default function LibraryView() {
         </button>
 
         <button
-          onClick={() => setQuery(q => ({
-            ...q,
-            has_metadata: q.has_metadata === false ? undefined : false,
-            page: 1,
-          }))}
+          onClick={() => updateQueryFilter({
+            has_folder: query.has_folder === false ? undefined : false,
+          })}
           className={cn(
-            "h-9 px-3 text-sm rounded-xl border transition-colors flex items-center gap-1.5",
+            "h-10 px-3 text-base rounded-xl border transition-colors flex items-center gap-1.5",
+            query.has_folder === false
+              ? "bg-orange-500/20 border-orange-500/40 text-orange-300"
+              : "bg-bg-surface border-white/[0.08] text-muted-foreground hover:text-white",
+          )}
+        >
+          <FolderX className="w-3.5 h-3.5" />
+          폴더 없음
+        </button>
+
+        <button
+          onClick={() => updateQueryFilter({
+            has_metadata: query.has_metadata === false ? undefined : false,
+          })}
+          className={cn(
+            "h-10 px-3 text-base rounded-xl border transition-colors flex items-center gap-1.5",
             query.has_metadata === false
               ? "bg-amber-500/20 border-amber-500/40 text-amber-300"
               : "bg-bg-surface border-white/[0.08] text-muted-foreground hover:text-white",
@@ -168,196 +450,107 @@ export default function LibraryView() {
           미수집만
         </button>
 
-        {/* 총 건수 */}
-        <span className="text-xs text-muted-foreground ml-auto">
-          {total.toLocaleString()}건
-        </span>
-      </div>
-
-      {/* ── 그리드 ── */}
-      <div className="grid grid-cols-4 sm:grid-cols-6 md:grid-cols-8 lg:grid-cols-10 gap-2">
-        {items.map((item, i) => (
-          <PosterCard
-            key={item.id}
-            item={item}
-            delay={(i % 48) * 15}
-            onClick={() => setSelectedCode(item.product_code)}
-          />
-        ))}
-        {loading && [0,1,2,3,4,5,6,7].map(i => (
-          <div key={i} className="aspect-[2/3] rounded-xl bg-bg-card border border-white/[0.06] animate-pulse" />
-        ))}
-      </div>
-
-      {/* ── 더 보기 ── */}
-      {!loading && hasMore && (
-        <div className="flex justify-center pt-2">
-          <button
-            onClick={handleLoadMore}
-            className="px-6 py-2 text-sm rounded-xl bg-bg-surface border border-white/[0.08] text-muted-foreground hover:text-white hover:border-white/[0.16] transition-all"
-          >
-            더 보기 ({(total - items.length).toLocaleString()}건 남음)
-          </button>
-        </div>
-      )}
-
-      {/* ── 상세 패널 ── */}
-      {selectedCode && (
-        <DetailPanel code={selectedCode} onClose={() => setSelectedCode(null)} />
-      )}
-    </div>
-  );
-}
-
-// ── PosterCard ────────────────────────────────────────────────────
-
-function PosterCard({
-  item,
-  delay,
-  onClick,
-}: {
-  item: LibraryItem;
-  delay: number;
-  onClick: () => void;
-}) {
-  const [imgError, setImgError] = useState(false);
-
-  return (
-    <button
-      onClick={onClick}
-      style={{ animationDelay: `${delay}ms` }}
-      className={cn(
-        "relative aspect-[2/3] rounded-xl border border-white/[0.06]",
-        "bg-bg-card hover:border-white/[0.14] hover:scale-[1.03]",
-        "transition-all duration-150 animate-scale-in overflow-hidden",
-        "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400/50",
-      )}
-    >
-      {/* 표지 이미지 */}
-      {item.product_code && !imgError ? (
-        <img
-          src={coverUrl(item.product_code)}
-          alt={item.product_code}
-          loading="lazy"
-          onError={() => setImgError(true)}
-          className="absolute inset-0 w-full h-full object-cover"
-        />
-      ) : null}
-
-      {/* 폴백 / 오버레이 */}
-      <div className={cn(
-        "absolute inset-0 flex flex-col items-center justify-end p-1.5",
-        "bg-gradient-to-t from-black/80 via-black/20 to-transparent",
-      )}>
-        <span className="text-[8px] font-mono font-bold text-indigo-300 text-center leading-tight">
-          {item.product_code}
-        </span>
-        {!item.title_ko && (
-          <span className="text-[7px] text-amber-400 mt-0.5">미수집</span>
-        )}
-      </div>
-
-      {/* 폴더 있음 표시 */}
-      {item.folder_path && (
-        <div className="absolute top-1 right-1 w-3 h-3 rounded-full bg-indigo-500/70 flex items-center justify-center">
-          <FolderOpen className="w-2 h-2 text-white" />
-        </div>
-      )}
-    </button>
-  );
-}
-
-// ── DetailPanel ───────────────────────────────────────────────────
-
-import { fetchLibraryDetail } from "@/api/library";
-import type { LibraryItemDetail } from "@/api/library";
-
-function DetailPanel({ code, onClose }: { code: string; onClose: () => void }) {
-  const [detail, setDetail] = useState<LibraryItemDetail | null>(null);
-  const [loading, setLoading] = useState(true);
-
-  useEffect(() => {
-    setLoading(true);
-    fetchLibraryDetail(code)
-      .then(setDetail)
-      .finally(() => setLoading(false));
-  }, [code]);
-
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm animate-fade-in">
-      <GlassCard
-        variant="strong"
-        className="relative w-full max-w-2xl max-h-[85vh] overflow-y-auto animate-scale-in"
-      >
         <button
-          onClick={onClose}
-          className="absolute top-4 right-4 w-7 h-7 rounded-full bg-white/[0.06] hover:bg-white/[0.12] flex items-center justify-center transition-colors"
+          onClick={() => updateQueryFilter({
+            has_subtitle: query.has_subtitle ? undefined : true,
+          })}
+          className={cn(
+            "h-10 px-3 text-base rounded-xl border transition-colors flex items-center gap-1.5",
+            query.has_subtitle
+              ? "bg-emerald-500/20 border-emerald-500/40 text-emerald-300"
+              : "bg-bg-surface border-white/[0.08] text-muted-foreground hover:text-white",
+          )}
         >
-          <X className="w-3.5 h-3.5" />
+          <Subtitles className="w-3.5 h-3.5" />
+          자막·자체자막
         </button>
 
-        {loading ? (
-          <div className="space-y-3">
-            <Skeleton className="h-6 w-48" />
-            <Skeleton className="h-4 w-full" />
-            <Skeleton className="h-4 w-3/4" />
+        <button
+          onClick={() => updateQueryFilter({
+            has_mosaic_removed: query.has_mosaic_removed ? undefined : true,
+          })}
+          className={cn(
+            "h-10 px-3 text-base rounded-xl border transition-colors flex items-center gap-1.5",
+            query.has_mosaic_removed
+              ? "bg-cyan-500/20 border-cyan-500/40 text-cyan-300"
+              : "bg-bg-surface border-white/[0.08] text-muted-foreground hover:text-white",
+          )}
+        >
+          <Layers className="w-3.5 h-3.5" />
+          모자이크 제거
+        </button>
+
+        <span className="text-sm text-muted-foreground ml-auto tabular-nums">
+          {items.length.toLocaleString()} / {total.toLocaleString()}건
+        </span>
+      </div>
+
+      <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-4 w-full">
+        {items.map((item, i) => {
+          const hasMeta = hasRealLibraryMetadata(item);
+          const delay =
+            !suppressCardAnimRef.current
+            && items.length <= LIBRARY_PAGE_SIZE
+            && i < 48
+              ? (i % 48) * 15
+              : 0;
+          return (
+          <PosterCard
+            key={`${item.id}-${item.cover_image_local_path ?? ""}-${coverRev[item.product_code.toUpperCase()] ?? ""}`}
+            productCode={item.product_code}
+            coverSrc={item.product_code ? coverUrl(item.product_code, coverCacheKey(item)) : undefined}
+            previewSrc={item.has_preview && item.product_code ? previewUrl(item.product_code, item.updated_at ?? "") : undefined}
+            previewMedia={item.preview_media ?? undefined}
+            hasPreview={!!item.has_preview}
+            hasFolder={!!item.folder_path}
+            hasMeta={hasMeta}
+            title={hasMeta ? item.title_ko : null}
+            actors={item.actors_ko || item.actors_ja}
+            genres={item.genres_ko}
+            sceneCount={item.scene_count ?? 0}
+            favoriteScore={Number(item.favorite_score) || 0}
+            hasSubtitle={!!item.has_subtitle}
+            hasHardcodedSubtitle={!!item.has_hardcoded_subtitle}
+            hasMosaicRemoved={!!item.has_mosaic_removed}
+            delay={delay}
+            onClick={() => setSelectedCode(item.product_code)}
+            onPlay={item.folder_path ? () => handlePlay(item.product_code) : undefined}
+            onOpenFolder={() => handleOpenFolder(item.product_code)}
+            onActorClick={handleActorClick}
+          />
+          );
+        })}
+        {loading && items.length === 0 && [0, 1, 2, 3, 4, 5, 6].map(i => (
+          <div key={i} className="rounded-xl border border-white/[0.06] overflow-hidden animate-pulse">
+            <div className="aspect-[2/3] bg-bg-card" />
+            <div className="h-24 bg-bg-panel border-t border-white/[0.06]" />
           </div>
-        ) : detail ? (
-          <div className="flex gap-5">
-            {/* 표지 */}
-            <div className="w-32 shrink-0">
-              <img
-                src={coverUrl(detail.product_code)}
-                alt={detail.product_code}
-                onError={e => { (e.target as HTMLImageElement).style.display = "none"; }}
-                className="w-full rounded-lg object-cover"
-              />
-            </div>
+        ))}
+      </div>
 
-            {/* 정보 */}
-            <div className="flex-1 space-y-3 min-w-0">
-              <div>
-                <p className="text-[10px] font-mono text-indigo-400">{detail.product_code}</p>
-                <h2 className="text-base font-semibold text-white leading-snug mt-0.5">
-                  {detail.title_ko || detail.title_ja || "—"}
-                </h2>
-                {detail.title_ja && detail.title_ko && (
-                  <p className="text-xs text-muted-foreground mt-0.5 leading-snug">{detail.title_ja}</p>
-                )}
-              </div>
+      <div ref={loadMoreSentinelRef} className="h-1" aria-hidden />
 
-              <div className="grid grid-cols-2 gap-x-4 gap-y-1.5 text-xs">
-                <InfoRow label="배우" value={detail.actors_ko || detail.actors_ja} />
-                <InfoRow label="장르" value={detail.genres_ko || detail.genres_ja} />
-                <InfoRow label="제작사" value={detail.maker_ko || detail.maker_ja} />
-                <InfoRow label="발매일" value={detail.release_date} />
-                <InfoRow label="폴더" value={detail.folder_path} mono />
-              </div>
+      {loadingMore && (
+        <div className="flex justify-center py-4">
+          <RefreshCw className="w-5 h-5 text-muted-foreground animate-spin" />
+        </div>
+      )}
 
-              {detail.synopsis_ko && (
-                <div>
-                  <p className="text-[10px] text-muted-foreground mb-1">시놉시스</p>
-                  <p className="text-xs text-[#c8c8e0] leading-relaxed line-clamp-6">
-                    {detail.synopsis_ko}
-                  </p>
-                </div>
-              )}
-            </div>
-          </div>
-        ) : (
-          <p className="text-muted-foreground text-sm">불러오기 실패</p>
-        )}
-      </GlassCard>
-    </div>
-  );
-}
+      {!loading && !loadingMore && items.length >= total && items.length > 0 && (
+        <p className="text-center text-sm text-muted-foreground py-2">
+          전체 {total.toLocaleString()}건 표시됨
+        </p>
+      )}
 
-function InfoRow({ label, value, mono = false }: { label: string; value?: string | null; mono?: boolean }) {
-  if (!value) return null;
-  return (
-    <div className="col-span-2">
-      <span className="text-muted-foreground">{label}: </span>
-      <span className={cn("text-[#c8c8e0]", mono && "font-mono text-[10px]")}>{value}</span>
+      {selectedCode && (
+        <LibraryDetailPanel
+          code={selectedCode}
+          onClose={handleCloseDetail}
+          onPlay={() => handlePlay(selectedCode)}
+          onSaved={handleDetailSaved}
+          onActorClick={handleActorClick}
+        />
+      )}
     </div>
   );
 }

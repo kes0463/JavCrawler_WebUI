@@ -33,7 +33,7 @@ export function StatusBadge({ status, label, showDot = true, className }: Status
   return (
     <span
       className={cn(
-        "inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full border text-[11px] font-medium",
+        "inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full border text-sm font-medium",
         cfg.classes,
         className,
       )}

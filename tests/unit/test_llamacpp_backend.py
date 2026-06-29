@@ -310,3 +310,29 @@ def test_build_server_argv_qwen14_ctx(monkeypatch, tmp_path):
     assert "--parallel" in argv
     idx = argv.index("--parallel")
     assert argv[idx + 1] == "1"
+
+
+def test_maybe_idle_shutdown_after_timeout(monkeypatch):
+    import javstory.llm.llamacpp_backend as backend
+    import time
+
+    calls: list[int] = []
+
+    monkeypatch.setenv("JAVSTORY_LLAMACPP_IDLE_SHUTDOWN", "1")
+    monkeypatch.setenv("JAVSTORY_LLAMACPP_IDLE_TIMEOUT_SEC", "30")
+    monkeypatch.setattr(
+        backend,
+        "_kill_port_owner_windows",
+        lambda port, **kw: calls.append(port) or True,
+    )
+    monkeypatch.setattr(backend, "_port_is_listening_netstat", lambda _port: True)
+
+    backend._server_proc = None
+    backend._idle_managed_port = 8081
+    backend._active_preset_id = "gemma-4-e4b"
+    backend._active_requests = 0
+    backend._last_activity_at = time.time() - 120
+
+    assert backend._maybe_idle_shutdown(logger_func=lambda _m: None) is True
+    assert calls == [8081]
+    assert backend._idle_managed_port is None

@@ -33,6 +33,10 @@ Item {
     // 스킵 감지용
     property int _prevPosition: 0
     property bool _isUserSeeking: false
+  // 오른쪽 Ctrl 등 modifiers 미반영 환경용 래치
+    property int _ctrlHeldCount: 0
+    property int _altHeldCount: 0
+    property int _shiftHeldCount: 0
 
     // 자막
     property var subtitleTracks: []       // [{path, label, filename}]
@@ -87,6 +91,9 @@ Item {
         case Qt.Key_P:
         case Qt.Key_M:
         case Qt.Key_Home:
+        case Qt.Key_Control:
+        case Qt.Key_Alt:
+        case Qt.Key_Shift:
         case Qt.Key_1: case Qt.Key_2: case Qt.Key_3: case Qt.Key_4: case Qt.Key_5:
         case Qt.Key_6: case Qt.Key_7: case Qt.Key_8: case Qt.Key_9:
             event.accepted = true
@@ -97,6 +104,24 @@ Item {
     }
 
     Keys.onPressed: function(event) {
+        if (event.key === Qt.Key_Control) {
+            if (!event.isAutoRepeat)
+                playerRoot._ctrlHeldCount++
+            event.accepted = true
+            return
+        }
+        if (event.key === Qt.Key_Alt) {
+            if (!event.isAutoRepeat)
+                playerRoot._altHeldCount++
+            event.accepted = true
+            return
+        }
+        if (event.key === Qt.Key_Shift) {
+            if (!event.isAutoRepeat)
+                playerRoot._shiftHeldCount++
+            event.accepted = true
+            return
+        }
         switch (event.key) {
         case Qt.Key_Space:
             if (mediaPlayer.playbackState === MediaPlayer.PlayingState) {
@@ -119,28 +144,10 @@ Item {
         case Qt.Key_P:
             playerRoot.isPip = !playerRoot.isPip; event.accepted = true; break
         case Qt.Key_Left:
-            if (event.modifiers & Qt.ShiftModifier) {
-                mediaPlayer.setPosition(Math.max(0, mediaPlayer.position - 30000))
-                showOsd("◀◀  -30초")
-            } else if (event.modifiers & Qt.ControlModifier) {
-                mediaPlayer.setPosition(Math.max(0, mediaPlayer.position - 60000))
-                showOsd("◀◀◀  -1분")
-            } else {
-                mediaPlayer.setPosition(Math.max(0, mediaPlayer.position - 5000))
-                showOsd("◀  -5초")
-            }
+            playerRoot._seekByArrow(event, false)
             event.accepted = true; break
         case Qt.Key_Right:
-            if (event.modifiers & Qt.ShiftModifier) {
-                mediaPlayer.setPosition(Math.min(mediaPlayer.duration, mediaPlayer.position + 30000))
-                showOsd("+30초  ▶▶")
-            } else if (event.modifiers & Qt.ControlModifier) {
-                mediaPlayer.setPosition(Math.min(mediaPlayer.duration, mediaPlayer.position + 60000))
-                showOsd("+1분  ▶▶▶")
-            } else {
-                mediaPlayer.setPosition(Math.min(mediaPlayer.duration, mediaPlayer.position + 5000))
-                showOsd("+5초  ▶")
-            }
+            playerRoot._seekByArrow(event, true)
             event.accepted = true; break
         case Qt.Key_Up:
             volumeSlider.value = Math.min(1.0, volumeSlider.value + 0.05)
@@ -169,10 +176,24 @@ Item {
         }
     }
 
+    Keys.onReleased: function(event) {
+        if (event.key === Qt.Key_Control && playerRoot._ctrlHeldCount > 0)
+            playerRoot._ctrlHeldCount--
+        else if (event.key === Qt.Key_Alt && playerRoot._altHeldCount > 0)
+            playerRoot._altHeldCount--
+        else if (event.key === Qt.Key_Shift && playerRoot._shiftHeldCount > 0)
+            playerRoot._shiftHeldCount--
+    }
+
     // 포커스를 빼앗겼을 때 즉시 재취득 (MediaPlayer 등 내부 아이템이 포커스를 가져갈 경우 대비)
     onActiveFocusChanged: {
         if (!activeFocus && visible)
             Qt.callLater(forceActiveFocus)
+    }
+
+    onVisibleChanged: {
+        if (!visible)
+            playerRoot._resetModifierLatch()
     }
 
     function _closePlayer() {
@@ -191,6 +212,58 @@ Item {
     function showOsd(text) {
         osdText.text = text
         osdAnim.restart()
+    }
+
+    function _resetModifierLatch() {
+        playerRoot._ctrlHeldCount = 0
+        playerRoot._altHeldCount = 0
+        playerRoot._shiftHeldCount = 0
+    }
+
+    function _ctrlActive(event) {
+        if (event.modifiers & Qt.ControlModifier)
+            return true
+        if (playerRoot._ctrlHeldCount > 0)
+            return true
+        // Windows: nativeModifiers에 Ctrl 비트가 있어도 modifiers가 비는 경우 보완
+        if (event.nativeModifiers !== undefined && (event.nativeModifiers & 0x02))
+            return true
+        return false
+    }
+
+    function _altActive(event) {
+        if (event.modifiers & Qt.AltModifier)
+            return true
+        if (playerRoot._altHeldCount > 0)
+            return true
+        return false
+    }
+
+    function _shiftActive(event) {
+        if (event.modifiers & Qt.ShiftModifier)
+            return true
+        if (playerRoot._shiftHeldCount > 0)
+            return true
+        return false
+    }
+
+    function _seekByArrow(event, forward) {
+        var delta = 5000
+        var label = forward ? "+5초  ▶" : "◀  -5초"
+        if (_altActive(event)) {
+            delta = 300000
+            label = forward ? "+5분  ▶▶▶▶" : "◀◀◀◀  -5분"
+        } else if (_ctrlActive(event)) {
+            delta = 60000
+            label = forward ? "+1분  ▶▶▶" : "◀◀◀  -1분"
+        } else if (_shiftActive(event)) {
+            delta = 30000
+            label = forward ? "+30초  ▶▶" : "◀◀  -30초"
+        }
+        if (!forward)
+            delta = -delta
+        mediaPlayer.setPosition(Math.max(0, Math.min(mediaPlayer.duration, mediaPlayer.position + delta)))
+        showOsd(label)
     }
 
     function _tryResumeSeek(trigger) {
@@ -846,6 +919,21 @@ Item {
         propagateComposedEvents: true
         onPositionChanged: { playerRoot.showControls = true; controlHideTimer.restart() }
         onClicked: (mouse) => mouse.accepted = false
+        onWheel: (wheel) => {
+            var wheelDelta = wheel.angleDelta.y !== 0 ? wheel.angleDelta.y : wheel.pixelDelta.y
+            if (wheelDelta === 0) {
+                wheel.accepted = false
+                return
+            }
+            var step = wheelDelta > 0 ? 0.05 : -0.05
+            volumeSlider.value = Math.max(0.0, Math.min(1.0, volumeSlider.value + step))
+            if (audioOutput.muted && volumeSlider.value > 0)
+                audioOutput.muted = false
+            showOsd("🔊  " + Math.round(volumeSlider.value * 100) + "%")
+            playerRoot.showControls = true
+            controlHideTimer.restart()
+            wheel.accepted = true
+        }
     }
 
     // ── 상단 타이틀 바 ───────────────────────────────────────

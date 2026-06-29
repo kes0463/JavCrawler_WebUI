@@ -8,6 +8,7 @@
 from pathlib import Path
 import re
 import shutil
+import unicodedata
 from datetime import datetime
 from typing import Optional, Tuple, List
 from PIL import Image, ImageOps
@@ -15,6 +16,53 @@ from PIL.Image import Resampling
 
 from javstory.config.app_config import DATA_ROOT, E_DATA_ROOT
 from javstory.harvest.database import get_db_session, get_db_session_ctx, Actress, ActressImage, ActressAlias, ActressWork
+
+
+def _looks_like_ja(text: str) -> bool:
+    hangul = kana = cjk = 0
+    for ch in text or "":
+        o = ord(ch)
+        if 0xAC00 <= o <= 0xD7A3:
+            hangul += 1
+        elif (0x3040 <= o <= 0x309F) or (0x30A0 <= o <= 0x30FF):
+            kana += 1
+        elif 0x4E00 <= o <= 0x9FFF:
+            cjk += 1
+    return hangul == 0 and (kana > 0 or cjk > 0)
+
+
+def _has_hangul(text: str) -> bool:
+    return any(0xAC00 <= ord(ch) <= 0xD7A3 for ch in (text or ""))
+
+
+def _token_needs_remap(token: str) -> bool:
+    """배우 토큰이 한국어 표시명이 아니면 재매핑 대상."""
+    token = (token or "").strip()
+    if not token:
+        return False
+    return not _has_hangul(token)
+
+
+def _actors_ko_needs_remap(actors_ko: str) -> bool:
+    """actors_ko CSV에 재매핑이 필요한 토큰이 하나라도 있으면 True."""
+    return any(_token_needs_remap(t) for t in parse_actor_tokens(actors_ko))
+
+
+def _remap_actor_token_to_ko(session, token: str) -> str:
+    """별명·로마자·일본어 토큰을 프로필 한국어 표시명으로 변환."""
+    token = (token or "").strip()
+    if not token or _has_hangul(token):
+        return token
+    actress_id = _resolve_actress_id_in_session(session, token)
+    if not actress_id:
+        return token
+    actress_row = session.query(Actress).filter_by(id=actress_id).first()
+    if not actress_row:
+        return token
+    _ja, ko, _ro = _actress_display_names_from_row(actress_row, token)
+    if ko and _has_hangul(ko):
+        return ko
+    return token
 
 
 def actress_storage_root() -> Path:
@@ -521,8 +569,84 @@ def parse_actor_tokens(*values: Optional[str]) -> List[str]:
     return tokens
 
 
+_ACTOR_PAREN_ALIAS_RE = re.compile(r"[\(（][^)）]*[\)）]")
+
+
+def strip_actor_parenthetical_alias(name: str) -> str:
+    """크롤 배우명 — 괄호 별칭 제거 (例: 水谷心音(藤崎りお) → 水谷心音)."""
+    return _ACTOR_PAREN_ALIAS_RE.sub("", (name or "").strip()).strip()
+
+
+def _crawl_token_from_profile_row(row: Actress, crawled: str) -> str:
+    """DB 프로필 표준명 — merge_actresses 별명·name_ja/name_ko 우선."""
+    crawled = (crawled or "").strip()
+    if _has_hangul(crawled):
+        ko = (row.name_ko or row.korean or "").strip()
+        if ko and _has_hangul(ko):
+            return ko
+    ja = (row.name_ja or row.japanese or "").strip()
+    return ja or crawled
+
+
+def dedupe_crawled_actor_tokens(names: list[str], session=None) -> list[str]:
+    """크롤 배우명 dedupe — DB 프로필·별명(합치기) 기준, 미등록은 NFKC 키만."""
+    from javstory.harvest.database import Actress
+
+    cleaned_names: list[str] = []
+    for raw in names or []:
+        cleaned = strip_actor_parenthetical_alias(str(raw or ""))
+        if cleaned:
+            cleaned_names.append(cleaned)
+    if not cleaned_names:
+        return []
+
+    close_session = False
+    if session is None:
+        session = get_db_session()
+        close_session = True
+    try:
+        name_index = _build_actress_name_index(session)
+        seen_ids: set[int] = set()
+        seen_keys: set[str] = set()
+        out: list[str] = []
+
+        for cleaned in cleaned_names:
+            actress_id = _resolve_actress_id_in_session(session, cleaned)
+            if not actress_id:
+                key = normalize_actor_name_key(cleaned)
+                if key:
+                    ids = name_index.get(key) or []
+                    actress_id = int(ids[0]) if ids else None
+
+            if actress_id is not None:
+                if actress_id in seen_ids:
+                    continue
+                seen_ids.add(int(actress_id))
+                row = session.query(Actress).filter_by(id=int(actress_id)).first()
+                out.append(
+                    _crawl_token_from_profile_row(row, cleaned) if row else cleaned
+                )
+                continue
+
+            key = normalize_actor_name_key(cleaned)
+            if key and key in seen_keys:
+                continue
+            if key:
+                seen_keys.add(key)
+            out.append(cleaned)
+        return out
+    finally:
+        if close_session:
+            session.close()
+
+
 def normalize_actor_name_key(name: str) -> str:
-    return (name or "").strip().casefold()
+    """배우명 비교 키 — NFKC·공백 제거·casefold (가·히라 통일은 DB 별명·합치기)."""
+    raw = unicodedata.normalize("NFKC", (name or "").strip())
+    if not raw:
+        return ""
+    unified = re.sub(r"[\s　]+", "", raw)
+    return unified.casefold()
 
 
 def actress_names_match_tokens(search_names: List[str], actor_tokens: List[str]) -> bool:
@@ -692,7 +816,13 @@ def sync_actress_works_for_product(session, product_code: str, *, source: str = 
     return added
 
 
-def rebuild_actress_works_for_actress(session, actress_id: int, *, source: str = "scan") -> int:
+def rebuild_actress_works_for_actress(
+    session,
+    actress_id: int,
+    *,
+    source: str = "scan",
+    merged_names: Optional[List[str]] = None,
+) -> int:
     """단일 배우의 actress_works 전체 재구축 (이름·별명·합치기 후).
 
     jav_metadata 전체를 한 번에 메모리에 올리지 않고 ID 청크 단위로 스캔해
@@ -711,6 +841,20 @@ def rebuild_actress_works_for_actress(session, actress_id: int, *, source: str =
         return 0
 
     names = collect_actress_search_names(actress)
+    if merged_names:
+        seen_keys = {
+            normalize_actor_name_key(n)
+            for n in names
+            if normalize_actor_name_key(n)
+        }
+        for raw in merged_names:
+            v = (raw or "").strip()
+            if not v:
+                continue
+            key = normalize_actor_name_key(v)
+            if key and key not in seen_keys:
+                names.append(v)
+                seen_keys.add(key)
     session.query(ActressWork).filter_by(actress_id=actress_id).delete(synchronize_session=False)
     if not names:
         refresh_actress_work_count(session, actress_id)
@@ -749,6 +893,12 @@ def rebuild_actress_works_for_actress(session, actress_id: int, *, source: str =
             pc = (row.product_code or "").strip().upper()
             if not pc:
                 continue
+            remap_metadata_actors_row(
+                session,
+                row,
+                merged_names=merged_names if source == "merge" else None,
+                keep_actress_id=actress_id,
+            )
             matched_token = ""
             for token in parse_actor_tokens(
                 row.actors_ko, row.actors_ja, row.actors, row.actors_romaji
@@ -768,6 +918,45 @@ def rebuild_actress_works_for_actress(session, actress_id: int, *, source: str =
 
     refresh_actress_work_count(session, actress_id)
     session.commit()
+    return added
+
+
+def _link_actress_works_by_product_codes(
+    session,
+    actress_id: int,
+    product_codes: List[str],
+    *,
+    source: str = "merge",
+) -> int:
+    """품번 목록을 actress_works에 연결 (메타데이터가 있는 항목만, 중복 스킵)."""
+    from javstory.harvest.database import JAVMetadata
+
+    aid = int(actress_id or 0)
+    if aid <= 0 or not product_codes:
+        return 0
+
+    existing = {
+        (r[0] or "").strip().upper()
+        for r in session.query(ActressWork.product_code).filter_by(actress_id=aid).all()
+        if (r[0] or "").strip()
+    }
+    now = datetime.now()
+    added = 0
+    for raw_pc in product_codes:
+        pc = (raw_pc or "").strip().upper()
+        if not pc or pc in existing:
+            continue
+        if not session.query(JAVMetadata).filter_by(product_code=pc).first():
+            continue
+        session.add(ActressWork(
+            actress_id=aid,
+            product_code=pc,
+            match_source=source,
+            matched_token="",
+            updated_at=now,
+        ))
+        existing.add(pc)
+        added += 1
     return added
 
 
@@ -1138,10 +1327,191 @@ def _fill_if_empty(keep: Actress, merge: Actress, attr: str) -> None:
         setattr(keep, attr, merge_val)
 
 
-def merge_actresses(keep_id: int, merge_id: int) -> bool:
+def _resolve_actress_id_in_session(session, name: str) -> Optional[int]:
+    """이름(한/일/영/별명)으로 actress_id 반환. 없으면 None."""
+    if not name or not name.strip():
+        return None
+    q = name.strip()
+    row = session.query(Actress).filter(
+        (Actress.name_ko == q) |
+        (Actress.korean == q) |
+        (Actress.name_ja == q) |
+        (Actress.japanese == q) |
+        (Actress.name_en == q) |
+        (Actress.romaji == q)
+    ).first()
+    if row:
+        return row.id
+    alias = session.query(ActressAlias).filter_by(alias_name=q).first()
+    if alias:
+        return alias.actress_id
+    key = normalize_actor_name_key(q)
+    if not key:
+        return None
+    index = _build_actress_name_index(session)
+    ids = index.get(key)
+    if ids:
+        return int(ids[0])
+    return None
+
+
+def _actress_display_names_from_row(row: Actress, crawled_name: str) -> tuple[str, str, str]:
+    """프로필 행에서 JA/KO/로마자 표시명 추출."""
+    ja = (crawled_name or row.name_ja or row.japanese or "").strip() or crawled_name
+    ko = (row.name_ko or row.korean or "").strip()
+    ro = (row.romaji or "").strip()
+    if not ko:
+        ko = ja
+    if not ro:
+        ro = ja
+    return ja, ko, ro
+
+
+def remap_metadata_actors_row(
+    session,
+    row,
+    *,
+    merged_names: Optional[List[str]] = None,
+    keep_actress_id: Optional[int] = None,
+) -> bool:
+    """actors_ja 기준으로 actors_ko/romaji 재매핑. 합치기 시 병합 이름 토큰도 치환."""
+    from javstory.utils.common import tagify as _tagify
+
+    if row is None:
+        return False
+
+    actors_ja_raw = (getattr(row, "actors_ja", None) or getattr(row, "actors", None) or "").strip()
+    changed = False
+    if actors_ja_raw:
+        ja_names = [n.strip() for n in actors_ja_raw.split(",") if n.strip()]
+        ko_list: List[str] = []
+        ro_list: List[str] = []
+        for name in ja_names:
+            actress_id = _resolve_actress_id_in_session(session, name)
+            if actress_id:
+                actress_row = session.query(Actress).filter_by(id=actress_id).first()
+                if actress_row:
+                    _ja, ko, ro = _actress_display_names_from_row(actress_row, name)
+                    ko_list.append(ko)
+                    ro_list.append(ro)
+                    continue
+            ko_list.append(name)
+            ro_list.append(name)
+        new_ko = _tagify(ko_list)
+        new_ro = _tagify(ro_list)
+        if getattr(row, "actors_ko", None) != new_ko or getattr(row, "actors_romaji", None) != new_ro:
+            row.actors_ko = new_ko
+            row.actors_romaji = new_ro
+            row.actors_zh_cn = new_ro
+            row.actors_zh_tw = new_ro
+            row.actors = new_ko
+            changed = True
+
+    # actors_ja에 없거나 JA 매핑 후에도 남은 로마자·일본어 토큰 보정
+    tokens = parse_actor_tokens(getattr(row, "actors_ko", None))
+    if tokens:
+        remapped = [_remap_actor_token_to_ko(session, t) for t in tokens]
+        from javstory.utils.common import tagify as _tagify2
+        new_ko = _tagify2(remapped)
+        if new_ko and new_ko != (getattr(row, "actors_ko", None) or ""):
+            row.actors_ko = new_ko
+            row.actors = new_ko
+            changed = True
+
+    if merged_names and keep_actress_id:
+        merge_keys = {
+            normalize_actor_name_key(n)
+            for n in (merged_names or [])
+            if normalize_actor_name_key(n)
+        }
+        if merge_keys:
+            keep_row = session.query(Actress).filter_by(id=int(keep_actress_id)).first()
+            keep_ko = ""
+            if keep_row:
+                keep_ko = (keep_row.name_ko or keep_row.korean or "").strip()
+            if keep_ko:
+                tokens = parse_actor_tokens(getattr(row, "actors_ko", None))
+                replaced: List[str] = []
+                token_changed = False
+                for token in tokens:
+                    if normalize_actor_name_key(token) in merge_keys:
+                        if token != keep_ko:
+                            token_changed = True
+                        replaced.append(keep_ko)
+                    else:
+                        replaced.append(token)
+                if token_changed:
+                    new_ko = _tagify(replaced)
+                    if getattr(row, "actors_ko", None) != new_ko:
+                        row.actors_ko = new_ko
+                        row.actors = new_ko
+                        changed = True
+    return changed
+
+
+def refresh_stale_metadata_actors_for_actress(session, actress_id: int) -> List[str]:
+    """출연작 중 actors_ko가 일본어로 남은 jav_metadata만 재매핑."""
+    from javstory.harvest.database import JAVMetadata
+
+    pcs = [
+        (r[0] or "").strip().upper()
+        for r in session.query(ActressWork.product_code).filter_by(actress_id=actress_id).all()
+        if (r[0] or "").strip()
+    ]
+    updated: List[str] = []
+    for pc in pcs:
+        row = session.query(JAVMetadata).filter_by(product_code=pc).first()
+        if not row:
+            continue
+        ko = getattr(row, "actors_ko", None) or ""
+        if not _actors_ko_needs_remap(ko):
+            continue
+        if remap_metadata_actors_row(session, row, keep_actress_id=actress_id):
+            updated.append(pc)
+    return updated
+
+
+def refresh_all_stale_metadata_actors(session) -> List[str]:
+    """jav_metadata 전체에서 actors_ko가 일본어로 남은 행을 재매핑."""
+    from javstory.harvest.database import JAVMetadata
+
+    updated: List[str] = []
+    last_id = 0
+    chunk_size = 200
+    while True:
+        ids = [
+            r[0]
+            for r in session.query(JAVMetadata.id)
+            .filter(JAVMetadata.id > last_id)
+            .order_by(JAVMetadata.id.asc())
+            .limit(chunk_size)
+            .all()
+        ]
+        if not ids:
+            break
+        last_id = int(ids[-1] or last_id)
+        chunk_changed = False
+        for mid in ids:
+            row = session.query(JAVMetadata).filter_by(id=mid).first()
+            if not row:
+                continue
+            ko = (getattr(row, "actors_ko", None) or getattr(row, "actors", None) or "").strip()
+            if not ko or not _actors_ko_needs_remap(ko):
+                continue
+            if remap_metadata_actors_row(session, row):
+                pc = (row.product_code or "").strip().upper()
+                if pc:
+                    updated.append(pc)
+                chunk_changed = True
+        if chunk_changed:
+            session.commit()
+    return updated
+
+
+def merge_actresses(keep_id: int, merge_id: int) -> tuple[bool, List[str]]:
     """keep_id 프로필에 merge_id를 흡수 후 merge 행 삭제."""
     if keep_id <= 0 or merge_id <= 0 or keep_id == merge_id:
-        return False
+        return False, []
     try:
         with get_db_session_ctx() as session:
             from sqlalchemy.orm import joinedload
@@ -1154,7 +1524,7 @@ def merge_actresses(keep_id: int, merge_id: int) -> bool:
                 .first()
             )
             if not keep or not merge:
-                return False
+                return False, []
 
             merge_search_names = collect_actress_search_names(merge)
 
@@ -1187,13 +1557,37 @@ def merge_actresses(keep_id: int, merge_id: int) -> bool:
             mi = float(getattr(merge, "favorite_intensity") or 0.0)
             keep.favorite_intensity = max(ki, mi) if (ki or mi) else None
             keep.updated_at = datetime.now()
+            # 합치기 전 merge 출연작 품번 보존 — 재스캔 누락 시에도 keep에 이전
+            merge_pcs = [
+                (r[0] or "").strip().upper()
+                for r in session.query(ActressWork.product_code).filter_by(actress_id=merge_id).all()
+                if (r[0] or "").strip()
+            ]
+            # merge 출연작 링크 제거 — delete(merge) 시 ORM이 actress_id를 NULL로 비우려다 PK 오류 발생
+            session.query(ActressWork).filter_by(actress_id=merge_id).delete(
+                synchronize_session=False
+            )
             session.delete(merge)
-            rebuild_actress_works_for_actress(session, keep_id, source="merge")
+            session.flush()
+            rebuild_actress_works_for_actress(
+                session, keep_id, source="merge", merged_names=merge_search_names
+            )
+            if merge_pcs:
+                _link_actress_works_by_product_codes(
+                    session, keep_id, merge_pcs, source="merge"
+                )
+                refresh_actress_work_count(session, keep_id)
+            refresh_stale_metadata_actors_for_actress(session, keep_id)
+            linked_pcs = [
+                (r[0] or "").strip().upper()
+                for r in session.query(ActressWork.product_code).filter_by(actress_id=keep_id).all()
+                if (r[0] or "").strip()
+            ]
             session.commit()
-            return True
+            return True, linked_pcs
     except Exception as e:
         print(f"[ActressProfile] merge_actresses failed: {e}")
-        return False
+        return False, []
 
 
 def get_favorite_actress_profiles(limit: int = 10) -> List[dict]:
@@ -1274,27 +1668,9 @@ def get_actress_context(actress_id: int) -> dict:
 
 def resolve_actress_by_name(name: str) -> Optional[int]:
     """이름(한/일/영/별명)으로 actress_id 반환. 없으면 None."""
-    if not name or not name.strip():
-        return None
-    q = name.strip()
     try:
         with get_db_session_ctx() as session:
-            # 정확히 일치하는 행 먼저 탐색
-            row = session.query(Actress).filter(
-                (Actress.name_ko == q) |
-                (Actress.korean == q) |
-                (Actress.name_ja == q) |
-                (Actress.japanese == q) |
-                (Actress.name_en == q) |
-                (Actress.romaji == q)
-            ).first()
-            if row:
-                return row.id
-
-            # 별명 테이블 탐색
-            alias = session.query(ActressAlias).filter_by(alias_name=q).first()
-            if alias:
-                return alias.actress_id
+            return _resolve_actress_id_in_session(session, name)
     except Exception:
         pass
     return None

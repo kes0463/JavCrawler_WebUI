@@ -8,8 +8,6 @@ import { QueueItemRow, type QueueItem } from "@/components/queue/QueueItemRow";
 import { LogPanel, type LogEntry } from "@/components/log/LogPanel";
 import { ProgressIndicator } from "@/components/ui/ProgressIndicator";
 
-// ── Mock data ────────────────────────────────────────────────────
-
 const MOCK_QUEUE: QueueItem[] = [
   { id: "1", label: "STARS-001.mp4", status: "running",  progress: 38, message: "프레임 분석 중..." },
   { id: "2", label: "IPX-789.mkv",   status: "running",  progress: 91, message: "모자이크 마스크 적용..." },
@@ -26,8 +24,6 @@ const MOCK_LOGS: LogEntry[] = [
   { id: 5, text: "GPU VRAM 사용: 7.2GB / 12GB",               level: "debug",   ts: "14:31:22" },
 ];
 
-// ── Component ────────────────────────────────────────────────────
-
 export default function MosaicImportView() {
   const [queue, setQueue] = useState<QueueItem[]>(MOCK_QUEUE);
   const [dragging, setDragging] = useState(false);
@@ -41,18 +37,17 @@ export default function MosaicImportView() {
 
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-xl font-bold text-white">모자이크 제거</h1>
-          <p className="text-sm text-muted-foreground mt-0.5">AI 기반 모자이크 처리 파이프라인</p>
+          <h1 className="text-2xl font-bold text-white">모자이크 제거</h1>
+          <p className="text-base text-muted-foreground mt-0.5">AI 기반 모자이크 처리 파이프라인</p>
         </div>
         {runningCount > 0 && (
           <div className="flex items-center gap-2 px-3 py-1.5 rounded-full bg-rose-500/15 border border-rose-500/25">
             <span className="w-1.5 h-1.5 rounded-full bg-rose-400 animate-pulse" />
-            <span className="text-xs text-rose-300">{runningCount}개 처리 중</span>
+            <span className="text-sm text-rose-300">{runningCount}개 처리 중</span>
           </div>
         )}
       </div>
 
-      {/* ── GPU 리소스 ── */}
       <div className="grid grid-cols-3 gap-3">
         {[
           { label: "GPU VRAM",  value: "7.2 / 12 GB", pct: 60, variant: "accent" as const },
@@ -60,7 +55,7 @@ export default function MosaicImportView() {
           { label: "진행 중",   value: `${runningCount}개`, pct: runningCount > 0 ? 100 : 0, variant: "warning" as const },
         ].map(({ label, value, pct, variant }) => (
           <GlassCard key={label} className="space-y-2">
-            <div className="flex justify-between text-xs">
+            <div className="flex justify-between text-base">
               <span className="text-muted-foreground">{label}</span>
               <span className="text-[#c8c8e0] font-medium">{value}</span>
             </div>
@@ -71,9 +66,7 @@ export default function MosaicImportView() {
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-5">
 
-        {/* ── 파일 임포트 ── */}
         <div className="space-y-4">
-          {/* 드래그 앤 드롭 영역 */}
           <GlassCard
             noPadding
             className={cn(
@@ -92,21 +85,20 @@ export default function MosaicImportView() {
                 "w-12 h-12 rounded-2xl border flex items-center justify-center transition-colors",
                 dragging ? "border-accent/50 bg-accent/15" : "border-white/[0.10] bg-bg-surface",
               )}>
-                <Upload className={cn("w-5 h-5 transition-colors", dragging ? "text-accent-light" : "text-muted-foreground")} />
+                <Upload className={cn("w-6 h-6 transition-colors", dragging ? "text-accent-light" : "text-muted-foreground")} />
               </div>
               <div className="text-center">
-                <p className="text-sm text-[#d0d0e8]">파일을 여기에 드롭</p>
-                <p className="text-xs text-muted-foreground mt-0.5">MP4, MKV, AVI 지원</p>
+                <p className="text-base text-[#d0d0e8]">파일을 여기에 드롭</p>
+                <p className="text-sm text-muted-foreground mt-0.5">MP4, MKV, AVI 지원</p>
               </div>
-              <ActionButton variant="secondary" size="sm" icon={<FolderOpen className="w-3.5 h-3.5" />}>
+              <ActionButton variant="secondary" size="sm" icon={<FolderOpen className="w-4 h-4" />}>
                 파일 선택
               </ActionButton>
             </div>
           </GlassCard>
 
-          {/* 설정 */}
           <GlassCard className="space-y-3">
-            <h3 className="text-xs font-semibold uppercase tracking-widest text-muted-foreground">
+            <h3 className="text-sm font-semibold uppercase tracking-widest text-muted-foreground">
               처리 설정
             </h3>
             <div className="space-y-2.5">
@@ -115,7 +107,7 @@ export default function MosaicImportView() {
                 { label: "품질", value: "High (720p)" },
                 { label: "병렬 작업", value: "2" },
               ].map(({ label, value }) => (
-                <div key={label} className="flex items-center justify-between text-xs">
+                <div key={label} className="flex items-center justify-between text-base">
                   <span className="text-muted-foreground">{label}</span>
                   <span className="text-[#c8c8e0] font-medium">{value}</span>
                 </div>
@@ -124,7 +116,6 @@ export default function MosaicImportView() {
           </GlassCard>
         </div>
 
-        {/* ── 큐 + 로그 ── */}
         <div className="lg:col-span-2 space-y-4">
 
           <QueueAccordionCard
@@ -135,7 +126,7 @@ export default function MosaicImportView() {
             actions={
               <>
                 <ActionButton variant="ghost" size="sm">전체 삭제</ActionButton>
-                <ActionButton variant="primary" size="sm" icon={<Play className="w-3 h-3" />}>
+                <ActionButton variant="primary" size="sm" icon={<Play className="w-4 h-4" />}>
                   시작
                 </ActionButton>
               </>
@@ -152,7 +143,7 @@ export default function MosaicImportView() {
           </QueueAccordionCard>
 
           <GlassCard className="space-y-2">
-            <h3 className="text-xs font-semibold uppercase tracking-widest text-muted-foreground">
+            <h3 className="text-sm font-semibold uppercase tracking-widest text-muted-foreground">
               처리 로그
             </h3>
             <LogPanel entries={MOCK_LOGS} maxHeight="200px" />

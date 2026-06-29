@@ -1,7 +1,7 @@
 # JAVSTORY 진입점 · UI 스택
 
-**운영 UI는 PySide6 + QML 하나만 사용합니다.**  
-신규 화면·버튼·상태는 `gui/qml/` 및 `gui/models/`(PySide6 `QObject`)에만 추가합니다.
+**데스크톱 운영 UI는 PySide6 + QML**입니다.  
+**WebUI**(브라우저)는 2차 진입점 — [ADR 0002](../adr/0002-webui-secondary-entrypoint.md).
 
 파이프라인·단계별 모듈 경로: [`WORKFLOW_PIPELINES.md`](../../WORKFLOW_PIPELINES.md)  
 파이프라인 상세: [`WORKFLOW_PIPELINES.md`](../../WORKFLOW_PIPELINES.md) · (아카이브) [`jav_story_workflow.md`](../archive/agent/jav_story_workflow.md)
@@ -49,15 +49,27 @@ main.py
 
 ---
 
+## WebUI (2차 진입점)
+
+| 항목 | 경로 |
+|------|------|
+| HTTP API | [`webapi/main.py`](../../webapi/main.py) |
+| React UI | [`frontend/`](../../frontend/) |
+| 서비스 레이어 | [`javstory/services/`](../../javstory/services/) |
+| 런처 (Windows) | [`start_web.bat`](../../start_web.bat) |
+| 의존성 | [`requirements-web.txt`](../../requirements-web.txt) |
+
+---
+
 ## 동결 (Frozen — non-production)
 
-**결정**: [ADR 0001 — QML 단일 스택](../adr/0001-ui-stack-qml-only.md) (2026-05-16).  
-아래는 **신규 기능·버그 수정 대상 아님**. 삭제는 동결 6~12개월 후 검토.
+**결정**: [ADR 0001](../adr/0001-ui-stack-qml-only.md).  
+**레거시 HTTP** [`api/`](../../api/) — WebUI는 [`webapi/`](../../webapi/) 사용.
 
 | 항목 | 경로 | 비고 |
 |------|------|------|
-| React + Electron | [`frontend/`](../../frontend/) | [`frontend/README.md`](../../frontend/README.md) |
-| HTTP API | [`api/main.py`](../../api/main.py) | [`api/README.md`](../../api/README.md) |
+| 레거시 React+Electron 실험 | [`frontend/`](../frontend/) 일부 | WebUI로 **재활용** (ADR 0002) |
+| 동결 HTTP API | [`api/main.py`](../../api/main.py) | 확장 금지 |
 
 ---
 

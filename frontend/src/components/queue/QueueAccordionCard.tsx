@@ -38,10 +38,10 @@ export function QueueAccordionCard({
       >
         {icon && <span className="text-[15px] leading-none">{icon}</span>}
 
-        <span className="flex-1 text-sm font-semibold text-[#d4d4ec] tracking-tight">{title}</span>
+        <span className="flex-1 text-lg font-semibold text-[#d4d4ec] tracking-tight">{title}</span>
 
         {count !== undefined && (
-          <span className="text-[11px] tabular-nums text-zinc-500 px-2 py-0.5 rounded-full bg-white/[0.05] border border-white/[0.06]">
+          <span className="text-sm tabular-nums text-zinc-500 px-2.5 py-0.5 rounded-full bg-white/[0.05] border border-white/[0.06]">
             {count}
           </span>
         )}

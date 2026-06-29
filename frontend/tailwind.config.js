@@ -37,6 +37,11 @@ export default {
         accent:   "0 4px 24px rgba(99,102,241,0.22), 0 1px 4px rgba(0,0,0,0.4), inset 0 1px 0 rgba(255,255,255,0.07)",
         glow:     "0 0 20px rgba(99,102,241,0.4), 0 0 60px rgba(99,102,241,0.18)",
         "glow-sm": "0 0 0 1px rgba(99,102,241,0.3), 0 0 12px rgba(99,102,241,0.28)",
+        "glow-blue": "0 0 24px rgba(59,130,246,0.22), inset 0 1px 0 rgba(255,255,255,0.06)",
+        "glow-green": "0 0 24px rgba(16,185,129,0.2), inset 0 1px 0 rgba(255,255,255,0.06)",
+        "glow-orange": "0 0 24px rgba(249,115,22,0.22), inset 0 1px 0 rgba(255,255,255,0.06)",
+        "glow-pink": "0 0 24px rgba(244,63,94,0.22), inset 0 1px 0 rgba(255,255,255,0.06)",
+        "glow-purple": "0 0 24px rgba(139,92,246,0.22), inset 0 1px 0 rgba(255,255,255,0.06)",
         "nav-active": "0 0 0 1px rgba(99,102,241,0.2), 0 2px 12px rgba(99,102,241,0.15)",
       },
       backgroundImage: {

@@ -29,7 +29,7 @@ export function ProgressIndicator({
   return (
     <div className={cn("w-full", className)}>
       {showLabel && (
-        <div className="flex justify-between text-[11px] text-muted-foreground mb-1">
+        <div className="flex justify-between text-sm text-muted-foreground mb-1">
           <span>{value.toLocaleString()} / {total.toLocaleString()}</span>
           <span>{Math.round(pct)}%</span>
         </div>

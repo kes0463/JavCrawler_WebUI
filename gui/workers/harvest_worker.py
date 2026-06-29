@@ -26,7 +26,7 @@ class HarvestWorker(QThread):
     def __init__(
         self,
         entries: list[tuple],
-        grok_enabled: bool = True,
+        grok_enabled: bool = False,
         parent=None,
     ):
         super().__init__(parent)

@@ -328,24 +328,13 @@ class PreviewQueueController(QObject):
             return
 
         from javstory.config.app_config import E_MEDIA_ROOT
+        from javstory.library.highlight.video_preview import is_montage_preview_fresh
 
         output_path = str(Path(E_MEDIA_ROOT) / pc / "Preview" / "preview.webp")
         outp = Path(output_path)
-        if outp.is_file():
-            try:
-                from javstory.utils.derived_cache import is_up_to_date
-
-                meta_path = outp.with_suffix(outp.suffix + ".meta.json")
-                if is_up_to_date(
-                    meta_path=meta_path,
-                    inputs={"video": Path(vp)},
-                    params={"duration_sec": 8.0},
-                ):
-                    self.toastMessage.emit(f"[프리뷰] 이미 최신입니다: {pc}", "info")
-                    return
-            except Exception:
-                # 메타가 없거나 읽기 실패면 기존 동작(존재 스킵) 대신 재생성 기회를 준다.
-                pass
+        if is_montage_preview_fresh(webp_path=outp, video_path=Path(vp)):
+            self.toastMessage.emit(f"[프리뷰] 이미 최신입니다: {pc}", "info")
+            return
 
         job_id = f"{pc}_{int(time.time() * 1000)}"
         job = _Job(
@@ -430,10 +419,11 @@ class PreviewQueueController(QObject):
 
     @Slot()
     def enqueueMissingPreviews(self) -> None:
-        """DB를 스캔해 preview.webp 누락 작품만 큐 등록."""
+        """DB를 스캔해 preview 누락·구버전 작품을 큐 등록."""
         try:
             from javstory.harvest.database import get_db_session, JAVMetadata
             from gui.library_data import guess_video_path_for_product
+            from javstory.library.highlight.video_preview import is_montage_preview_fresh
 
             from javstory.config.app_config import E_MEDIA_ROOT
 
@@ -448,22 +438,23 @@ class PreviewQueueController(QObject):
 
             added = 0
             skipped_no_video = 0
-            skipped_exists = 0
             no_video_pcs: list[str] = []
+            skipped_fresh = 0
             for pc_raw, folder_path in (rows or []):
                 pc = (pc_raw or "").strip().upper()
                 if not pc:
                     continue
                 outp = Path(E_MEDIA_ROOT) / pc / "Preview" / "preview.webp"
-                if outp.is_file():
-                    skipped_exists += 1
-                    continue
 
                 vp = guess_video_path_for_product(pc, folder_path or None)
                 if not vp or not vp.is_file():
                     skipped_no_video += 1
                     no_video_pcs.append(pc)
                     continue
+                if is_montage_preview_fresh(webp_path=outp, video_path=vp):
+                    skipped_fresh += 1
+                    continue
+
                 self.enqueue(pc, str(vp))
                 added += 1
 
@@ -475,7 +466,7 @@ class PreviewQueueController(QObject):
                 )
 
             self.toastMessage.emit(
-                f"[프리뷰 백필] 추가 {added}건 (존재 {skipped_exists} / 영상없음 {skipped_no_video})"
+                f"[프리뷰 백필] 추가 {added}건 (최신 {skipped_fresh} / 영상없음 {skipped_no_video})"
                 + (f" — 예: {', '.join(no_video_pcs[:5])}" if no_video_pcs else ""),
                 "success" if added > 0 else "info",
             )

@@ -111,7 +111,7 @@ class HarvestView(QWidget):
         grok_label = CaptionLabel("Grok 스토리:", self)
         folder_row.addWidget(grok_label)
         self.grok_switch = SwitchButton(self)
-        grok_enabled = os.environ.get("JAVSTORY_STORY_ANALYSIS_ENABLED", "1").strip().lower()
+        grok_enabled = os.environ.get("JAVSTORY_STORY_ANALYSIS_ENABLED", "0").strip().lower()
         self.grok_switch.setChecked(grok_enabled in ("1", "true", "yes", "on"))
         self.grok_switch.checkedChanged.connect(self._on_grok_toggled)
         folder_row.addWidget(self.grok_switch)

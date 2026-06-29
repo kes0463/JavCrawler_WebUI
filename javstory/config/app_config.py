@@ -18,6 +18,41 @@ ENV_OPENROUTER_API_KEY = "OPENROUTER_API_KEY"
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 ENV_FILE_PATH = PROJECT_ROOT / ".env"
 
+_env_file_loaded = False
+
+
+def ensure_project_env_loaded() -> None:
+    """프로젝트 루트 ``.env`` 로드 (데스크톱 Settings 저장값). OS env는 덮어쓰지 않음."""
+    global _env_file_loaded
+    if _env_file_loaded:
+        return
+    try:
+        from dotenv import load_dotenv
+
+        load_dotenv(ENV_FILE_PATH, override=False)
+    except ImportError:
+        pass
+    _env_file_loaded = True
+
+
+def platform_env_suffix(platform: str | None = None) -> str:
+    """SettingsModel ``_platform_env_suffix`` 와 동일."""
+    p = (platform or llm_platform_from_env()).strip().lower()
+    if p == "llamacpp":
+        return "LLAMACPP"
+    if p == "ollama":
+        return "OLLAMA"
+    return "OPENAI"
+
+
+def platform_env_value(base_key: str, default: str, *, platform: str | None = None) -> str:
+    """플랫폼별 env(``KEY_LLAMACPP``) 우선, 없으면 공통 ``KEY`` — Settings 저장 형식."""
+    suffix_key = f"{base_key}_{platform_env_suffix(platform)}"
+    raw = (os.environ.get(suffix_key, "") or "").strip()
+    if raw:
+        return raw
+    return (os.environ.get(base_key, default) or default).strip()
+
 # --- 데이터 레이아웃 (단일 루트 `data/`) ---
 # 기존 파일이 있으면 수동 이동: Harvest/jav_database.db → data/db/,
 # Transcription/story_context_cache → data/cache/story_context,
@@ -359,15 +394,15 @@ def correction_skip_enabled() -> bool:
 # JAVSTORY_TRANSLATION_PROVIDER — openrouter|ollama, 설정 시 프로필의 provider보다 우선
 # ============================================================
 TRANSLATION_PROVIDER_DEFAULT = (
-    os.environ.get("JAVSTORY_TRANSLATION_PROVIDER", "openrouter").strip().lower() or "openrouter"
+    os.environ.get("JAVSTORY_TRANSLATION_PROVIDER", "llamacpp").strip().lower() or "llamacpp"
 )
 if TRANSLATION_PROVIDER_DEFAULT not in ("openrouter", "ollama", "gemini", "llamacpp"):
-    TRANSLATION_PROVIDER_DEFAULT = "openrouter"
+    TRANSLATION_PROVIDER_DEFAULT = "llamacpp"
 
 
 def llm_platform_from_env() -> str:
     """Settings ``llmPlatform``: openai | ollama | llamacpp (openai → OpenRouter API)."""
-    raw = (os.environ.get("JAVSTORY_LLM_PLATFORM", "openai") or "openai").strip().lower()
+    raw = (os.environ.get("JAVSTORY_LLM_PLATFORM", "llamacpp") or "llamacpp").strip().lower()
     if raw in ("openai", "openrouter"):
         return "openai"
     if raw in ("ollama", "llamacpp"):
@@ -388,7 +423,9 @@ TRANSLATION_OLLAMA_MODEL_JKV_12B_DEFAULT = "ja-ko-vn-jav:latest"
 
 
 def _translation_profile() -> str:
-    v = os.environ.get("JAVSTORY_TRANSLATION_PROFILE", "default").strip().lower()
+    platform = llm_platform_from_env()
+    prof_default = "budget" if platform in ("llamacpp", "ollama") else "default"
+    v = platform_env_value("JAVSTORY_TRANSLATION_PROFILE", prof_default).strip().lower()
     if v in ("keeper", "archive", "premium", "glm", "소장"):
         return "keeper"
     if v in ("budget", "cheap", "local"):
@@ -475,8 +512,9 @@ def _effective_translation_provider(translation_provider: str | None) -> str:
     prof = _translation_profile()
     if prof in _GEMINI_PROFILE_MAP:
         return "gemini"
+    if prof == "budget":
+        return "llamacpp"
     if prof in (
-        "budget",
         "qwen35",
         "qwen3_14",
         "gemma3_12",
@@ -488,7 +526,7 @@ def _effective_translation_provider(translation_provider: str | None) -> str:
     env_p = os.environ.get("JAVSTORY_TRANSLATION_PROVIDER", "").strip().lower()
     if env_p in ("openrouter", "ollama", "gemini", "llamacpp"):
         return env_p
-    return "openrouter"
+    return "llamacpp"
 
 
 def translation_llm_tier_openrouter() -> dict:
@@ -593,15 +631,26 @@ def resolve_translation_llm_tier(
 # ============================================================
 # Harvest(크롤링) 메타 다국어 번역 모델 선택 (SettingsModel 연동)
 # - 환경변수: JAVSTORY_HARVEST_TRANSLATION_MODEL
+#   - llamacpp:gemma-4-e4b (기본)
 #   - openrouter:deepseek/deepseek-v3.2
 #   - ollama:gemma4:e4b
 #   - gemini:gemini-2.0-flash
 # ============================================================
+def _harvest_translation_model_default() -> str:
+    platform = llm_platform_from_env()
+    if platform == "llamacpp":
+        return "llamacpp:gemma-4-e4b"
+    if platform == "ollama":
+        return "ollama:gemma4:e4b"
+    return "openrouter:deepseek/deepseek-v3.2"
+
+
 def harvest_translation_llm_tier() -> dict:
-    raw = (os.environ.get("JAVSTORY_HARVEST_TRANSLATION_MODEL", "") or "").strip()
+    raw = platform_env_value(
+        "JAVSTORY_HARVEST_TRANSLATION_MODEL",
+        _harvest_translation_model_default(),
+    )
     v = raw.lower()
-    if not v:
-        v = "openrouter:deepseek/deepseek-v3.2"
 
     if v.startswith("gemini:"):
         model = raw.split(":", 1)[1].strip() if ":" in raw else "gemini-2.0-flash"
@@ -655,17 +704,16 @@ def harvest_translation_llm_tier() -> dict:
             "max_ctx": 64000,
         }
 
-    # fallback: allow passing plain model id, default to openrouter
-    return {
-        "rank": 99,
-        "name": "harvest_translation_openrouter",
-        "model": raw or "deepseek/deepseek-v3.2",
-        "provider": "openrouter",
-        "cost_tier": "low",
-        "uncensored": False,
-        "timeout": 180,
-        "max_ctx": 64000,
-    }
+    # fallback: plain preset id → llama.cpp
+    from javstory.llm.llamacpp_backend import resolve_llamacpp_preset
+
+    model = raw or "gemma-4-e4b"
+    preset = resolve_llamacpp_preset(model)
+    tier = translation_llm_tier_llamacpp()
+    tier["model"] = preset.serve_alias or preset.id
+    tier["llamacpp_preset"] = preset.id
+    tier["name"] = "harvest_translation_llamacpp"
+    return tier
 
 
 # ============================================================
@@ -712,7 +760,7 @@ def story_analysis_llm_tier(**overrides: Any) -> dict:
 
 
 def story_analysis_enabled_from_env() -> bool:
-    v = os.environ.get("JAVSTORY_STORY_ANALYSIS_ENABLED", "1").strip().lower()
+    v = os.environ.get("JAVSTORY_STORY_ANALYSIS_ENABLED", "0").strip().lower()
     return v in ("1", "true", "yes", "on")
 
 

@@ -21,7 +21,7 @@ export function ToastNotification({ message, level = "info", onDismiss }: ToastN
     <div
       className={cn(
         "flex items-center gap-2.5 px-4 py-3 rounded-xl border shadow-glass",
-        "backdrop-blur-xl text-sm pointer-events-auto animate-fade-in",
+        "backdrop-blur-xl text-base pointer-events-auto animate-fade-in",
         "min-w-[240px] max-w-[420px]",
         cfg.classes,
       )}

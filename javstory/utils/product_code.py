@@ -408,3 +408,15 @@ def resolve_product_code_for_video(
         return h
     stem = Path(str(video_path)).stem.strip()
     return stem.upper() if stem else ""
+
+
+def is_plausible_harvest_code(code: str) -> bool:
+    """수동 입력 품번 검증 — 알파벳 접두 + 숫자(2자리+) 필수 (단일 'B' 등 오입력 차단)."""
+    s = (code or "").strip().upper().replace("_", "-").replace(" ", "-")
+    if len(s) < 4:
+        return False
+    if not re.match(r"^[A-Z0-9][A-Z0-9\-]*$", s):
+        return False
+    if not re.search(r"\d{2,}", s):
+        return False
+    return True

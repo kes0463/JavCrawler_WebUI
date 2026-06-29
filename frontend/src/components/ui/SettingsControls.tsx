@@ -17,7 +17,7 @@ export function SettingsSection({
         <div className="w-7 h-7 rounded-lg bg-accent/15 flex items-center justify-center">
           <Icon className="w-3.5 h-3.5 text-accent-light" />
         </div>
-        <h2 className="text-sm font-semibold text-[#d0d0e8]">{title}</h2>
+        <h2 className="text-lg font-semibold text-[#d0d0e8]">{title}</h2>
       </div>
       <div className="space-y-4">{children}</div>
     </GlassCard>
@@ -28,8 +28,8 @@ export function SettingsRow({ label, hint, children }: { label: string; hint?: s
   return (
     <div className="flex items-start justify-between gap-4">
       <div className="shrink-0 pt-1">
-        <p className="text-sm text-[#c8c8e0]">{label}</p>
-        {hint && <p className="text-xs text-muted-foreground mt-0.5">{hint}</p>}
+        <p className="text-base text-[#c8c8e0]">{label}</p>
+        {hint && <p className="text-sm text-muted-foreground mt-0.5">{hint}</p>}
       </div>
       <div className="flex-1 max-w-xs">{children}</div>
     </div>
@@ -48,7 +48,7 @@ export function TextInput({ value, onChange, placeholder, type = "text" }: {
       value={value}
       onChange={e => onChange(e.target.value)}
       placeholder={placeholder}
-      className="w-full h-9 px-3 text-sm rounded-xl bg-bg-base border border-white/[0.08] text-white placeholder:text-muted-foreground focus:outline-none focus:border-accent/50 focus:ring-1 focus:ring-accent/30 transition-all"
+      className="w-full h-10 px-3 text-base rounded-xl bg-bg-base border border-white/[0.08] text-white placeholder:text-muted-foreground focus:outline-none focus:border-accent/50 focus:ring-1 focus:ring-accent/30 transition-all"
     />
   );
 }
@@ -78,7 +78,7 @@ export function SelectInput({ value, onChange, options }: {
     <select
       value={value}
       onChange={e => onChange(e.target.value)}
-      className="w-full h-9 px-3 text-sm rounded-xl bg-bg-base border border-white/[0.08] text-[#c8c8e0] focus:outline-none focus:border-accent/50 appearance-none"
+      className="w-full h-10 px-3 text-base rounded-xl bg-bg-base border border-white/[0.08] text-[#c8c8e0] focus:outline-none focus:border-accent/50 appearance-none"
     >
       {options.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
     </select>

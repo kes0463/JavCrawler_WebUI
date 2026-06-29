@@ -32,17 +32,20 @@ class PreviewWorker(CancellableQThread):
 
             self.output_path.parent.mkdir(parents=True, exist_ok=True)
 
-            from javstory.library.highlight.video_preview import create_golden_preview
-            from javstory.utils.derived_cache import is_up_to_date, mark_up_to_date
+            from javstory.library.highlight.video_preview import (
+                create_golden_preview,
+                is_montage_preview_fresh,
+                montage_preview_params,
+            )
+            from javstory.utils.derived_cache import mark_up_to_date
             from javstory.utils.process_limit import ffmpeg_semaphore
 
             self.progressUpdated.emit(1, "기존 프리뷰 확인 중...")
             meta_path = self.output_path.with_suffix(self.output_path.suffix + ".meta.json")
-            params = {"duration_sec": 8.0, "seed": self.seed}
-            if self.output_path.is_file() and is_up_to_date(
-                meta_path=meta_path,
-                inputs={"video": self.video_path},
-                params=params,
+            params = montage_preview_params(seed=self.seed, skip_webp=False)
+            if is_montage_preview_fresh(
+                webp_path=self.output_path,
+                video_path=self.video_path,
             ):
                 self.progressUpdated.emit(100, "이미 최신 상태입니다.")
                 self.resultReady.emit(True, "프리뷰(WebP)는 이미 최신입니다.")
@@ -59,7 +62,6 @@ class PreviewWorker(CancellableQThread):
                     video_path=self.video_path,
                     output_path=self.output_path,
                     progress_callback=lambda p: self.progressUpdated.emit(int(p), "인코딩 중..."),
-                    duration_sec=8.0,
                     seed=self.seed,
                 )
             if self.is_cancelled():

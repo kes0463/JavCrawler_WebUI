@@ -22,8 +22,8 @@ export default function SettingsView() {
 
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-xl font-bold text-white">설정</h1>
-          <p className="text-sm text-muted-foreground mt-0.5">JAVSTORY Pro 환경 설정</p>
+          <h1 className="text-2xl font-bold text-white">설정</h1>
+          <p className="text-base text-muted-foreground mt-0.5">JAVSTORY Pro 환경 설정</p>
         </div>
         <div className="flex gap-2">
           <ActionButton variant="ghost" size="sm" icon={<RotateCcw className="w-3.5 h-3.5" />}>
@@ -90,7 +90,7 @@ export default function SettingsView() {
       </SettingsSection>
 
       {/* ── 앱 정보 ── */}
-      <GlassCard variant="subtle" className="flex items-center justify-between text-xs text-muted-foreground">
+      <GlassCard variant="subtle" className="flex items-center justify-between text-sm text-muted-foreground">
         <span>JAVSTORY Pro v1.0.0</span>
         <span>Python 3.11 · PySide6 · React 18</span>
       </GlassCard>

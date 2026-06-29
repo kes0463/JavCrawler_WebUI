@@ -165,3 +165,38 @@ def bootstrap_path_env() -> None:
 def describe() -> dict[str, str]:
     """현재 해석된 경로를 반환(로깅/디버깅용)."""
     return {"ffmpeg": get_ffmpeg(), "ffprobe": get_ffprobe()}
+
+
+def path_for_ffmpeg(path: Path | str, *, output: bool = False) -> str:
+    """ffmpeg/ffprobe에 넘길 경로.
+
+    Windows 절대 경로는 ``-i`` 인자 하나로 넘기므로 파일명이 ``-`` 로 시작해도 안전하다.
+    한글·[]·()·긴 경로는 ``\\\\?\\`` extended path로 보정한다.
+    출력(preview_work 등)은 plain path만 사용한다.
+    """
+    p = Path(path)
+    try:
+        resolved = str(p.resolve())
+    except OSError:
+        resolved = str(p)
+
+    if os.name != "nt":
+        return resolved
+
+    if output:
+        return resolved
+
+    needs_ext = len(resolved) >= 240 or any(c in resolved for c in "[]()")
+    if not needs_ext:
+        try:
+            resolved.encode("ascii")
+        except UnicodeEncodeError:
+            needs_ext = True
+
+    if needs_ext and not resolved.startswith("\\\\?\\"):
+        if resolved.startswith("\\\\"):
+            resolved = "\\\\?\\UNC\\" + resolved[2:]
+        else:
+            resolved = "\\\\?\\" + resolved
+
+    return resolved

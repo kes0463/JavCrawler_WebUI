@@ -329,7 +329,7 @@ class SettingsModel(QObject):
             self._translation_note_global = os.environ.get("JAVSTORY_TRANSLATION_NOTE_GLOBAL", "") or ""
         
         # 3. 기능 토글
-        self._grok_enabled = _env_bool("JAVSTORY_STORY_ANALYSIS_ENABLED", True)
+        self._grok_enabled = _env_bool("JAVSTORY_STORY_ANALYSIS_ENABLED", False)
         self._dpi_bypass = _env_bool("JAVSTORY_DPI_BYPASS_ENABLED", False)
         self._embeddings_enabled = _env_bool("JAVSTORY_EMBEDDINGS_ENABLED", False)
         self._embeddings_ollama_model = (os.environ.get("JAVSTORY_EMBEDDINGS_OLLAMA_MODEL", "") or "").strip() or "nomic-embed-text"
@@ -688,11 +688,11 @@ class SettingsModel(QObject):
 
     @Property(str, notify=harvestTranslationModelChanged)
     def harvestTranslationModel(self) -> str:
-        return str(getattr(self, "_harvest_translation_model", "openrouter:deepseek/deepseek-v3.2") or "openrouter:deepseek/deepseek-v3.2")
+        return str(getattr(self, "_harvest_translation_model", "llamacpp:gemma-4-e4b") or "llamacpp:gemma-4-e4b")
 
     @harvestTranslationModel.setter  # type: ignore[attr-defined]
     def harvestTranslationModel(self, v: str):
-        s = (v or "").strip() or "openrouter:deepseek/deepseek-v3.2"
+        s = (v or "").strip() or "llamacpp:gemma-4-e4b"
         if s != getattr(self, "_harvest_translation_model", ""):
             self._harvest_translation_model = s
             self.harvestTranslationModelChanged.emit()
@@ -1198,6 +1198,8 @@ class SettingsModel(QObject):
                 "JAVSTORY_LLAMACPP_STOP_AFTER_JOB",
                 "1" if bool(getattr(self, "_llamacpp_stop_after_job", False)) else "0",
             )
+            set_env_runtime_value("JAVSTORY_LLAMACPP_IDLE_SHUTDOWN", "1")
+            set_env_runtime_value("JAVSTORY_LLAMACPP_IDLE_TIMEOUT_SEC", "300")
             pcm = int(getattr(self, "_llamacpp_prompt_cache_mib", 0) or 0)
             if bool(getattr(self, "_llamacpp_prompt_cache", False)) and pcm <= 0:
                 from javstory.llm.llamacpp_backend import LLAMACPP_SERVER_DEFAULT_PROMPT_CACHE_MIB
@@ -1227,14 +1229,14 @@ class SettingsModel(QObject):
             "JAVSTORY_TRANSLATION_PROVIDER",
             self._translation_provider_for_profile(platform),
         )
-        set_env_runtime_value("JAVSTORY_HARVEST_TRANSLATION_MODEL", str(getattr(self, "_harvest_translation_model", "openrouter:deepseek/deepseek-v3.2")))
+        set_env_runtime_value("JAVSTORY_HARVEST_TRANSLATION_MODEL", str(getattr(self, "_harvest_translation_model", "llamacpp:gemma-4-e4b")))
         set_env_runtime_value(
             f"JAVSTORY_TRANSLATION_PROFILE_{platform_suffix}",
             self._translation_profile,
         )
         set_env_runtime_value(
             f"JAVSTORY_HARVEST_TRANSLATION_MODEL_{platform_suffix}",
-            str(getattr(self, "_harvest_translation_model", "openrouter:deepseek/deepseek-v3.2")),
+            str(getattr(self, "_harvest_translation_model", "llamacpp:gemma-4-e4b")),
         )
         set_env_runtime_value(
             f"JAVSTORY_CORRECTION_PASS2_MODEL_{platform_suffix}",

@@ -46,9 +46,9 @@ const ActionButton = forwardRef<HTMLButtonElement, ActionButtonProps>(
           "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50 focus-visible:ring-offset-1 focus-visible:ring-offset-bg-base",
           "disabled:opacity-35 disabled:pointer-events-none",
           "active:scale-[0.96]",
-          size === "sm"   && "h-8  px-3.5 text-xs",
-          size === "md"   && "h-9  px-4   text-sm",
-          size === "lg"   && "h-11 px-6   text-sm",
+          size === "sm"   && "h-9  px-3.5 text-sm",
+          size === "md"   && "h-10 px-4   text-base",
+          size === "lg"   && "h-11 px-6   text-base",
           size === "icon" && "h-9  w-9",
           variant === "primary" && [
             "bg-accent text-white",

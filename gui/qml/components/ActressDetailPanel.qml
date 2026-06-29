@@ -17,6 +17,7 @@ Item {
     property var _allWorks: []
     property var _filteredWorks: []
     property int worksPageSize: 48
+    property int worksAutoPaginateThreshold: 120
     property int worksVisibleCount: 48
     property string selectedGenreFilter: ""
     property string worksSortKey: "release_date"
@@ -207,7 +208,11 @@ Item {
         var anyUserRating = _filteredHasAnyRating(filtered)
         filtered.sort(function(a, b) { return _compareWorks(a, b, anyUserRating) })
         _filteredWorks = filtered
-        worksVisibleCount = Math.min(worksPageSize, _filteredWorks.length)
+        if (_filteredWorks.length <= worksAutoPaginateThreshold) {
+            worksVisibleCount = _filteredWorks.length
+        } else {
+            worksVisibleCount = Math.min(worksPageSize, _filteredWorks.length)
+        }
         _syncWorksListModel()
     }
 
@@ -241,7 +246,7 @@ Item {
         workGenresModel.clear()
         _allWorks = []
         _filteredWorks = []
-        worksVisibleCount = worksPageSize
+        worksVisibleCount = 0
         selectedGenreFilter = ""
         worksSortKey = "release_date"
         worksSortAscending = false

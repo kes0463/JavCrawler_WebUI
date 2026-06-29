@@ -1,4 +1,4 @@
-const { app, BrowserWindow, shell } = require("electron");
+const { app, BrowserWindow, shell, ipcMain, dialog } = require("electron");
 const { spawn } = require("child_process");
 const path = require("path");
 const net = require("net");
@@ -77,6 +77,7 @@ function createWindow() {
     webPreferences: {
       contextIsolation: true,
       nodeIntegration: false,
+      preload: path.join(__dirname, "preload.cjs"),
     },
     show: false,
   });
@@ -99,6 +100,16 @@ function createWindow() {
 // ── 앱 생명주기 ──────────────────────────────────────────────────
 
 app.whenReady().then(async () => {
+  ipcMain.handle("harvest:pick-folders", async () => {
+    const win = BrowserWindow.getFocusedWindow();
+    const result = await dialog.showOpenDialog(win ?? undefined, {
+      properties: ["openDirectory", "multiSelections"],
+      title: "Harvest 큐에 추가할 폴더 선택",
+    });
+    if (result.canceled) return [];
+    return result.filePaths;
+  });
+
   startApiServer();
   if (allowFrozenApi()) {
     try {

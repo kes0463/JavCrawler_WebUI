@@ -13,6 +13,8 @@ llama.cpp + TurboQuant KV 캐시 — subprocess ``llama-server`` + OpenAI 호환
   JAVSTORY_LLAMACPP_CTX          (-c, 기본 8192)
   JAVSTORY_TRANSLATION_LLAMACPP_MAX_TOKENS / JAVSTORY_CORRECTION_LLAMACPP_MAX_TOKENS (기본 3072)
   JAVSTORY_LLAMACPP_STOP_AFTER_JOB  1|0 (파이프라인 후 llama-server 종료)
+  JAVSTORY_LLAMACPP_IDLE_SHUTDOWN   1|0 (미사용 시 자동 종료, 기본 1)
+  JAVSTORY_LLAMACPP_IDLE_TIMEOUT_SEC  유휴 종료 대기(초, 기본 300=5분)
   JAVSTORY_LLAMACPP_PROMPT_CACHE_MB  프롬프트 캐시 RAM 상한 MiB (0=비활성, 기본 0)
   JAVSTORY_LLAMACPP_AUTO_START   1|0
 """
@@ -44,6 +46,7 @@ _active_requests: int = 0
 _idle_thread: threading.Thread | None = None
 _idle_stop_event = threading.Event()
 _idle_shutdown_logged = False
+_idle_managed_port: int | None = None
 
 LoggerFunc = Callable[[str], Any]
 
@@ -138,6 +141,32 @@ def llamacpp_idle_shutdown_enabled() -> bool:
 
 def llamacpp_idle_timeout_sec_from_env() -> int:
     return max(30, _env_int("JAVSTORY_LLAMACPP_IDLE_TIMEOUT_SEC", 300))
+
+
+def _port_from_base_url(base: str) -> int:
+    parsed = urlparse(base)
+    return int(parsed.port or 8081)
+
+
+def _track_managed_server(preset_id: str, base: str) -> None:
+    """AUTO_START=1 일 때 idle 종료 대상으로 포트·프리셋 등록."""
+    global _active_preset_id, _idle_managed_port, _last_activity_at
+    if not _env_bool("JAVSTORY_LLAMACPP_AUTO_START", True):
+        return
+    with _lock:
+        _active_preset_id = preset_id
+        _idle_managed_port = _port_from_base_url(base)
+        _last_activity_at = time.time()
+
+
+def _finalize_server_ready(
+    preset: LlamaCppModelPreset,
+    base: str,
+    *,
+    logger_func: LoggerFunc | None = None,
+) -> None:
+    _track_managed_server(preset.id, base)
+    _ensure_idle_monitor_started(logger_func=logger_func)
 
 
 def maybe_stop_llamacpp_after_job(*, logger_func: LoggerFunc | None = None) -> None:
@@ -634,6 +663,34 @@ def _server_models_match_preset(model_ids: List[str], preset: LlamaCppModelPrese
     return False
 
 
+def _maybe_idle_shutdown(*, logger_func: LoggerFunc | None = None) -> bool:
+    """유휴 시간 초과 시 llama-server 종료. 종료했으면 True."""
+    global _idle_shutdown_logged
+    if not llamacpp_idle_shutdown_enabled():
+        return False
+    timeout = llamacpp_idle_timeout_sec_from_env()
+    with _lock:
+        proc = _server_proc
+        active = int(_active_requests or 0)
+        idle_for = time.time() - float(_last_activity_at or 0.0)
+        port = _idle_managed_port
+        tracked = _active_preset_id is not None
+    if active > 0 or idle_for < timeout:
+        return False
+    proc_alive = proc is not None and proc.poll() is None
+    port_listening = bool(
+        port and (sys.platform == "win32" and _port_is_listening_netstat(port))
+    )
+    if not proc_alive and not (tracked and port_listening):
+        return False
+    log = logger_func or print
+    if not _idle_shutdown_logged:
+        log(f"[llama.cpp] {timeout}초 이상 미사용 — llama-server 자동 종료")
+        _idle_shutdown_logged = True
+    stop_llamacpp_server(logger_func=log)
+    return True
+
+
 def _ensure_idle_monitor_started(*, logger_func: LoggerFunc | None = None) -> None:
     global _idle_thread, _idle_shutdown_logged
     if not llamacpp_idle_shutdown_enabled():
@@ -651,21 +708,8 @@ def _ensure_idle_monitor_started(*, logger_func: LoggerFunc | None = None) -> No
     log = logger_func or print
 
     def _monitor() -> None:
-        global _idle_shutdown_logged
         while not _idle_stop_event.wait(5.0):
-            timeout = llamacpp_idle_timeout_sec_from_env()
-            with _lock:
-                proc = _server_proc
-                active = int(_active_requests or 0)
-                idle_for = time.time() - float(_last_activity_at or 0.0)
-            if proc is None or proc.poll() is not None:
-                continue
-            if active > 0 or idle_for < timeout:
-                continue
-            if not _idle_shutdown_logged:
-                log(f"[llama.cpp] {timeout}초 이상 미사용 — llama-server 자동 종료")
-                _idle_shutdown_logged = True
-            stop_llamacpp_server(logger_func=log)
+            _maybe_idle_shutdown(logger_func=log)
 
     _idle_thread = threading.Thread(target=_monitor, daemon=True, name="llamacpp-idle-monitor")
     _idle_thread.start()
@@ -713,17 +757,21 @@ def _terminate_llamacpp_proc(
 
 
 def stop_llamacpp_server(*, logger_func: LoggerFunc | None = None) -> None:
-    global _server_proc, _active_preset_id, _active_base_url, _active_requests
+    global _server_proc, _active_preset_id, _active_base_url, _active_requests, _idle_managed_port
     _idle_stop_event.set()
     with _lock:
         proc = _server_proc
+        port = _idle_managed_port
         _server_proc = None
         _active_preset_id = None
         _active_base_url = None
         _active_requests = 0
-    if proc is None:
+        _idle_managed_port = None
+    if proc is not None:
+        _terminate_llamacpp_proc(proc, logger_func=logger_func)
         return
-    _terminate_llamacpp_proc(proc, logger_func=logger_func)
+    if port:
+        _kill_port_owner_windows(port, logger_func=logger_func)
 
 
 def register_llamacpp_app_shutdown(app: Any, *, logger_func: LoggerFunc | None = None) -> None:
@@ -860,9 +908,7 @@ def ensure_llamacpp_server_ready(
     if check_proc is not None:
         check_proc_health_ok = _server_health_ok(base)
         if check_proc_health_ok:
-            with _lock:
-                _last_activity_at = time.time()
-            _ensure_idle_monitor_started(logger_func=log)
+            _finalize_server_ready(preset, base, logger_func=log)
             return preset.serve_alias or preset.id
         # Process alive but health check failed — treat as crashed and respawn.
         with _lock:
@@ -885,6 +931,7 @@ def ensure_llamacpp_server_ready(
             )
         touch_llamacpp_activity()
         log(f"[llama.cpp] 기존 llama-server 재사용 — {base}/v1")
+        _finalize_server_ready(preset, base, logger_func=log)
         return preset.serve_alias or preset.id
 
     if sys.platform == "win32":
@@ -954,10 +1001,7 @@ def ensure_llamacpp_server_ready(
                 if post_conflict_health_ok:
                     model_ids = _server_model_ids(base)
                     if _server_models_match_preset(model_ids, preset):
-                        with _lock:
-                            _active_preset_id = preset.id
-                            _last_activity_at = time.time()
-                        _ensure_idle_monitor_started(logger_func=log)
+                        _finalize_server_ready(preset, base, logger_func=log)
                         log(f"[llama.cpp] 포트 충돌 감지 → 기존 서버 재사용 — {base}/v1")
                         return preset.serve_alias or preset.id
                 # 2) Not healthy: kill port owner (Windows: llama-server only) then retry
@@ -975,10 +1019,7 @@ def ensure_llamacpp_server_ready(
                         if proc2.poll() is not None:
                             break
                         if _server_health_ok(base, timeout=2.0):
-                            with _lock:
-                                _active_preset_id = preset.id
-                                _last_activity_at = time.time()
-                            _ensure_idle_monitor_started(logger_func=log)
+                            _finalize_server_ready(preset, base, logger_func=log)
                             log(f"[llama.cpp] 재시작 성공 — {preset.label} @ {base}/v1")
                             return preset.serve_alias or preset.id
                         time.sleep(0.5)
@@ -992,9 +1033,7 @@ def ensure_llamacpp_server_ready(
         if _server_health_ok(base, timeout=2.0):
             with _lock:
                 _server_proc = proc
-                _active_preset_id = preset.id
-                _last_activity_at = time.time()
-            _ensure_idle_monitor_started(logger_func=log)
+            _finalize_server_ready(preset, base, logger_func=log)
             log(f"[llama.cpp] 준비 완료 — {preset.label} @ {base}/v1")
             return preset.serve_alias or preset.id
         time.sleep(0.5)

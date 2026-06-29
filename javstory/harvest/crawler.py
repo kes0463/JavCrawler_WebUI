@@ -27,8 +27,6 @@ if str(_ROOT) not in sys.path:
 
 from javstory.utils.njav_playwright import njavtv_detail_urls, scrape_njavtv_playwright_async
 from javstory.utils.common import log_ts
-
-# 폴백 스크레이퍼(순서: 123av -> missav123 -> avwiki -> njavtv)
 try:
     from javstory.harvest.scrapers import av123_scraper
 except Exception:  # pragma: no cover
@@ -271,6 +269,9 @@ def _scrape_dict_for_db(raw: dict[str, Any], product_code: str) -> dict[str, Any
     raw_actors = raw.get("actors")
     if isinstance(raw_actors, str): raw_actors = [a.strip() for a in raw_actors.split(",") if a.strip()]
     elif not isinstance(raw_actors, list): raw_actors = []
+    from javstory.utils.actress_profile import dedupe_crawled_actor_tokens
+
+    raw_actors = dedupe_crawled_actor_tokens(raw_actors)
     
     raw_genres = raw.get("genres")
     if isinstance(raw_genres, str): raw_genres = [g.strip() for g in raw_genres.split(",") if g.strip()]
@@ -342,18 +343,29 @@ def _merge_empty_only(base: dict[str, Any], extra: dict[str, Any], *, source: st
         if not _is_boilerplate_title(base["title"]):
             base["original_title"] = base["title"].strip()
 
-    # 리스트 필드: 합집합
-    for k in ("actors", "genres"):
-        a = _ensure_list_str(base.get(k))
-        b = _ensure_list_str(extra.get(k))
-        seen: set[str] = set()
-        merged: list[str] = []
-        for x in a + b:
-            if x and x not in seen:
-                seen.add(x)
-                merged.append(x)
-        if merged:
-            base[k] = merged
+    # 리스트 필드: genres는 합집합, actors는 정규화 dedupe + 1차 소스 우선
+    from javstory.utils.actress_profile import dedupe_crawled_actor_tokens
+
+    genres_a = _ensure_list_str(base.get("genres"))
+    genres_b = _ensure_list_str(extra.get("genres"))
+    if genres_a or genres_b:
+        seen_g: set[str] = set()
+        merged_g: list[str] = []
+        for x in genres_a + genres_b:
+            if x and x not in seen_g:
+                seen_g.add(x)
+                merged_g.append(x)
+        if merged_g:
+            base["genres"] = merged_g
+
+    actors_a = dedupe_crawled_actor_tokens(_ensure_list_str(base.get("actors")))
+    actors_b = dedupe_crawled_actor_tokens(_ensure_list_str(extra.get("actors")))
+    if actors_a and actors_b:
+        base["actors"] = dedupe_crawled_actor_tokens(actors_a + actors_b)
+    elif actors_b:
+        base["actors"] = actors_b
+    elif actors_a:
+        base["actors"] = actors_a
 
     # favorite_score — 항상 합산 (비어있음 여부와 무관)
     base["favorite_score"] = int(base.get("favorite_score") or 0) + int(extra.get("favorite_score") or 0)
@@ -371,10 +383,15 @@ def _merge_empty_only(base: dict[str, Any], extra: dict[str, Any], *, source: st
 
 
 def _needs_fallback(d: dict[str, Any]) -> bool:
-    """없음/부족 판정: title 또는 cover_url이 없으면 폴백."""
+    """없음/부족 판정: title·cover·synopsis 중 하나라도 부족하면 다음 소스 시도."""
     title = str(d.get("title") or "").strip()
     cover = str(d.get("cover_url") or "").strip()
-    return (not title) or (not cover) or title == "제목 없음" or cover == "이미지 누락"
+    synopsis = str(d.get("synopsis") or "").strip()
+    if (not title) or (not cover) or title == "제목 없음" or cover == "이미지 누락":
+        return True
+    if not synopsis:
+        return True
+    return False
 
 
 def _scrape_123av(product_code: str) -> dict[str, Any]:
@@ -393,6 +410,9 @@ def _scrape_123av(product_code: str) -> dict[str, Any]:
                 actresses.append(a.strip())
     except Exception:
         actresses = []
+    from javstory.utils.actress_profile import dedupe_crawled_actor_tokens
+
+    actresses = dedupe_crawled_actor_tokens(actresses)
     poster = str(getattr(info, "poster_url", "") or "").strip()
     fav = int(getattr(info, "favourite_count", 0) or 0)
     return {
@@ -415,12 +435,15 @@ def _scrape_missav123(product_code: str) -> dict[str, Any]:
         return {}
     info = missav123_scraper.fetch_video_info(product_code)
     fav = int(getattr(info, "favourite_count", 0) or 0)
+    from javstory.utils.actress_profile import dedupe_crawled_actor_tokens
+
+    actors = dedupe_crawled_actor_tokens(_ensure_list_str(getattr(info, "actresses", None)))
     return {
         "title": str(getattr(info, "title", "") or "").strip(),
         "original_title": str(getattr(info, "title", "") or "").strip(),
         "synopsis": str(getattr(info, "description", "") or "").strip(),
         "cover_url": str(getattr(info, "poster_url", "") or "").strip(),
-        "actors": _ensure_list_str(getattr(info, "actresses", None)),
+        "actors": actors,
         "genres": _ensure_list_str(getattr(info, "genres", None)),
         "release_date": str(getattr(info, "release_date", "") or "").strip(),
         "maker": str(getattr(info, "maker", "") or "").strip(),
@@ -434,12 +457,15 @@ def _scrape_avwiki(product_code: str, *, use_playwright: bool = False) -> dict[s
     if avwiki is None:
         return {}
     info = avwiki.fetch_work_info(product_code, use_playwright=use_playwright)
+    from javstory.utils.actress_profile import dedupe_crawled_actor_tokens
+
+    actors = dedupe_crawled_actor_tokens(_ensure_list_str(getattr(info, "actresses", None)))
     return {
         "title": str(getattr(info, "title", "") or "").strip(),
         "original_title": str(getattr(info, "title", "") or "").strip(),
         "synopsis": str(getattr(info, "description", "") or "").strip(),
         "cover_url": str(getattr(info, "poster_url", "") or "").strip(),
-        "actors": _ensure_list_str(getattr(info, "actresses", None)),
+        "actors": actors,
         "genres": _ensure_list_str(getattr(info, "genres", None)),
         "release_date": str(getattr(info, "release_date", "") or "").strip(),
         "maker": str(getattr(info, "maker", "") or "").strip(),
@@ -561,18 +587,22 @@ class HybridJavCrawler:
 
                     # 3. 여배우 (女優) - 모든 a 태그를 리스트로 수집 (다수 대응) + 괄호 제거(예외 처리)
                     elif "女優" in row_text or "出演자" in row_text or "出演者" in row_text:
+                        from javstory.utils.actress_profile import dedupe_crawled_actor_tokens
+
                         raw_actors = [a.text.strip() for a in row.eles('tag:a') if a.text.strip()]
-                        # [개선] 괄호 및 괄호 내부 텍스트 제거 (예: 水谷心音（藤崎りお） -> 水谷心音)
-                        actors = []
-                        for ra in raw_actors:
-                            clean_name = re.sub(r'[\(（].*?[\)）]', '', ra).strip()
-                            if clean_name: actors.append(clean_name)
-                        if actors: data["actors"] = actors
+                        actors = dedupe_crawled_actor_tokens(raw_actors)
+                        if actors:
+                            data["actors"] = actors
 
                     # 4. 장르 (ジャンル) - 모든 a 태그를 리스트로 수집 (누락 방지)
                     elif "ジャンル" in row_text or "カテゴリー" in row_text:
-                        genres = [a.text.strip() for a in row.eles('tag:a') if a.text.strip()]
-                        if genres: data["genres"] = genres
+                        from javstory.utils.common import dedupe_preserve_order
+
+                        genres = dedupe_preserve_order(
+                            [a.text.strip() for a in row.eles('tag:a') if a.text.strip()]
+                        )
+                        if genres:
+                            data["genres"] = genres
 
                     # 5. 메이커 (メーカー) - 첫 번째 a 태그 추출
                     elif "メーカー" in row_text or "브랜드" in row_text or "ブランド" in row_text:
@@ -696,4 +726,8 @@ class HybridJavCrawler:
         if not _raw_has_any_content(out):
             return {}
         out.setdefault("_source", "fallback_chain")
+        if out.get("actors"):
+            from javstory.utils.actress_profile import dedupe_crawled_actor_tokens
+
+            out["actors"] = dedupe_crawled_actor_tokens(_ensure_list_str(out.get("actors")))
         return out

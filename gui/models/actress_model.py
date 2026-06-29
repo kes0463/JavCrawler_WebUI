@@ -27,6 +27,7 @@ from javstory.utils.actress_profile import (
     resolve_actress_media_path,
     rebuild_actress_works_for_actress,
     _format_debut_ym,
+    refresh_stale_metadata_actors_for_actress,
 )
 
 _PROFILE_NAME_KEYS = frozenset({
@@ -333,6 +334,11 @@ class _ActressProfileLoadWorker(QThread):
                         "alias_type": alias.alias_type or "stage",
                         "is_primary": alias.is_primary,
                     })
+
+                synced_pcs = refresh_stale_metadata_actors_for_actress(session, aid)
+                if synced_pcs:
+                    session.commit()
+                profile["_library_refresh_pcs"] = synced_pcs
 
                 self.finished.emit(aid, profile)
             finally:
@@ -880,8 +886,18 @@ class ActressModel(QObject):
             return
         if worker is not None and self._profile_load_worker is worker:
             self._profile_load_worker = None
+        synced_pcs = profile.pop("_library_refresh_pcs", []) or []
         self._current_profile = profile
         self.currentProfileChanged.emit()
+        if synced_pcs:
+            try:
+                from gui.models.library_model import LibraryModel
+
+                lm = LibraryModel.instance()
+                if lm is not None:
+                    lm.refreshProducts(synced_pcs)
+            except Exception:
+                pass
 
     def _on_profile_load_error(
         self,
@@ -1206,11 +1222,21 @@ class ActressModel(QObject):
         if keep_id == merge_id:
             self.toastMessage.emit("같은 배우는 합칠 수 없습니다.", "warning")
             return False
-        ok = merge_actresses(keep_id, merge_id)
+        ok, linked_pcs = merge_actresses(keep_id, merge_id)
         if ok:
             self.toastMessage.emit("배우 프로필을 합쳤습니다.", "success")
             self.loadProfile(keep_id)
+            self.requestLibraryWorksAndGenres(keep_id)
             self._refresh_list()
+            if linked_pcs:
+                try:
+                    from gui.models.library_model import LibraryModel
+
+                    lm = LibraryModel.instance()
+                    if lm is not None:
+                        lm.refreshProducts(linked_pcs)
+                except Exception:
+                    pass
         else:
             self.toastMessage.emit("배우 합치기에 실패했습니다.", "error")
         return ok

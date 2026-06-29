@@ -32,6 +32,15 @@ def create_digest_video(
     if not vp.is_file():
         logger.warning(f"원본 영상 파일이 없습니다: {vp}")
         return None
+
+    if vp.suffix.lower() == ".ts":
+        from javstory.library.playback_proxy import ensure_ffmpeg_processing_source
+
+        resolved = ensure_ffmpeg_processing_source(vp)
+        if not resolved:
+            logger.warning("TS remux 실패로 다이제스트를 생략합니다: %s", vp)
+            return None
+        vp = resolved
         
     op.parent.mkdir(parents=True, exist_ok=True)
     

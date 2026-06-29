@@ -321,7 +321,14 @@ def _prewarm_llamacpp_server_bg(delay_seconds: float = 180.0) -> None:
 
         def _server() -> None:
             try:
-                from javstory.llm.llamacpp_backend import ensure_llamacpp_server_ready
+                from javstory.llm.llamacpp_backend import (
+                    ensure_llamacpp_server_ready,
+                    llamacpp_idle_shutdown_enabled,
+                )
+
+                if llamacpp_idle_shutdown_enabled():
+                    print("[Prewarm] idle shutdown 활성 — llama-server 선기동 생략 (호출 시 기동)")
+                    return
                 ensure_llamacpp_server_ready({"model": model})
                 print("[Prewarm] llama-server 준비 완료")
             except Exception as exc:

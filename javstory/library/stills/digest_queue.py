@@ -9,6 +9,7 @@ import queue
 from pathlib import Path
 
 from javstory.library.stills.digest import create_digest_video
+from javstory.utils.process_limit import ffmpeg_semaphore
 
 logger = logging.getLogger(__name__)
 
@@ -69,13 +70,14 @@ class DigestQueueManager:
                     continue
 
                 logger.info(f"🚀 [Queue] 다이제스트 인코딩 시작: {code} (대기 열: {self._queue.qsize()}개 남음)")
-                
-                create_digest_video(
-                    video_path=vp,
-                    output_path=op,
-                    speed=60,
-                    width=860
-                )
+
+                with ffmpeg_semaphore:
+                    create_digest_video(
+                        video_path=vp,
+                        output_path=op,
+                        speed=60,
+                        width=860,
+                    )
                 
                 logger.info(f"✅ [Queue] 다이제스트 인코딩 완료: {code}")
             except Exception as e:

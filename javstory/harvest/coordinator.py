@@ -7,7 +7,7 @@ Grok 스토리 맥락 JSON: 메타 `commit` 직후 `Transcription.story_grok_mod
 import sys
 import asyncio
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 import re
 
 # 프로젝트 루트를 경로에 추가
@@ -17,13 +17,13 @@ if str(PROJECT_ROOT) not in sys.path:
 
 # Harvest 내부 모듈 임포트
 from javstory.harvest.crawler import HybridJavCrawler
-from javstory.harvest.database import get_db_session_ctx, upsert_jav_metadata, Genre, Maker
+from javstory.harvest.database import get_db_session_ctx, upsert_jav_metadata, Genre, Maker, commit_with_retry
 from javstory.harvest.translator import MetadataTranslator
 from javstory.utils.actress_resolver import ActressResolver
 from javstory.utils.assets_handler import MetadataAssetsHandler
 from javstory.config.app_config import story_analysis_enabled_from_env
 
-from javstory.utils.common import log_ts as _log_ts, tagify
+from javstory.utils.common import dedupe_preserve_order, log_ts as _log_ts, tagify
 
 
 def log_ts(msg: str):
@@ -87,7 +87,7 @@ def _get_harvest_semaphore() -> threading.Semaphore:
         if _HARVEST_SEMAPHORE is None:
             import os
             try:
-                val = max(1, int(os.environ.get("JAVSTORY_HARVEST_CONCURRENCY", "2")))
+                val = max(1, int(os.environ.get("JAVSTORY_HARVEST_CONCURRENCY", "1")))
             except Exception:
                 val = 2
             _HARVEST_SEMAPHORE = threading.Semaphore(val)
@@ -104,6 +104,7 @@ async def run_crawler_for_video_path(
     skip_translation: bool = False,
     skip_media: bool = False,
     translator_instance: Optional[MetadataTranslator] = None,
+    progress_cb: Callable[[str, str, int], None] | None = None,
 ) -> dict[str, Any]:
     """
     [Phase 1-2 통합] 영상 경로를 받아 크롤링 -> 배우 매핑 -> AI 번역 -> DB 저장 -> 자산 처리까지 수행하는 마스터 파이프라인 (Async).
@@ -120,6 +121,8 @@ async def run_crawler_for_video_path(
         code = explicit or path_obj.stem.upper()
         
         log_ts(f"--- 하베스트 시작: {code} ---")
+        if progress_cb:
+            progress_cb(code, "크롤링 준비…", 15)
         
         # [수정] video_path로부터 폴더 경로 추출 (파일이면 부모, 문자열이면 그대로)
         v_path = Path(video_path)
@@ -224,9 +227,25 @@ async def run_crawler_for_video_path(
         # 1. 크롤링 (Metadata Ingestion)
         # 재크롤링(force_rebuild_story_context)일 때는 DB 상태와 무관하게 항상 웹 수집을 다시 시도한다.
         if needs_crawling or force_rebuild_story_context:
+            if progress_cb:
+                progress_cb(code, "웹 메타데이터 수집 중…", 25)
             res = await crawler.fetch_metadata_smart(code)
             if not res:
                 log_ts(f"⚠️ {code} 크롤링 실패 (데이터 없음). 로컬 표지 및 뼈대 정보 생성 중...")
+
+                with get_db_session_ctx() as session:
+                    from javstory.library.metadata_edit import is_metadata_manual_protected
+
+                    row_existing = session.query(JAVMetadata).filter_by(product_code=code).first()
+                    if is_metadata_manual_protected(row_existing):
+                        log_ts(
+                            f"✅ {code} 수동 편집된 메타데이터가 있어 실패 스켈레톤으로 덮어쓰지 않습니다."
+                        )
+                        return {
+                            "error": "crawling_failed",
+                            "product_code": code,
+                            "manual_metadata_preserved": True,
+                        }
                 
                 # [추가] 로컬 폴더에서 가장 적절한 이미지 찾기 (표지 대용)
                 local_cover = None
@@ -256,7 +275,7 @@ async def run_crawler_for_video_path(
                     from javstory.harvest.product_repository import sync_product_from_metadata_row
 
                     sync_product_from_metadata_row(session, row_fail)
-                    session.commit()
+                    commit_with_retry(session)
                 
                 return {"error": "crawling_failed", "product_code": code, "skeleton_saved": True}
                 
@@ -283,6 +302,17 @@ async def run_crawler_for_video_path(
             ) or None
 
         # 2. 배우/장르/제작사 해결 (Mapping)
+        from javstory.utils.actress_resolver import dedupe_crawled_actor_names
+
+        if isinstance(raw_actors, list):
+            raw_actors = [str(a).strip() for a in raw_actors if str(a).strip()]
+            with get_db_session_ctx() as session:
+                raw_actors = dedupe_crawled_actor_names(session, raw_actors)
+        if isinstance(raw_genres, list):
+            raw_genres = dedupe_preserve_order(
+                [str(g).strip() for g in raw_genres if str(g).strip()],
+            )
+
         resolved_actors = resolver.resolve_names(raw_actors) # JA, KO, Romaji
         
         resolved_genres = _resolve_genres(raw_genres)
@@ -313,6 +343,8 @@ async def run_crawler_for_video_path(
                     title_for_translation = ja_candidate
 
             log_ts(f"🚀 AI 한국어 번역 중…")
+            if progress_cb:
+                progress_cb(code, "AI 한국어 번역 중…", 45)
             trans_res = await translator.translate_metadata_batch(
                 code,
                 title_for_translation,
@@ -354,6 +386,21 @@ async def run_crawler_for_video_path(
 
         # 4. DB Upsert (Persistence)
         with get_db_session_ctx() as session:
+            from javstory.library.metadata_edit import (
+                harvest_merge_empty_only,
+                is_metadata_manual_protected,
+            )
+
+            existing_row = session.query(JAVMetadata).filter_by(product_code=code).first()
+            merge_empty_only = harvest_merge_empty_only(
+                existing_row,
+                force_rebuild=force_rebuild_story_context,
+            )
+            if is_metadata_manual_protected(existing_row) and force_rebuild_story_context:
+                log_ts(
+                    f"✅ {code} 수동 편집 메타데이터 — 빈 크롤·번역 결과로 필드를 지우지 않습니다."
+                )
+
             # [4-1] 제목·시놉시스: KO는 LLM, title_en / title_zh_* / synopsis_en / synopsis_zh_* 는 일본어 원문과 동일 문자열
             from javstory.harvest.scrapers.av123_scraper import _is_boilerplate_title, _has_hangul
 
@@ -405,7 +452,7 @@ async def run_crawler_for_video_path(
             row = upsert_jav_metadata(
                 session,
                 product_code=code,
-                merge_empty_only=not bool(force_rebuild_story_context),
+                merge_empty_only=merge_empty_only,
                 **titles,
                 original_title=original_title,
                 **synopses,
@@ -459,8 +506,10 @@ async def run_crawler_for_video_path(
 
             sync_product_from_metadata_row(session, row)
             sync_actress_works_for_product(session, code, source="harvest")
-            session.commit()
+            commit_with_retry(session)
             log_ts(f"✅ {code} 수집 및 DB 저장 완료 (한국어 번역 + EN/ZH 제목·시놉은 일본어 원문, 배우·장르·제작사는 DB 매핑)")
+            if progress_cb:
+                progress_cb(code, "DB 저장 완료", 70)
             # 주의: SQLAlchemy는 commit 후 객체 속성을 expire할 수 있어,
             # session 종료 후 row.id 접근 시 DetachedInstanceError가 날 수 있다.
             row_id = int(getattr(row, "id", 0) or 0)
@@ -490,7 +539,7 @@ async def run_crawler_for_video_path(
 
                 out_dir = base_root / code / "Snapshots"
                 existing = list(out_dir.glob("snapshot_*.jpg"))
-                if len(existing) < 5: 
+                if len(existing) < 5:
                     log_ts(f"📸 스냅샷 백그라운드 큐 등록 ({code})...")
                     snapshot_queue_manager.push_job(path_obj, out_dir, product_code=code)
 
@@ -501,14 +550,24 @@ async def run_crawler_for_video_path(
                     log_ts(f"🎥 다이제스트 백그라운드 큐 등록 ({code})...")
                     digest_queue_manager.push_job(path_obj, digest_path, product_code=code)
 
-                # Golden Preview(WebP) 자동 큐 등록 (존재 시 스킵)
+                # Golden Preview — Qt 큐 또는 헤드리스 큐
                 try:
                     from gui.models.preview_queue_model import PreviewQueueController
+
                     pq = PreviewQueueController.instance()
                     if pq:
                         pq.enqueue(code, str(path_obj))
+                    else:
+                        from javstory.library.highlight.preview_queue import preview_queue_manager
+
+                        preview_queue_manager.push_if_stale(code, path_obj)
                 except Exception:
-                    pass
+                    try:
+                        from javstory.library.highlight.preview_queue import preview_queue_manager
+
+                        preview_queue_manager.push_if_stale(code, path_obj)
+                    except Exception:
+                        pass
             except Exception as e:
                 log_ts(f"⚠️ 추가 미디어 구성(스냅샷/다이제스트) 도중 오류: {e}")
 
@@ -542,26 +601,43 @@ async def run_crawler_for_video_path(
 
 def _resolve_genres(japanese_genres: str | list) -> dict:
     """genres 마스터 테이블 매핑 (JA -> KO, EN, ZH) | 미매핑 시 pending 상태로 저장"""
+    from javstory.utils.common import dedupe_preserve_order
+
     if isinstance(japanese_genres, str):
         ja_list = [g.strip() for g in japanese_genres.split(",") if g.strip()]
     else:
         ja_list = [str(g).strip() for g in (japanese_genres or []) if str(g).strip()]
+    ja_list = dedupe_preserve_order(ja_list)
         
     ko_list, en_list = [], []
+    seen_ja: set[str] = set()
+    seen_ko: set[str] = set()
     with get_db_session_ctx() as session:
         try:
             for name in ja_list:
+                ja_key = name.casefold()
+                if ja_key in seen_ja:
+                    continue
                 row = session.query(Genre).filter_by(japanese=name).first()
                 if row:
-                    ko_list.append(row.korean or name)   # None이면 일본어 폴백
-                    en_list.append(row.english or name)  # None이면 일본어 폴백
+                    ko_val = row.korean or name
+                    en_val = row.english or name
                 else:
                     # [Pending 추가] 미매핑 장르 발견 → korean/english는 NULL 유지
                     new_genre = Genre(japanese=name, korean=None, english=None, needs_review=True)
                     session.add(new_genre)
-                    session.commit()
-                    ko_list.append(name)  # 폴백: 일본어 원문
-                    en_list.append(name)  # 폴백: 일본어 원문
+                    commit_with_retry(session)
+                    ko_val = name
+                    en_val = name
+                ko_key = str(ko_val or "").casefold()
+                if ko_key and ko_key in seen_ko:
+                    seen_ja.add(ja_key)
+                    continue
+                seen_ja.add(ja_key)
+                if ko_key:
+                    seen_ko.add(ko_key)
+                ko_list.append(ko_val)
+                en_list.append(en_val)
         except Exception as e:
             try:
                 session.rollback()
@@ -589,7 +665,7 @@ def _resolve_maker(japanese_maker: str) -> dict:
             if name:
                 new_maker = Maker(japanese=name, korean=None, english=None, slug=name, needs_review=True)
                 session.add(new_maker)
-                session.commit()
+                commit_with_retry(session)
                 
             return {"ja": name, "ko": name, "en": name, "zh_cn": name, "zh_tw": name}  # 폴백
         except Exception as e:

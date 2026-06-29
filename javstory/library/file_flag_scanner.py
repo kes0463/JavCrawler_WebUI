@@ -16,6 +16,11 @@ def _now_iso() -> str:
     return datetime.datetime.now().replace(microsecond=0).isoformat()
 
 
+def resolve_preview_path(product_code: str) -> str | None:
+    """그리드용 preview.webp 경로. 없으면 None."""
+    return _resolve_preview_path(product_code)
+
+
 def _resolve_preview_path(product_code: str) -> str | None:
     """그리드용 preview.webp 경로 해석(base 품번 기준). 없으면 None.
 
