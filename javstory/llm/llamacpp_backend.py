@@ -10,13 +10,15 @@ llama.cpp + TurboQuant KV 캐시 — subprocess ``llama-server`` + OpenAI 호환
   JAVSTORY_LLAMACPP_CACHE_TYPE_K / _V   TurboQuant (예: turbo3, q8_0)
   JAVSTORY_LLAMACPP_N_GPU_LAYERS (-ngl, 미설정 시 -fit on 으로 VRAM 자동 맞춤)
   JAVSTORY_LLAMACPP_FIT          on|off (기본 on, N_GPU 미설정 시)
-  JAVSTORY_LLAMACPP_CTX          (-c, 기본 8192)
+  JAVSTORY_LLAMACPP_CTX          (-c, 기본 8192 × parallel 슬롯 수)
+  JAVSTORY_LLAMACPP_PARALLEL     (--parallel, 미지정 시 JAVSTORY_HARVEST_CONCURRENCY 값 사용, 기본 1)
   JAVSTORY_TRANSLATION_LLAMACPP_MAX_TOKENS / JAVSTORY_CORRECTION_LLAMACPP_MAX_TOKENS (기본 3072)
-  JAVSTORY_LLAMACPP_STOP_AFTER_JOB  1|0 (파이프라인 후 llama-server 종료)
+  JAVSTORY_LLAMACPP_STOP_AFTER_JOB  1|0 (작업 완료 후 llama-server 종료, 기본 0 — 유휴 타임아웃으로 자동 종료)
   JAVSTORY_LLAMACPP_IDLE_SHUTDOWN   1|0 (미사용 시 자동 종료, 기본 1)
   JAVSTORY_LLAMACPP_IDLE_TIMEOUT_SEC  유휴 종료 대기(초, 기본 300=5분)
   JAVSTORY_LLAMACPP_PROMPT_CACHE_MB  프롬프트 캐시 RAM 상한 MiB (0=비활성, 기본 0)
-  JAVSTORY_LLAMACPP_AUTO_START   1|0
+  JAVSTORY_LLAMACPP_AUTO_START   1|0 (LLM 작업 시 자동 기동, 기본 1)
+  JAVSTORY_LLAMACPP_PREWARM       1|0 (앱 시작 시 선기동, 기본 0)
 """
 
 from __future__ import annotations
@@ -37,6 +39,11 @@ from urllib.parse import urlparse
 import httpx
 
 _lock = threading.Lock()
+# ensure_llamacpp_server_ready() 전체(존재 확인 → 헬스체크 → spawn 결정)를 직렬화한다.
+# harvest 동시 번역 워커 여러 개가 거의 동시에 "서버 없음"으로 판단해 llama-server를
+# 중복 기동하는 레이스를 막기 위함 — _lock 은 짧은 상태 갱신에만 쓰고, 이 락은
+# 함수 전체(spawn 대기 포함)를 감싼다.
+_ensure_lock = threading.Lock()
 _server_proc: subprocess.Popen | None = None
 _active_preset_id: Optional[str] = None
 _active_base_url: Optional[str] = None
@@ -182,10 +189,27 @@ def cleanup_llamacpp_after_job(
     """작업 종료 시 llama-server 정리.
 
     - ``cancelled=True`` (사용자 중단): 설정과 무관하게 항상 종료
-    - 정상 완료: ``JAVSTORY_LLAMACPP_STOP_AFTER_JOB=1`` 일 때만 종료
+    - 정상 완료: ``JAVSTORY_LLAMACPP_STOP_AFTER_JOB=1`` 일 때만 종료 (기본 0 — 유휴 타임아웃으로 자동 종료)
     """
     if cancelled or llamacpp_stop_after_job_enabled():
         stop_llamacpp_server(logger_func=logger_func)
+
+
+def persona_chat_uses_managed_llamacpp() -> bool:
+    """외부 OpenAI 호환 URL이 아닌, JAVSTORY가 기동·종료하는 llama-server 경로인지."""
+    configured_base = (os.environ.get("JAVSTORY_PERSONA_CHAT_BASE_URL") or "").strip()
+    if configured_base:
+        return False
+    return _env_bool("JAVSTORY_LLAMACPP_AUTO_START", True)
+
+
+def cleanup_managed_llamacpp_after_job(
+    *,
+    cancelled: bool = False,
+    logger_func: LoggerFunc | None = None,
+) -> None:
+    if persona_chat_uses_managed_llamacpp():
+        cleanup_llamacpp_after_job(cancelled=cancelled, logger_func=logger_func)
 
 
 def _env_bool(key: str, default: bool = True) -> bool:
@@ -450,8 +474,32 @@ class LlamaCppServerConfig:
             ngl = preset.default_ngl
         else:
             ngl = None
-        ctx = _env_int("JAVSTORY_LLAMACPP_CTX", preset.default_ctx)
-        par = _env_int("JAVSTORY_LLAMACPP_PARALLEL", 1)
+        par_raw = (os.environ.get("JAVSTORY_LLAMACPP_PARALLEL", "") or "").strip()
+        if par_raw:
+            try:
+                par = max(1, int(par_raw))
+            except ValueError:
+                par = 1
+        else:
+            # 명시적으로 지정하지 않았다면 harvest 동시 번역 개수만큼 슬롯을 확보해,
+            # 워커마다 llama-server를 따로 띄우지 않고 서버 1개가 병렬 요청을 처리하게 한다.
+            hc_raw = (os.environ.get("JAVSTORY_HARVEST_CONCURRENCY", "") or "").strip()
+            try:
+                hc = int(hc_raw) if hc_raw else 1
+            except ValueError:
+                hc = 1
+            par = max(1, min(5, hc))
+        ctx_raw = (os.environ.get("JAVSTORY_LLAMACPP_CTX", "") or "").strip()
+        if ctx_raw:
+            try:
+                ctx = max(512, int(ctx_raw))
+            except ValueError:
+                ctx = preset.default_ctx
+        else:
+            # 슬롯 수만큼 컨텍스트도 함께 늘려 슬롯당 컨텍스트가 preset 기본값 밑으로
+            # 줄어들지 않게 한다(그렇지 않으면 --parallel만 올렸을 때 슬롯당 컨텍스트가
+            # 부족해져 번역 응답이 잘릴 수 있음).
+            ctx = preset.default_ctx * par
         fit_raw = (os.environ.get("JAVSTORY_LLAMACPP_FIT", "on") or "on").strip().lower()
         fit_vram = fit_raw not in ("0", "false", "off", "no")
         pcm_raw = (os.environ.get("JAVSTORY_LLAMACPP_PROMPT_CACHE_MB", "") or "").strip()
@@ -857,7 +905,23 @@ def ensure_llamacpp_server_ready(
     """
     요청된 프리셋/모델에 맞게 llama-server가 떠 있는지 확인하고 없으면 기동.
     Returns: OpenAI API ``model`` 필드에 넣을 이름(serve_alias).
+
+    ``_ensure_lock`` 으로 전체 호출을 직렬화해, 동시 호출자가 여러 llama-server를
+    중복 기동하지 못하게 한다. 서버가 이미 떠 있으면 뒤따르는 호출은 헬스체크만
+    하고 곧바로 반환하므로 정상 상황에서는 대기 비용이 거의 없다.
     """
+    with _ensure_lock:
+        return _ensure_llamacpp_server_ready_locked(
+            model_cfg, logger_func=logger_func, wait_sec=wait_sec
+        )
+
+
+def _ensure_llamacpp_server_ready_locked(
+    model_cfg: Dict[str, Any] | None = None,
+    *,
+    logger_func: LoggerFunc | None = None,
+    wait_sec: float = 120.0,
+) -> str:
     global _server_proc, _active_preset_id, _active_base_url, _last_activity_at
     if not _env_bool("JAVSTORY_LLAMACPP_AUTO_START", True):
         base = llamacpp_base_url()

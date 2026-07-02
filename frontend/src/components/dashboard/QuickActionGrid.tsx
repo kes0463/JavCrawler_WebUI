@@ -1,4 +1,4 @@
-import { Search, Mic2, Layers, BookOpen } from "lucide-react";
+import { Search, Mic2, BookOpen } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useNavigation, type View } from "@/contexts/NavigationContext";
 import { GlowCard } from "@/components/ui/GlowCard";
@@ -26,14 +26,6 @@ const ACTIONS: {
     icon: Mic2,
     accent: "border-violet-500/20 shadow-glow-purple bg-violet-500/5",
     btn: "bg-violet-500/20 text-violet-300 hover:bg-violet-500/30",
-  },
-  {
-    view: "mosaic",
-    label: "Mosaic",
-    sub: "Process Queue",
-    icon: Layers,
-    accent: "border-rose-500/20 shadow-glow-pink bg-rose-500/5",
-    btn: "bg-rose-500/20 text-rose-300 hover:bg-rose-500/30",
   },
   {
     view: "library",

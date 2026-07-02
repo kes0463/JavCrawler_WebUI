@@ -13,7 +13,6 @@ import { useGlobalDragScroll } from "@/hooks/useGlobalDragScroll";
 const DashboardView  = lazy(() => import("@/views/DashboardView"));
 const HarvestView    = lazy(() => import("@/views/HarvestView"));
 const ProcessingView = lazy(() => import("@/views/ProcessingView"));
-const MosaicView     = lazy(() => import("@/views/MosaicImportView"));
 const LibraryView    = lazy(() => import("@/views/LibraryView"));
 const ActressView   = lazy(() => import("@/views/ActressView"));
 const InsightView    = lazy(() => import("@/views/InsightView"));
@@ -23,7 +22,6 @@ const VIEW_MAP: { id: View; component: React.ComponentType }[] = [
   { id: "dashboard",  component: DashboardView },
   { id: "harvest",    component: HarvestView },
   { id: "processing", component: ProcessingView },
-  { id: "mosaic",     component: MosaicView },
   { id: "library",    component: LibraryView },
   { id: "actress",    component: ActressView },
   { id: "insight",    component: InsightView },

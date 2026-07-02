@@ -1739,18 +1739,6 @@ Item {
                             }
 
                             ActionButton {
-                                text: "모자이크 제거"
-                                primary: true
-                                neonGlow: true
-                                enabled: root.selectedSkus.length >= 1
-                                onClicked: {
-                                    LibraryModel.enqueueMosaicRemoval(root.selectedSkus)
-                                    root.selectMode = false
-                                    root.selectedSkus = []
-                                }
-                            }
-
-                            ActionButton {
                                 text: "재크롤링"
                                 primary: false
                                 neonGlow: true

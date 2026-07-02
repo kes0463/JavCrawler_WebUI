@@ -294,7 +294,6 @@ class DashboardSummary(BaseModel):
     library: LibraryStats
     watch: WatchStats
     pending_count: int
-    mosaic_queue_count: int
     metadata_match_rate: float
 
 

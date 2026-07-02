@@ -11,7 +11,7 @@ import {
   pickFoldersDialog,
 } from "@/api/harvest";
 import type { HarvestItem, HarvestQueueResponse, LogEntry } from "@/api/harvest";
-import { extractFolderPathsFromDataTransferAsync, isElectron } from "@/lib/folderPaths";
+import { extractFolderPathsFromSnapshot, isElectron, snapshotDataTransfer } from "@/lib/folderPaths";
 import { GlassCard } from "@/components/ui/GlassCard";
 import { ActionButton } from "@/components/ui/ActionButton";
 import { LogPanel } from "@/components/log/LogPanel";
@@ -174,8 +174,8 @@ export default function HarvestView() {
     const normalized = [...new Set(paths.map(p => p.trim()).filter(Boolean))];
     if (!normalized.length) {
       const hint = isElectron()
-        ? "드롭된 경로를 인식하지 못했습니다. 폴더를 드롭하거나 찾아보기를 사용하세요."
-        : "드롭된 경로를 인식하지 못했습니다. start_web.bat(Electron)으로 실행하거나 찾아보기를 사용하세요.";
+        ? "드롭된 경로를 인식하지 못했습니다. 폴더(또는 동영상 파일)를 드롭하거나 찾아보기를 사용하세요."
+        : "브라우저에서는 로컬 경로를 읽을 수 없습니다. start_web.bat으로 실행하거나 찾아보기를 사용하세요.";
       showToast(hint, "warn");
       return;
     }
@@ -228,11 +228,12 @@ export default function HarvestView() {
     e.dataTransfer.dropEffect = "copy";
   }, []);
 
-  const handleDrop = useCallback(async (e: React.DragEvent) => {
+  const handleDrop = useCallback((e: React.DragEvent) => {
     e.preventDefault();
     dragDepthRef.current = 0;
     setDragging(false);
-    const paths = await extractFolderPathsFromDataTransferAsync(e.dataTransfer);
+    const snapshot = snapshotDataTransfer(e.dataTransfer);
+    const paths = extractFolderPathsFromSnapshot(snapshot);
     void handleQueueFolders(paths);
   }, [handleQueueFolders]);
 

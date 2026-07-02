@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useState } from "react";
-import { BookOpen, Tag, Layers } from "lucide-react";
+import { useState, useEffect, useRef, useCallback } from "react";
+import { BookOpen, Tag, Clock } from "lucide-react";
 import {
   fetchDashboardSummary,
   fetchPendingItems,
@@ -11,6 +11,7 @@ import {
   type SystemMetrics,
 } from "@/api/dashboard";
 import { fetchQueue, createHarvestWS, type HarvestItem } from "@/api/harvest";
+import { fetchApiStatus } from "@/api/client";
 import { ArcGauge } from "@/components/dashboard/ArcGauge";
 import { QuickActionGrid } from "@/components/dashboard/QuickActionGrid";
 import { RingProgress } from "@/components/dashboard/RingProgress";
@@ -23,16 +24,23 @@ function formatNumber(n: number) {
   return n.toLocaleString("en-US");
 }
 
+function formatLoadError(reason: unknown): string {
+  if (reason instanceof Error) return reason.message;
+  return "API 연결 실패";
+}
+
 export default function DashboardView() {
   const [summary, setSummary] = useState<DashboardSummary | null>(null);
   const [system, setSystem] = useState<SystemMetrics | null>(null);
   const [pending, setPending] = useState<PendingItem[]>([]);
   const [previewQueue, setPreviewQueue] = useState<PreviewQueueStatus | null>(null);
   const [harvestItems, setHarvestItems] = useState<HarvestItem[]>([]);
-  const [loading, setLoading] = useState(true);
+  const [summaryLoading, setSummaryLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
+    setSummaryLoading(true);
+
     const results = await Promise.allSettled([
       fetchDashboardSummary(),
       fetchSystemMetrics(),
@@ -41,44 +49,34 @@ export default function DashboardView() {
       fetchQueue(),
     ]);
 
-    let anyOk = false;
-    let lastErr: string | null = null;
-
     if (results[0].status === "fulfilled") {
       setSummary(results[0].value);
-      anyOk = true;
-    } else {
-      lastErr = results[0].reason instanceof Error ? results[0].reason.message : "API 연결 실패";
-    }
-    if (results[1].status === "fulfilled") {
-      setSystem(results[1].value);
-      anyOk = true;
-    } else if (!lastErr) {
-      lastErr = results[1].reason instanceof Error ? results[1].reason.message : "API 연결 실패";
-    }
-    if (results[2].status === "fulfilled") {
-      setPending(results[2].value);
-      anyOk = true;
-    }
-    if (results[3].status === "fulfilled") {
-      setPreviewQueue(results[3].value);
-      anyOk = true;
-    }
-    if (results[4].status === "fulfilled") {
-      setHarvestItems(results[4].value.items);
-      anyOk = true;
-    }
-
-    if (anyOk) {
       setError(null);
     } else {
-      setError(lastErr ?? "API 연결 실패");
+      setError(formatLoadError(results[0].reason));
     }
-    setLoading(false);
+
+    if (results[1].status === "fulfilled") setSystem(results[1].value);
+    if (results[2].status === "fulfilled") setPending(results[2].value);
+    if (results[3].status === "fulfilled") setPreviewQueue(results[3].value);
+    if (results[4].status === "fulfilled") setHarvestItems(results[4].value.items);
+
+    setSummaryLoading(false);
   }, []);
 
   useEffect(() => {
-    refresh();
+    let cancelled = false;
+
+    fetchApiStatus()
+      .then(() => {
+        if (!cancelled) void refresh();
+      })
+      .catch(e => {
+        if (cancelled) return;
+        setSummaryLoading(false);
+        setError(formatLoadError(e));
+      });
+
     let id: ReturnType<typeof setInterval> | undefined;
     let previewId: ReturnType<typeof setInterval> | undefined;
 
@@ -92,7 +90,7 @@ export default function DashboardView() {
     const startPolling = () => {
       if (id !== undefined) return;
       id = setInterval(() => {
-        if (document.visibilityState === "visible") refresh();
+        if (document.visibilityState === "visible") void refresh();
       }, 12000);
       previewId = setInterval(refreshPreview, 4000);
     };
@@ -109,7 +107,7 @@ export default function DashboardView() {
 
     const onVisibility = () => {
       if (document.visibilityState === "visible") {
-        refresh();
+        void refresh();
         refreshPreview();
         startPolling();
       } else {
@@ -120,6 +118,7 @@ export default function DashboardView() {
     startPolling();
     document.addEventListener("visibilitychange", onVisibility);
     return () => {
+      cancelled = true;
       stopPolling();
       document.removeEventListener("visibilitychange", onVisibility);
     };
@@ -166,63 +165,58 @@ export default function DashboardView() {
     return () => ws.close();
   }, []);
 
-  if (loading && !summary) {
-    return (
-      <div className="w-full space-y-5 animate-fade-in">
-        <div className="grid grid-cols-1 sm:grid-cols-2 2xl:grid-cols-3 gap-4 w-full">
-          {[0, 1, 2].map(i => (
-            <GlowCard key={i}>
-              <Skeleton className="h-24 w-full" />
-            </GlowCard>
-          ))}
-        </div>
-      </div>
-    );
-  }
-
   const lib = summary?.library;
   const metaRate = summary?.metadata_match_rate ?? 0;
-  const mosaicCount = summary?.mosaic_queue_count ?? 0;
+  const pendingCount = summary?.pending_count ?? 0;
 
   return (
     <div className="w-full space-y-5 animate-fade-in">
       {error && (
         <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-lg text-amber-200">
-          {error} — webapi가 실행 중인지 확인하세요 (port 8765)
+          {error} — <code className="text-amber-100/90">start_web.bat</code>을 닫았다가 다시 실행해 webapi(포트 8765)를 재시작하세요.
         </div>
       )}
 
-      <div className="grid grid-cols-1 sm:grid-cols-2 2xl:grid-cols-3 gap-4 w-full items-stretch">
-        <StatCard
-          label="Total Library Items"
-          value={lib ? `${formatNumber(lib.total)} files` : "—"}
-          delta={lib ? `${lib.with_folder} linked` : undefined}
-          icon={BookOpen}
-          accent="blue"
-        />
-        <StatCard
-          label="Metadata Match Rate"
-          value=""
-          icon={Tag}
-          accent="green"
-        >
-          <RingProgress
-            value={metaRate}
-            label="Matched"
-            detail={
-              lib
-                ? `${formatNumber(lib.with_metadata)} / ${formatNumber(lib.total)}`
-                : undefined
-            }
-          />
-        </StatCard>
-        <StatCard
-          label="Mosaic Queue"
-          value={`${mosaicCount} Items`}
-          icon={Layers}
-          accent="pink"
-          sparkline={[4, 8, 6, 12, mosaicCount || 9, 7, mosaicCount || 11]}
-        />
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 w-full items-stretch">
+        {summaryLoading && !summary ? (
+          [0, 1].map(i => (
+            <GlowCard key={i}>
+              <Skeleton className="h-24 w-full" />
+            </GlowCard>
+          ))
+        ) : (
+          <>
+            <StatCard
+              label="Total Library Items"
+              value={lib ? `${formatNumber(lib.total)} files` : "—"}
+              delta={lib ? `${lib.with_folder} linked` : undefined}
+              icon={BookOpen}
+              accent="blue"
+            />
+            <StatCard
+              label="Metadata Match Rate"
+              value=""
+              icon={Tag}
+              accent="green"
+            >
+              <RingProgress
+                value={metaRate}
+                label="Matched"
+                detail={
+                  lib
+                    ? `${formatNumber(lib.with_metadata)} / ${formatNumber(lib.total)}`
+                    : undefined
+                }
+              />
+            </StatCard>
+            <StatCard
+              label="Pending Analysis"
+              value={`${formatNumber(pendingCount)} items`}
+              icon={Clock}
+              accent="orange"
+            />
+          </>
+        )}
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 w-full items-stretch">

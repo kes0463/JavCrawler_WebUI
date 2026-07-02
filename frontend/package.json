@@ -8,7 +8,7 @@
     "dev": "vite",
     "build": "tsc && vite build",
     "preview": "vite preview",
-    "electron:dev": "concurrently -k \"npm run dev\" \"wait-on http://localhost:5173 && cross-env NODE_ENV=development electron .\"",
+    "electron:dev": "concurrently -k \"cross-env JAVSTORY_VITE_PORT=5173 vite\" \"wait-on http://localhost:5173 && cross-env NODE_ENV=development JAVSTORY_VITE_PORT=5173 electron .\"",
     "electron:build": "npm run build && electron-builder",
     "electron:preview": "cross-env NODE_ENV=production electron ."
   },

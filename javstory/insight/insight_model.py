@@ -9,7 +9,11 @@ from typing import Any, Mapping, Sequence
 import httpx
 from PySide6.QtCore import QThread, Signal
 
-from javstory.llm.llamacpp_backend import llamacpp_request_scope
+from javstory.llm.llamacpp_backend import (
+    cleanup_managed_llamacpp_after_job,
+    llamacpp_request_scope,
+    persona_chat_uses_managed_llamacpp,
+)
 from javstory.persona.persona_chat import (
     ENHANCED_PERSONA_MEMORY_PATH,
     PersonaChatService,
@@ -112,6 +116,7 @@ class StreamingChatWorker(QThread):
 
     def run(self) -> None:
         """Stream tokens, emit sentence-sized chunks, and finish safely."""
+        managed_llamacpp = persona_chat_uses_managed_llamacpp()
         try:
             if not self.user_message:
                 self.response_completed.emit("")
@@ -312,6 +317,9 @@ class StreamingChatWorker(QThread):
                 except Exception:
                     pass
                 self.error_occurred.emit(str(exc))
+        finally:
+            if managed_llamacpp:
+                cleanup_managed_llamacpp_after_job(cancelled=self._cancelled)
 
     def _retry_context_limited_final(self) -> str:
         """Fallback for llama.cpp 400 context overflow on the streaming path."""

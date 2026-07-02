@@ -21,7 +21,6 @@ export interface DashboardSummary {
   library: LibraryStatsBlock;
   watch: WatchStatsBlock;
   pending_count: number;
-  mosaic_queue_count: number;
   metadata_match_rate: number;
 }
 
@@ -97,16 +96,16 @@ export interface PreviewQueueStatus {
 }
 
 export const fetchDashboardSummary = (): Promise<DashboardSummary> =>
-  get("/api/dashboard/summary");
+  get("/api/dashboard/summary", 12_000);
 
 export const fetchPendingItems = (limit = 200): Promise<PendingItem[]> =>
-  get(`/api/dashboard/pending?limit=${limit}`);
+  get(`/api/dashboard/pending?limit=${limit}`, 12_000);
 
 export const fetchSystemMetrics = (): Promise<SystemMetrics> =>
-  get("/api/dashboard/system");
+  get("/api/dashboard/system", 12_000);
 
 export const fetchPreviewQueue = (limit = 40): Promise<PreviewQueueStatus> =>
-  get(`/api/dashboard/preview-queue?limit=${limit}`);
+  get(`/api/dashboard/preview-queue?limit=${limit}`, 12_000);
 
 export const clearPreviewFinished = (): Promise<{ ok: boolean; removed: number }> =>
   del("/api/dashboard/preview-queue/finished");

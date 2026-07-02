@@ -13,5 +13,12 @@ interface Window {
     pickFolders?: () => Promise<string[]>;
     getPathForFile?: (file: File) => string;
     isElectron?: boolean;
+    windowControls?: {
+      minimize: () => Promise<void>;
+      maximize: () => Promise<boolean>;
+      close: () => Promise<void>;
+      isMaximized: () => Promise<boolean>;
+      onMaximizedChange: (callback: (maximized: boolean) => void) => () => void;
+    };
   };
 }

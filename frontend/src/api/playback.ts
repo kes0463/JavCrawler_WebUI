@@ -4,14 +4,21 @@ const WEBAPI_PORT = String(import.meta.env.VITE_WEBAPI_PORT || "8765");
 
 /**
  * dev: Vite 프록시는 대용량 `Range: bytes=0-` 응답(1GB+)을 버퍼링해 재생이 멈춘다.
- * `localhost:8765`로 직접 스트리밍한다(페이지와 동일 호스트명 `localhost` — `127.0.0.1`은 차단됨).
+ * 페이지와 동일 호스트명으로 webapi에 직접 스트리밍한다.
  */
-const STREAM_BASE =
-  import.meta.env.VITE_STREAM_BASE?.replace(/\/$/, "")
-  || (import.meta.env.DEV ? `http://localhost:${WEBAPI_PORT}` : "")
-  || import.meta.env.VITE_API_BASE?.replace(/\/$/, "")
-  || API_BASE
-  || "";
+function resolveStreamBase(): string {
+  const fromEnv = import.meta.env.VITE_STREAM_BASE?.replace(/\/$/, "");
+  if (fromEnv) return fromEnv;
+  if (import.meta.env.DEV) {
+    const host = typeof window !== "undefined" ? window.location.hostname : "localhost";
+    return `http://${host}:${WEBAPI_PORT}`;
+  }
+  return (
+    import.meta.env.VITE_API_BASE?.replace(/\/$/, "")
+    || API_BASE
+    || ""
+  );
+}
 
 export interface SubtitleTrack {
   index: number;
@@ -135,5 +142,6 @@ export const fetchSubtitleCues = (
 
 export const streamUrl = (code: string, part: number) => {
   const path = `/api/playback/${encodeURIComponent(code)}/stream/${part}`;
-  return STREAM_BASE ? `${STREAM_BASE}${path}` : path;
+  const streamBase = resolveStreamBase();
+  return streamBase ? `${streamBase}${path}` : path;
 };

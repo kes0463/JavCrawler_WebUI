@@ -45,7 +45,6 @@ def test_dashboard_summary_shape(monkeypatch):
                     "total_watch_hours": 1.5,
                 },
                 "pending_count": 2,
-                "mosaic_queue_count": 0,
                 "metadata_match_rate": 80.0,
             }
 

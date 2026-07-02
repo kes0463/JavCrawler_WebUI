@@ -6,7 +6,6 @@ PyQt6 Fluent (`gui/main_window.py`) 는 사용하지 않음. → `docs/architect
 from __future__ import annotations
 
 import os
-import re
 import sys
 import atexit
 import subprocess
@@ -20,73 +19,6 @@ from PySide6.QtQml import QQmlApplicationEngine
 _QML_DIR = Path(__file__).resolve().parent / "qml"
 _OLLAMA_SERVE_LOG_PATH: Path | None = None
 _OLLAMA_SERVE_PROC: subprocess.Popen | None = None
-
-# job_id가 파일명 기반이면 ')'가 포함될 수 있어, 마지막 '(job=...)'를 통째로 잡는다.
-_RE_MOSAIC_JOB = re.compile(r"\(job=(.+)\)\s*$")
-
-
-class _MosaicConsoleRenderer:
-    """모자이크 큐 로그를 터미널에 job별 1줄로 갱신 출력하는 렌더러."""
-
-    def __init__(self) -> None:
-        self._lines: dict[str, str] = {}
-        self._order: list[str] = []
-        self._last_render_n = 0
-        raw = (os.environ.get("JAVSTORY_MOSAIC_CONSOLE_OVERWRITE", "1") or "1").strip().lower()
-        self._overwrite = raw not in {"0", "false", "no", "off"}
-
-        # Windows 콘솔 ANSI(VT) 활성화 시도 (실패해도 일반 출력은 동작)
-        try:
-            if sys.platform == "win32":
-                os.system("")
-        except Exception:
-            pass
-
-    def update(self, job_id: str, text: str) -> None:
-        if job_id not in self._lines:
-            self._order.append(job_id)
-        self._lines[job_id] = text
-        self.render()
-
-    def render(self) -> None:
-        try:
-            cols, _ = shutil.get_terminal_size((120, 30))
-            max_w = max(40, cols - 1)
-            n = len(self._order)
-
-            # n==1이면 단일 작업 — 같은 줄을 \r로 갱신
-            if n == 1:
-                jid = self._order[0]
-                line = self._lines.get(jid, "") or ""
-                content = _RE_MOSAIC_JOB.sub("", line).strip()
-                tag = f" [{jid[-8:]}]"
-                display_line = content[:max(10, max_w - len(tag))] + tag
-                if self._overwrite:
-                    sys.stdout.write(f"\x1b[2K\r{display_line}")
-                    sys.stdout.flush()
-                else:
-                    sys.stdout.write(line + "\n")
-                    sys.stdout.flush()
-                self._last_render_n = 1
-                return
-
-            # 다중 작업: 이전 렌더 라인 수만큼 커서를 위로 이동
-            if self._last_render_n > 0:
-                sys.stdout.write(f"\x1b[{self._last_render_n}F")
-            for jid in self._order:
-                line = self._lines.get(jid, "") or ""
-                content = _RE_MOSAIC_JOB.sub("", line).strip()
-                tag = f" [{jid[-8:]}]"
-                display_line = content[:max(10, max_w - len(tag))] + tag
-                sys.stdout.write(f"\x1b[2K\r{display_line}\n")
-            sys.stdout.flush()
-            self._last_render_n = n
-        except Exception:
-            try:
-                for jid in self._order:
-                    print(self._lines.get(jid, ""))
-            except Exception:
-                pass
 
 
 def _ollama_base_url() -> str:
@@ -303,7 +235,7 @@ def _prewarm_llamacpp_server_bg(delay_seconds: float = 180.0) -> None:
     """앱 시작 후 llama-server 기동 + persona context 계산을 병렬로 미리 수행해
     페르소나 카드 재생성 대기 시간을 줄인다.
     기본 180초 지연으로 라이브러리 로딩 완료 후 시작 (JAVSTORY_LLAMACPP_PREWARM_DELAY로 조정 가능)."""
-    raw = (os.environ.get("JAVSTORY_LLAMACPP_PREWARM", "1") or "1").strip().lower()
+    raw = (os.environ.get("JAVSTORY_LLAMACPP_PREWARM", "0") or "0").strip().lower()
     if raw in ("0", "false", "no", "off"):
         return
 
@@ -401,7 +333,6 @@ def create_engine(app) -> QQmlApplicationEngine:
     from gui.models.highlight_queue_model import HighlightQueueController
     from gui.models.preview_queue_model import PreviewQueueController
     from gui.models.montage_queue_model import MontageQueueController
-    from gui.models.mosaic_queue_model import MosaicQueueController
     from gui.models.embedding_queue_model import EmbeddingQueueController
     from gui.models.settings_model import SettingsModel
     from gui.models.folder_explorer_model import FolderExplorerModel
@@ -427,8 +358,6 @@ def create_engine(app) -> QQmlApplicationEngine:
     preview_queue = PreviewQueueController(parent=app)
     print("[UI] Initializing MontageQueueController...")
     montage_queue = MontageQueueController(parent=app)
-    print("[UI] Initializing MosaicQueueController...")
-    mosaic_queue = MosaicQueueController(parent=app)
     print("[UI] Initializing EmbeddingQueueController...")
     embedding_queue = EmbeddingQueueController(parent=app)
     print("[UI] Initializing SettingsModel...")
@@ -445,8 +374,7 @@ def create_engine(app) -> QQmlApplicationEngine:
     actress_model = ActressModel(parent=app)
     folder_binding_inbox_store = FolderBindingInboxStore(parent=app)
 
-    # llama-server 프리웜 — 라이브러리 로딩 완료 후(기본 180초) 백그라운드에서 서버 기동 + context 계산
-    # JAVSTORY_LLAMACPP_PREWARM_DELAY 환경변수로 지연 시간 조정 가능
+    # llama-server는 LLM 작업 시에만 기동 (JAVSTORY_LLAMACPP_PREWARM=1 일 때만 선기동)
     _prewarm_llamacpp_server_bg()
 
     # 로컬 번역(Ollama) 설정이면 앱 시작 시 `ollama serve` 자동 실행
@@ -461,7 +389,6 @@ def create_engine(app) -> QQmlApplicationEngine:
     ctx.setContextProperty("HighlightQueue", highlight_queue)
     ctx.setContextProperty("PreviewQueue", preview_queue)
     ctx.setContextProperty("MontageQueue", montage_queue)
-    ctx.setContextProperty("MosaicQueue", mosaic_queue)
     ctx.setContextProperty("EmbeddingQueue", embedding_queue)
     ctx.setContextProperty("SettingsModel", settings)
     ctx.setContextProperty("FolderExplorerModel", folder_explorer)
@@ -532,32 +459,6 @@ def create_engine(app) -> QQmlApplicationEngine:
     except Exception:
         pass
 
-    # 모자이크 제거 큐 로그를 실행 터미널에 출력
-    try:
-        _mosaic_renderer = _MosaicConsoleRenderer()
-
-        def _on_mosaic_log(msg: str) -> None:
-            s = str(msg or "")
-            if s.startswith("[LADA]"):
-                return
-            m = _RE_MOSAIC_JOB.search(s)
-            if not m:
-                # started/done/error 로그는 "job=..."로 들어오므로 별도 파싱
-                m2 = re.search(r"\bjob=(.+)\s*$", s)
-                if m2:
-                    jid2 = m2.group(1).strip()
-                    _mosaic_renderer.update(
-                        jid2, s if f"(job={jid2})" in s else f"{s} (job={jid2})"
-                    )
-                    return
-                print(s, flush=True)
-                return
-            _mosaic_renderer.update(m.group(1), s)
-
-        mosaic_queue.logMessage.connect(_on_mosaic_log)
-    except Exception:
-        pass
-
     print(f"[UI] Loading QML from: {_QML_DIR / 'main.qml'}")
     engine.load(QUrl.fromLocalFile(str(_QML_DIR / "main.qml")))
 
@@ -575,7 +476,6 @@ def create_engine(app) -> QQmlApplicationEngine:
             highlight_queue,
             preview_queue,
             montage_queue,
-            mosaic_queue,
             embedding_queue,
         ):
             try:

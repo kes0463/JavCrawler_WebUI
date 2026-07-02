@@ -3,7 +3,7 @@
 type FileWithPath = File & { path?: string };
 
 const VIDEO_EXT = /\.(mp4|mkv|avi|wmv|mov|m4v|ts|webm|flv|mpg|mpeg)$/i;
-const WIN_PATH_RE = /^[A-Za-z]:[\\/]/;
+const WIN_PATH_RE = /^(?:[A-Za-z]:[\\/]|\\\\)/;
 
 function decodeUriPath(uri: string): string | null {
   const raw = uri.trim();
@@ -84,80 +84,65 @@ function addPathFromFile(file: File, found: Set<string>): void {
   found.add(folderFromLocalPath(p));
 }
 
-function collectFromDataTransferSync(dt: DataTransfer, found: Set<string>): void {
+export interface DataTransferSnapshot {
+  typeData: Array<{ type: string; data: string }>;
+  files: File[];
+}
+
+/** Drop 이벤트가 끝나기 전에 동기적으로 호출해야 dataTransfer 내용이 유지됩니다. */
+export function snapshotDataTransfer(dt: DataTransfer): DataTransferSnapshot {
+  const typeData: Array<{ type: string; data: string }> = [];
   for (const type of Array.from(dt.types)) {
     try {
       const data = dt.getData(type);
-      if (!data) continue;
-      const lower = type.toLowerCase();
-      if (lower.includes("uri") || lower === "text/plain" || lower === "text") {
-        extractFromTextBlob(data, found);
-      }
-      if (lower === "text/html") {
-        extractFromHtml(data, found);
-      }
+      if (data) typeData.push({ type, data });
     } catch {
       /* getData may throw for protected types */
     }
   }
 
-  for (const file of Array.from(dt.files)) {
-    addPathFromFile(file, found);
-  }
-
+  const files = Array.from(dt.files);
   if (dt.items) {
     for (let i = 0; i < dt.items.length; i++) {
       const item = dt.items[i];
-      if (item.kind === "file") {
-        const file = item.getAsFile();
-        if (file) addPathFromFile(file, found);
-      }
+      if (item.kind !== "file") continue;
+      const file = item.getAsFile();
+      if (file && !files.includes(file)) files.push(file);
     }
+  }
+
+  return { typeData, files };
+}
+
+function collectFromSnapshot(snapshot: DataTransferSnapshot, found: Set<string>): void {
+  for (const { type, data } of snapshot.typeData) {
+    const lower = type.toLowerCase();
+    if (lower.includes("uri") || lower === "text/plain" || lower === "text") {
+      extractFromTextBlob(data, found);
+    } else if (lower === "text/html") {
+      extractFromHtml(data, found);
+    } else if (data.includes("file:") || WIN_PATH_RE.test(data.trim())) {
+      extractFromTextBlob(data, found);
+    }
+  }
+
+  for (const file of snapshot.files) {
+    addPathFromFile(file, found);
   }
 }
 
-async function collectFromDataTransferAsync(dt: DataTransfer, found: Set<string>): Promise<void> {
-  if (!dt.items?.length) return;
-
-  const tasks: Promise<void>[] = [];
-  for (let i = 0; i < dt.items.length; i++) {
-    const item = dt.items[i];
-    if (item.kind !== "string") continue;
-    tasks.push(
-      new Promise(resolve => {
-        item.getAsString(chunk => {
-          if (!chunk) {
-            resolve();
-            return;
-          }
-          const lower = item.type.toLowerCase();
-          if (lower.includes("uri") || lower === "text/plain" || lower === "text") {
-            extractFromTextBlob(chunk, found);
-          }
-          if (lower === "text/html") {
-            extractFromHtml(chunk, found);
-          }
-          resolve();
-        });
-      }),
-    );
-  }
-  await Promise.all(tasks);
+export function extractFolderPathsFromSnapshot(snapshot: DataTransferSnapshot): string[] {
+  const found = new Set<string>();
+  collectFromSnapshot(snapshot, found);
+  return [...found].filter(Boolean);
 }
 
 export async function extractFolderPathsFromDataTransferAsync(dt: DataTransfer): Promise<string[]> {
-  const found = new Set<string>();
-  collectFromDataTransferSync(dt, found);
-  if (found.size === 0) {
-    await collectFromDataTransferAsync(dt, found);
-  }
-  return [...found].filter(Boolean);
+  return extractFolderPathsFromSnapshot(snapshotDataTransfer(dt));
 }
 
 export function extractFolderPathsFromDataTransfer(dt: DataTransfer): string[] {
-  const found = new Set<string>();
-  collectFromDataTransferSync(dt, found);
-  return [...found].filter(Boolean);
+  return extractFolderPathsFromSnapshot(snapshotDataTransfer(dt));
 }
 
 export function isElectron(): boolean {

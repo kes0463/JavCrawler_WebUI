@@ -9,7 +9,7 @@ export interface ApiStatus {
   db_path?: string;
 }
 
-export const fetchApiStatus = () => get<ApiStatus>("/api/status");
+export const fetchApiStatus = () => get<ApiStatus>("/api/status", 5_000);
 
 function formatApiError(text: string): string {
   if (text.includes("Not Found") || text.includes('"detail":"Not Found"')) {

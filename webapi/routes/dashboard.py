@@ -24,7 +24,6 @@ def dashboard_summary():
         library=LibraryStats(**data["library"]),
         watch=WatchStats(**data["watch"]),
         pending_count=data["pending_count"],
-        mosaic_queue_count=data["mosaic_queue_count"],
         metadata_match_rate=data["metadata_match_rate"],
     )
 

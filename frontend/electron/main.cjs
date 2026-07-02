@@ -3,11 +3,18 @@ const { spawn } = require("child_process");
 const path = require("path");
 const net = require("net");
 
-const API_PORT = 8765;
+const API_PORT = Number(process.env.JAVSTORY_WEBAPI_PORT || 8765);
+const VITE_PORT = Number(process.env.JAVSTORY_VITE_PORT || 5173);
 const IS_DEV = process.env.NODE_ENV === "development";
 
 let apiProcess = null;
 let mainWindow = null;
+
+if (IS_DEV) {
+  // 이전 Electron 인스턴스와 캐시 잠금 충돌 방지
+  app.setPath("userData", path.join(app.getPath("appData"), "javstory-electron-dev"));
+  app.commandLine.appendSwitch("disable-gpu-shader-disk-cache");
+}
 
 // ── FastAPI 서버 시작 ─────────────────────────────────────────────
 
@@ -27,9 +34,11 @@ function allowFrozenApi() {
 
 function startApiServer() {
   if (!allowFrozenApi()) {
-    console.warn(
-      "[API] Skipped — frozen. Use main.py (QML). Set JAVSTORY_ALLOW_FROZEN_API=1 to run legacy api."
-    );
+    if (IS_DEV) {
+      console.log(
+        `[API] webapi는 start_web.bat이 포트 ${API_PORT}에서 기동합니다 (legacy api/는 사용하지 않음).`
+      );
+    }
     return;
   }
   const python = findPython();
@@ -83,12 +92,19 @@ function createWindow() {
   });
 
   const url = IS_DEV
-    ? "http://localhost:5173"
+    ? `http://localhost:${VITE_PORT}`
     : `file://${path.join(__dirname, "../dist/index.html")}`;
 
   mainWindow.loadURL(url);
 
   mainWindow.once("ready-to-show", () => mainWindow.show());
+
+  const notifyMaximized = () => {
+    if (!mainWindow?.webContents) return;
+    mainWindow.webContents.send("window:maximized-changed", mainWindow.isMaximized());
+  };
+  mainWindow.on("maximize", notifyMaximized);
+  mainWindow.on("unmaximize", notifyMaximized);
 
   // 외부 링크는 기본 브라우저로
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
@@ -97,9 +113,36 @@ function createWindow() {
   });
 }
 
+function registerWindowIpc() {
+  ipcMain.handle("window:minimize", () => {
+    const win = BrowserWindow.getFocusedWindow() ?? mainWindow;
+    win?.minimize();
+  });
+
+  ipcMain.handle("window:maximize", () => {
+    const win = BrowserWindow.getFocusedWindow() ?? mainWindow;
+    if (!win) return false;
+    if (win.isMaximized()) win.unmaximize();
+    else win.maximize();
+    return win.isMaximized();
+  });
+
+  ipcMain.handle("window:close", () => {
+    const win = BrowserWindow.getFocusedWindow() ?? mainWindow;
+    win?.close();
+  });
+
+  ipcMain.handle("window:is-maximized", () => {
+    const win = BrowserWindow.getFocusedWindow() ?? mainWindow;
+    return win?.isMaximized() ?? false;
+  });
+}
+
 // ── 앱 생명주기 ──────────────────────────────────────────────────
 
 app.whenReady().then(async () => {
+  registerWindowIpc();
+
   ipcMain.handle("harvest:pick-folders", async () => {
     const cwd = path.join(__dirname, "../..");
     const python = findPython();

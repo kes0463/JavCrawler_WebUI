@@ -195,4 +195,15 @@
   .gpu {
     will-change: transform, opacity;
   }
+
+  /* Electron frameless window */
+  .electron-drag {
+    -webkit-app-region: drag;
+    app-region: drag;
+  }
+
+  .electron-no-drag {
+    -webkit-app-region: no-drag;
+    app-region: no-drag;
+  }
 }

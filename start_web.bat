@@ -17,6 +17,7 @@ call "%~dp0venv\Scripts\activate.bat"
 if errorlevel 1 exit /b 1
 
 if not defined JAVSTORY_WEBAPI_PORT set JAVSTORY_WEBAPI_PORT=8765
+if not defined JAVSTORY_VITE_PORT set JAVSTORY_VITE_PORT=5173
 
 echo Stopping any process on port %JAVSTORY_WEBAPI_PORT% ...
 :kill_port_loop
@@ -28,6 +29,19 @@ for /f "tokens=5" %%a in ('netstat -ano ^| findstr ":%JAVSTORY_WEBAPI_PORT% " ^|
 if "%FOUND%"=="1" (
     timeout /t 1 /nobreak >nul
     goto kill_port_loop
+)
+timeout /t 1 /nobreak >nul
+
+echo Stopping any process on port %JAVSTORY_VITE_PORT% (Vite) ...
+:kill_vite_loop
+set "VITE_FOUND=0"
+for /f "tokens=5" %%a in ('netstat -ano ^| findstr ":%JAVSTORY_VITE_PORT% " ^| findstr LISTENING') do (
+    set "VITE_FOUND=1"
+    taskkill /F /PID %%a >nul 2>&1
+)
+if "%VITE_FOUND%"=="1" (
+    timeout /t 1 /nobreak >nul
+    goto kill_vite_loop
 )
 timeout /t 1 /nobreak >nul
 
@@ -54,9 +68,9 @@ if not exist "frontend\node_modules" (
     popd
 )
 
-echo Starting Vite dev server (browser)...
+echo Starting Electron WebUI (Vite + Electron)...
 pushd frontend
-call npm run dev
+call npm run electron:dev
 popd
 
 pause

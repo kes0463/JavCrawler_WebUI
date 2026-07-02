@@ -8,7 +8,7 @@ import sys
 import threading
 from pathlib import Path
 
-from PySide6.QtCore import QObject, Property, Signal, Slot, QMetaObject, Qt, QTimer
+from PySide6.QtCore import QObject, Property, Signal, Slot
 
 _ROOT = Path(__file__).resolve().parent.parent.parent
 
@@ -45,8 +45,6 @@ class SettingsModel(QObject):
     isSystemDarkChanged = Signal()
     correctionProfileChanged = Signal()
     harvestConcurrencyChanged = Signal()
-    ladaOptionsChanged = Signal()
-    cudaDevicesChanged = Signal()
     embeddingsEnabledChanged = Signal()
     embeddingsModelChanged = Signal()
     excludedGenresChanged = Signal()
@@ -359,44 +357,6 @@ class SettingsModel(QObject):
         except ValueError:
             self._harvest_concurrency = 2
         self._harvest_concurrency = max(1, min(5, int(self._harvest_concurrency or 2)))
-
-        # 3-b. LADA 모자이크 제거 옵션 (1~3)
-        self._lada_parallel = max(1, min(3, _env_int("JAVSTORY_LADA_PARALLEL", 2)))
-        self._lada_passes = max(1, min(3, _env_int("JAVSTORY_LADA_PASSES", 2)))
-        self._lada_encoder = (os.environ.get("JAVSTORY_LADA_ENCODER", "hevc_nvenc") or "hevc_nvenc").strip()
-        self._lada_encoding_preset = (os.environ.get("JAVSTORY_LADA_ENCODING_PRESET", "hevc-nvidia-gpu-balanced") or "hevc-nvidia-gpu-balanced").strip()
-        self._lada_fp16 = _env_bool("JAVSTORY_LADA_FP16", True)
-
-        def _pass_det(i: int) -> str:
-            return (os.environ.get(f"JAVSTORY_LADA_PASS{i}_DET_MODEL", "v4-fast") or "v4-fast").strip()
-
-        def _pass_rest(i: int) -> str:
-            return (os.environ.get(f"JAVSTORY_LADA_PASS{i}_REST_MODEL", "basicvsrpp-v1.2") or "basicvsrpp-v1.2").strip()
-
-        def _pass_clip(i: int) -> int:
-            return max(20, min(400, _env_int(f"JAVSTORY_LADA_PASS{i}_MAX_CLIP_LENGTH", 180)))
-
-        def _pass_face(i: int) -> bool:
-            return _env_bool(f"JAVSTORY_LADA_PASS{i}_DETECT_FACE", False)
-
-        self._lada_pass1_det_model = _pass_det(1)
-        self._lada_pass1_rest_model = _pass_rest(1)
-        self._lada_pass1_max_clip_length = _pass_clip(1)
-        self._lada_pass1_detect_face = _pass_face(1)
-
-        self._lada_pass2_det_model = _pass_det(2)
-        self._lada_pass2_rest_model = _pass_rest(2)
-        self._lada_pass2_max_clip_length = _pass_clip(2)
-        self._lada_pass2_detect_face = _pass_face(2)
-
-        self._lada_pass3_det_model = _pass_det(3)
-        self._lada_pass3_rest_model = _pass_rest(3)
-        self._lada_pass3_max_clip_length = _pass_clip(3)
-        self._lada_pass3_detect_face = _pass_face(3)
-
-        # CUDA 디바이스 목록(표시용) — nvidia-smi 호출은 백그라운드 스레드에서 수행
-        self._cuda_devices: list[str] = []
-        QTimer.singleShot(0, self._start_cuda_detection)
 
         # 4. 교정 (Correction) 모델
         self._correction_profile = self._platform_env_value(
@@ -868,218 +828,6 @@ class SettingsModel(QObject):
             self._harvest_concurrency = n
             self.harvestConcurrencyChanged.emit()
 
-    # ── LADA (모자이크 제거) ───────────────────────────
-
-    @Property('QVariantList', notify=cudaDevicesChanged)
-    def cudaDevices(self):
-        return list(getattr(self, "_cuda_devices", []) or [])
-
-    def _start_cuda_detection(self) -> None:
-        threading.Thread(target=self._run_cuda_detection, daemon=True, name="cuda-detect").start()
-
-    def _run_cuda_detection(self) -> None:
-        self._cuda_devices = self._detect_cuda_devices()
-        # 메인 스레드에서 시그널 발생 (Qt 스레드 안전 규칙)
-        QMetaObject.invokeMethod(self, "_on_cuda_detected", Qt.ConnectionType.QueuedConnection)
-
-    @Slot()
-    def _on_cuda_detected(self) -> None:
-        self.cudaDevicesChanged.emit()
-
-    def _detect_cuda_devices(self) -> list[str]:
-        try:
-            out = subprocess.check_output(
-                "nvidia-smi --list-gpus",
-                shell=True,
-                stderr=subprocess.STDOUT,
-            ).decode(errors="replace")
-            lines = [ln.strip() for ln in (out or "").splitlines() if ln.strip()]
-            # Example: "GPU 0: NVIDIA GeForce RTX 4090 (UUID: GPU-...)"
-            devs = []
-            for ln in lines:
-                if ln.lower().startswith("gpu "):
-                    devs.append(ln)
-            return devs
-        except Exception:
-            return []
-
-    @Property(int, notify=ladaOptionsChanged)
-    def ladaParallel(self) -> int:
-        return int(getattr(self, "_lada_parallel", 2) or 2)
-
-    @ladaParallel.setter  # type: ignore[attr-defined]
-    def ladaParallel(self, v: int):
-        try:
-            n = int(v)
-        except Exception:
-            n = 2
-        n = max(1, min(3, n))
-        if n != getattr(self, "_lada_parallel", 2):
-            self._lada_parallel = n
-            self.ladaOptionsChanged.emit()
-
-    @Property(int, notify=ladaOptionsChanged)
-    def ladaPasses(self) -> int:
-        return int(getattr(self, "_lada_passes", 2) or 2)
-
-    @ladaPasses.setter  # type: ignore[attr-defined]
-    def ladaPasses(self, v: int):
-        try:
-            n = int(v)
-        except Exception:
-            n = 2
-        n = max(1, min(3, n))
-        if n != getattr(self, "_lada_passes", 2):
-            self._lada_passes = n
-            self.ladaOptionsChanged.emit()
-
-    @Property(str, notify=ladaOptionsChanged)
-    def ladaPass1DetModel(self) -> str: return getattr(self, "_lada_pass1_det_model", "v4-fast")
-    @ladaPass1DetModel.setter  # type: ignore[attr-defined]
-    def ladaPass1DetModel(self, v: str):
-        v = (v or "").strip() or "v4-fast"
-        if v != getattr(self, "_lada_pass1_det_model", "v4-fast"):
-            self._lada_pass1_det_model = v
-            self.ladaOptionsChanged.emit()
-
-    @Property(str, notify=ladaOptionsChanged)
-    def ladaPass1RestModel(self) -> str: return getattr(self, "_lada_pass1_rest_model", "basicvsrpp-v1.2")
-    @ladaPass1RestModel.setter  # type: ignore[attr-defined]
-    def ladaPass1RestModel(self, v: str):
-        v = (v or "").strip() or "basicvsrpp-v1.2"
-        if v != getattr(self, "_lada_pass1_rest_model", "basicvsrpp-v1.2"):
-            self._lada_pass1_rest_model = v
-            self.ladaOptionsChanged.emit()
-
-    @Property(int, notify=ladaOptionsChanged)
-    def ladaPass1MaxClipLength(self) -> int: return int(getattr(self, "_lada_pass1_max_clip_length", 180) or 180)
-    @ladaPass1MaxClipLength.setter  # type: ignore[attr-defined]
-    def ladaPass1MaxClipLength(self, v: int):
-        try:
-            n = int(v)
-        except Exception:
-            n = 180
-        n = max(20, min(400, n))
-        if n != getattr(self, "_lada_pass1_max_clip_length", 180):
-            self._lada_pass1_max_clip_length = n
-            self.ladaOptionsChanged.emit()
-
-    @Property(bool, notify=ladaOptionsChanged)
-    def ladaPass1DetectFace(self) -> bool: return bool(getattr(self, "_lada_pass1_detect_face", False))
-    @ladaPass1DetectFace.setter  # type: ignore[attr-defined]
-    def ladaPass1DetectFace(self, v: bool):
-        b = bool(v)
-        if b != bool(getattr(self, "_lada_pass1_detect_face", False)):
-            self._lada_pass1_detect_face = b
-            self.ladaOptionsChanged.emit()
-
-    @Property(str, notify=ladaOptionsChanged)
-    def ladaPass2DetModel(self) -> str: return getattr(self, "_lada_pass2_det_model", "v4-fast")
-    @ladaPass2DetModel.setter  # type: ignore[attr-defined]
-    def ladaPass2DetModel(self, v: str):
-        v = (v or "").strip() or "v4-fast"
-        if v != getattr(self, "_lada_pass2_det_model", "v4-fast"):
-            self._lada_pass2_det_model = v
-            self.ladaOptionsChanged.emit()
-
-    @Property(str, notify=ladaOptionsChanged)
-    def ladaPass2RestModel(self) -> str: return getattr(self, "_lada_pass2_rest_model", "basicvsrpp-v1.2")
-    @ladaPass2RestModel.setter  # type: ignore[attr-defined]
-    def ladaPass2RestModel(self, v: str):
-        v = (v or "").strip() or "basicvsrpp-v1.2"
-        if v != getattr(self, "_lada_pass2_rest_model", "basicvsrpp-v1.2"):
-            self._lada_pass2_rest_model = v
-            self.ladaOptionsChanged.emit()
-
-    @Property(int, notify=ladaOptionsChanged)
-    def ladaPass2MaxClipLength(self) -> int: return int(getattr(self, "_lada_pass2_max_clip_length", 180) or 180)
-    @ladaPass2MaxClipLength.setter  # type: ignore[attr-defined]
-    def ladaPass2MaxClipLength(self, v: int):
-        try:
-            n = int(v)
-        except Exception:
-            n = 180
-        n = max(20, min(400, n))
-        if n != getattr(self, "_lada_pass2_max_clip_length", 180):
-            self._lada_pass2_max_clip_length = n
-            self.ladaOptionsChanged.emit()
-
-    @Property(bool, notify=ladaOptionsChanged)
-    def ladaPass2DetectFace(self) -> bool: return bool(getattr(self, "_lada_pass2_detect_face", False))
-    @ladaPass2DetectFace.setter  # type: ignore[attr-defined]
-    def ladaPass2DetectFace(self, v: bool):
-        b = bool(v)
-        if b != bool(getattr(self, "_lada_pass2_detect_face", False)):
-            self._lada_pass2_detect_face = b
-            self.ladaOptionsChanged.emit()
-
-    @Property(str, notify=ladaOptionsChanged)
-    def ladaPass3DetModel(self) -> str: return getattr(self, "_lada_pass3_det_model", "v4-fast")
-    @ladaPass3DetModel.setter  # type: ignore[attr-defined]
-    def ladaPass3DetModel(self, v: str):
-        v = (v or "").strip() or "v4-fast"
-        if v != getattr(self, "_lada_pass3_det_model", "v4-fast"):
-            self._lada_pass3_det_model = v
-            self.ladaOptionsChanged.emit()
-
-    @Property(str, notify=ladaOptionsChanged)
-    def ladaPass3RestModel(self) -> str: return getattr(self, "_lada_pass3_rest_model", "basicvsrpp-v1.2")
-    @ladaPass3RestModel.setter  # type: ignore[attr-defined]
-    def ladaPass3RestModel(self, v: str):
-        v = (v or "").strip() or "basicvsrpp-v1.2"
-        if v != getattr(self, "_lada_pass3_rest_model", "basicvsrpp-v1.2"):
-            self._lada_pass3_rest_model = v
-            self.ladaOptionsChanged.emit()
-
-    @Property(int, notify=ladaOptionsChanged)
-    def ladaPass3MaxClipLength(self) -> int: return int(getattr(self, "_lada_pass3_max_clip_length", 180) or 180)
-    @ladaPass3MaxClipLength.setter  # type: ignore[attr-defined]
-    def ladaPass3MaxClipLength(self, v: int):
-        try:
-            n = int(v)
-        except Exception:
-            n = 180
-        n = max(20, min(400, n))
-        if n != getattr(self, "_lada_pass3_max_clip_length", 180):
-            self._lada_pass3_max_clip_length = n
-            self.ladaOptionsChanged.emit()
-
-    @Property(bool, notify=ladaOptionsChanged)
-    def ladaPass3DetectFace(self) -> bool: return bool(getattr(self, "_lada_pass3_detect_face", False))
-    @ladaPass3DetectFace.setter  # type: ignore[attr-defined]
-    def ladaPass3DetectFace(self, v: bool):
-        b = bool(v)
-        if b != bool(getattr(self, "_lada_pass3_detect_face", False)):
-            self._lada_pass3_detect_face = b
-            self.ladaOptionsChanged.emit()
-
-    @Property(str, notify=ladaOptionsChanged)
-    def ladaEncoder(self) -> str: return getattr(self, "_lada_encoder", "hevc_nvenc")
-    @ladaEncoder.setter  # type: ignore[attr-defined]
-    def ladaEncoder(self, v: str):
-        v = (v or "").strip() or "hevc_nvenc"
-        if v != getattr(self, "_lada_encoder", "hevc_nvenc"):
-            self._lada_encoder = v
-            self.ladaOptionsChanged.emit()
-
-    @Property(str, notify=ladaOptionsChanged)
-    def ladaEncodingPreset(self) -> str: return getattr(self, "_lada_encoding_preset", "hevc-nvidia-gpu-balanced")
-    @ladaEncodingPreset.setter  # type: ignore[attr-defined]
-    def ladaEncodingPreset(self, v: str):
-        v = (v or "").strip() or "hevc-nvidia-gpu-balanced"
-        if v != getattr(self, "_lada_encoding_preset", "hevc-nvidia-gpu-balanced"):
-            self._lada_encoding_preset = v
-            self.ladaOptionsChanged.emit()
-
-    @Property(bool, notify=ladaOptionsChanged)
-    def ladaFp16(self) -> bool: return bool(getattr(self, "_lada_fp16", True))
-    @ladaFp16.setter  # type: ignore[attr-defined]
-    def ladaFp16(self, v: bool):
-        b = bool(v)
-        if b != bool(getattr(self, "_lada_fp16", True)):
-            self._lada_fp16 = b
-            self.ladaOptionsChanged.emit()
-
     def _apply_mica_global(self):
         """변경된 테마에 맞춰 Mica 효과 재적용."""
         if sys.platform != "win32": return
@@ -1281,28 +1029,6 @@ class SettingsModel(QObject):
         set_env_runtime_value("JAVSTORY_SIMILARITY_EXCLUDED_GENRES", str(getattr(self, "_excluded_genres", "")))
         set_env_runtime_value("JAVSTORY_HARVEST_CONCURRENCY", str(int(self._harvest_concurrency or 2)))
 
-
-        # LADA 모자이크 제거 옵션
-        set_env_runtime_value("JAVSTORY_LADA_PARALLEL", str(int(self._lada_parallel or 2)))
-        set_env_runtime_value("JAVSTORY_LADA_PASSES", str(int(self._lada_passes or 2)))
-        set_env_runtime_value("JAVSTORY_LADA_ENCODER", str(self._lada_encoder or "hevc_nvenc"))
-        set_env_runtime_value("JAVSTORY_LADA_ENCODING_PRESET", str(self._lada_encoding_preset or "hevc-nvidia-gpu-balanced"))
-        set_env_runtime_value("JAVSTORY_LADA_FP16", "1" if bool(self._lada_fp16) else "0")
-
-        set_env_runtime_value("JAVSTORY_LADA_PASS1_DET_MODEL", str(self._lada_pass1_det_model or "v4-fast"))
-        set_env_runtime_value("JAVSTORY_LADA_PASS1_REST_MODEL", str(self._lada_pass1_rest_model or "basicvsrpp-v1.2"))
-        set_env_runtime_value("JAVSTORY_LADA_PASS1_MAX_CLIP_LENGTH", str(int(self._lada_pass1_max_clip_length or 180)))
-        set_env_runtime_value("JAVSTORY_LADA_PASS1_DETECT_FACE", "1" if bool(self._lada_pass1_detect_face) else "0")
-
-        set_env_runtime_value("JAVSTORY_LADA_PASS2_DET_MODEL", str(self._lada_pass2_det_model or "v4-fast"))
-        set_env_runtime_value("JAVSTORY_LADA_PASS2_REST_MODEL", str(self._lada_pass2_rest_model or "basicvsrpp-v1.2"))
-        set_env_runtime_value("JAVSTORY_LADA_PASS2_MAX_CLIP_LENGTH", str(int(self._lada_pass2_max_clip_length or 180)))
-        set_env_runtime_value("JAVSTORY_LADA_PASS2_DETECT_FACE", "1" if bool(self._lada_pass2_detect_face) else "0")
-
-        set_env_runtime_value("JAVSTORY_LADA_PASS3_DET_MODEL", str(self._lada_pass3_det_model or "v4-fast"))
-        set_env_runtime_value("JAVSTORY_LADA_PASS3_REST_MODEL", str(self._lada_pass3_rest_model or "basicvsrpp-v1.2"))
-        set_env_runtime_value("JAVSTORY_LADA_PASS3_MAX_CLIP_LENGTH", str(int(self._lada_pass3_max_clip_length or 180)))
-        set_env_runtime_value("JAVSTORY_LADA_PASS3_DETECT_FACE", "1" if bool(self._lada_pass3_detect_face) else "0")
 
         # DPI 우회 연결
         try:

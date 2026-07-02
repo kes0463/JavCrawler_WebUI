@@ -102,7 +102,7 @@ export default function LibraryView() {
   const [coverRev, setCoverRev] = useState<Record<string, number>>({});
   const [genreOptions, setGenreOptions] = useState<LibraryGenreItem[]>([]);
   const [genresLoading, setGenresLoading] = useState(false);
-  const [genreOpen, setGenreOpen] = useState(true);
+  const [genreOpen, setGenreOpen] = useState(false);
   const [genreFiltering, setGenreFiltering] = useState(false);
   const genreApiWarnedRef = useRef(false);
   const skipInitialFetchRef = useRef(boot.fromSession);

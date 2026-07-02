@@ -391,61 +391,6 @@ Item {
                     onDeleteClicked: MontageQueue.removeJob(model.jobId)
                 }
             }
-
-            // 5. 모자이크 제거 큐
-            QueueAccordionCard {
-                id: mosaicCard
-                title: "모자이크 제거 큐 (LADA)"
-                badgeStatus: (MosaicQueue.runningCount > 0 || MosaicQueue.notStartedCount > 0) ? "running" : "none"
-                badgeLabel: MosaicQueue.runningCount + " 실행 / " + MosaicQueue.notStartedCount + " 대기"
-                emptyText: "처리 중인 항목이 없습니다."
-                model: MosaicQueue.queue
-
-                ActionButton {
-                    implicitWidth: Theme.queueHeaderButtonMinWidth
-                    Layout.preferredWidth: Theme.queueHeaderButtonMinWidth
-                    fixedWidthMode: true
-                    fixedWidth: Theme.queueHeaderButtonMinWidth
-                    text: "이어서 하기"
-                    primary: false
-                    height: 32
-                    enabled: MosaicQueue.notStartedCount > 0
-                    onClicked: MosaicQueue.resume()
-                }
-                ActionButton {
-                    implicitWidth: Theme.queueHeaderButtonMinWidth
-                    Layout.preferredWidth: Theme.queueHeaderButtonMinWidth
-                    fixedWidthMode: true
-                    fixedWidth: Theme.queueHeaderButtonMinWidth
-                    text: MosaicQueue.processingEnabled ? "처리 중" : "시작"
-                    primary: true
-                    height: 32
-                    enabled: !MosaicQueue.processingEnabled && MosaicQueue.notStartedCount > 0
-                    onClicked: MosaicQueue.startQueue()
-                }
-                ActionButton {
-                    implicitWidth: Theme.queueHeaderButtonMinWidth
-                    Layout.preferredWidth: Theme.queueHeaderButtonMinWidth
-                    fixedWidthMode: true
-                    fixedWidth: Theme.queueHeaderButtonMinWidth
-                    text: "완료 제거"
-                    primary: false
-                    height: 32
-                    onClicked: MosaicQueue.clearFinished()
-                }
-
-                delegate: QueueItemRow {
-                    width: ListView.view.width
-                    codeText: model.productCode || ""
-                    titleText: model.videoName || ""
-                    progressValue: ((model.progress || 0) / 100)
-                    progressIndeterminate: (model.status === "running") && (!model.progress || model.progress === 0)
-                    progressText: model.message || ""
-                    highlightCode: true
-                    showDelete: true
-                    onDeleteClicked: MosaicQueue.removeJob(model.jobId)
-                }
-            }
         }
     }
 }

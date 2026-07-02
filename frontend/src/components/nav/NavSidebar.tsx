@@ -1,6 +1,6 @@
 import { useState } from "react";
 import {
-  LayoutDashboard, Search, Mic2, Layers,
+  LayoutDashboard, Search, Mic2,
   BookOpen, BarChart2, Settings, Bell, Users,
   PanelLeftClose, PanelLeftOpen,
 } from "lucide-react";
@@ -12,7 +12,6 @@ const NAV_ITEMS: { view: View; icon: React.ElementType; label: string; badge?: s
   { view: "dashboard",  icon: LayoutDashboard, label: "Dashboard" },
   { view: "library",    icon: BookOpen,        label: "Library" },
   { view: "actress",    icon: Users,           label: "Actresses" },
-  { view: "mosaic",     icon: Layers,          label: "Mosaic", badge: "Soon" },
   { view: "harvest",    icon: Search,          label: "Queues" },
   { view: "processing", icon: Mic2,            label: "Tasks", badge: "Soon" },
   { view: "insight",    icon: BarChart2,       label: "Insight" },

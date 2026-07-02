@@ -190,16 +190,14 @@ ApplicationWindow {
         else if (idx === 2)
             processingLoader.active = true
         else if (idx === 3)
-            mosaicImportLoader.active = true
-        else if (idx === 4)
             libraryLoader.active = true
-        else if (idx === 5)
+        else if (idx === 4)
             insightLoader.active = true
-        else if (idx === 6)
+        else if (idx === 5)
             personaChatLoader.active = true
-        else if (idx === 7)
+        else if (idx === 6)
             actressLoader.active = true
-        else if (idx === 8)
+        else if (idx === 7)
             settingsLoader.active = true
     }
 
@@ -215,8 +213,8 @@ ApplicationWindow {
         else
             libraryDetailReturnActressId = 0
         pendingLibraryDetailProductCode = productCode || ""
-        sidebar.currentIndex = 4
-        navigateToIndex(4)
+        sidebar.currentIndex = 3
+        navigateToIndex(3)
         if (libraryLoader.item && pendingLibraryDetailProductCode !== "") {
             LibraryModel.loadDetail(pendingLibraryDetailProductCode)
             pendingLibraryDetailProductCode = ""
@@ -233,15 +231,15 @@ ApplicationWindow {
 
     function navigateToLibrarySearch(query) {
         LibraryModel.searchQuery = query
-        sidebar.currentIndex = 4
-        navigateToIndex(4)
+        sidebar.currentIndex = 3
+        navigateToIndex(3)
     }
 
     function navigateToActressProfile(actressId) {
         if (!actressId || actressId <= 0)
             return
         pendingActressId = actressId
-        navigateToIndex(7)
+        navigateToIndex(6)
         if (actressLoader.item) {
             actressLoader.item.selectedActressId = actressId
             actressLoader.item.showingDetail = true
@@ -362,11 +360,6 @@ ApplicationWindow {
         target: MontageQueue
         function onToastMessage(msg, level) { window.showToast(msg, level); }
     }
-    
-    Connections {
-        target: MosaicQueue
-        function onToastMessage(msg, level) { window.showToast(msg, level); }
-    }
 
     Connections {
         target: EmbeddingQueue
@@ -419,12 +412,6 @@ ApplicationWindow {
                 active: false
             }
             Loader {
-                id: mosaicImportLoader
-                source: "views/MosaicImportView.qml"
-                asynchronous: true
-                active: false
-            }
-            Loader {
                 id: libraryLoader
                 source: "views/LibraryView.qml"
                 asynchronous: true
@@ -433,7 +420,7 @@ ApplicationWindow {
                     if (pendingLibraryDetailProductCode !== "") {
                         LibraryModel.loadDetail(pendingLibraryDetailProductCode)
                         pendingLibraryDetailProductCode = ""
-                    } else if (viewStack.currentIndex === 4 && item) {
+                    } else if (viewStack.currentIndex === 3 && item) {
                         item.forceLibraryFocus()
                     }
                 }
@@ -481,9 +468,9 @@ ApplicationWindow {
         target: viewStack
         function onCurrentIndexChanged() {
             window.ensureViewLoaded(viewStack.currentIndex)
-            if (viewStack.currentIndex === 4 && libraryLoader.item)
+            if (viewStack.currentIndex === 3 && libraryLoader.item)
                 libraryLoader.item.forceLibraryFocus()
-            if (viewStack.currentIndex === 7 && actressLoader.item && actressLoader.item.actressModel) {
+            if (viewStack.currentIndex === 6 && actressLoader.item && actressLoader.item.actressModel) {
                 actressLoader.item.syncSortFromModel()
                 actressLoader.item.actressModel.refreshListIfNeeded()
                 if (pendingActressId > 0) {

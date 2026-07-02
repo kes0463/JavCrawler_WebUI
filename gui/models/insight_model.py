@@ -461,18 +461,8 @@ class InsightModel(QObject):
 
     @Slot()
     def ensurePersonaChatReady(self) -> None:
-        """페르소나 챗 탭 진입 시 llama-server를 백그라운드에서 미리 띄운다."""
-        def _worker() -> None:
-            try:
-                from javstory.llm.llamacpp_backend import ensure_llamacpp_server_ready
-                from javstory.persona.persona_chat import persona_chat_model_from_env
-
-                preset = persona_chat_model_from_env()
-                ensure_llamacpp_server_ready({"model": preset, "provider": "llamacpp"})
-            except Exception as exc:
-                self.logMessage.emit(f"[InsightModel] 페르소나 챗 워밍업 실패: {exc}")
-
-        threading.Thread(target=_worker, daemon=True, name="persona-chat-prewarm").start()
+        """페르소나 챗 탭 진입 — llama-server는 메시지 전송 시에만 기동."""
+        return
 
     @Slot(str, int)
     def removePersonaMemoryNote(self, category: str, index: int) -> None:

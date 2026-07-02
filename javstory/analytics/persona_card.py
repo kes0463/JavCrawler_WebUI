@@ -521,7 +521,11 @@ def _context_for_prompt(ctx: Dict[str, Any]) -> str:
 
 def synthesize_persona_v3(ctx: Dict[str, Any]) -> Dict[str, Any]:
     """llama.cpp JSON 합성 → v3 payload (GBNF grammar로 JSON 출력 보장)."""
-    from javstory.llm.llamacpp_backend import ensure_llamacpp_server_ready, llamacpp_openai_base_url
+    from javstory.llm.llamacpp_backend import (
+        cleanup_llamacpp_after_job,
+        ensure_llamacpp_server_ready,
+        llamacpp_openai_base_url,
+    )
 
     model = persona_card_model_from_env()
     embedding_model = ((ctx.get("semantic_profile") or {}).get("model") or "").strip()
@@ -593,6 +597,8 @@ def synthesize_persona_v3(ctx: Dict[str, Any]) -> Dict[str, Any]:
             return _normalize_v2_payload(parsed, "llamacpp")
     except Exception:
         pass
+    finally:
+        cleanup_llamacpp_after_job(cancelled=False)
 
     return _fallback_v2(ctx)
 
@@ -600,6 +606,11 @@ def synthesize_persona_v3(ctx: Dict[str, Any]) -> Dict[str, Any]:
 def _synthesize_v1_light() -> Dict[str, Any]:
     """deep 분석 비활성 시 경량 v1."""
     from javstory.config.app_config import similarity_excluded_genres_from_env
+    from javstory.llm.llamacpp_backend import (
+        cleanup_llamacpp_after_job,
+        ensure_llamacpp_server_ready,
+        llamacpp_openai_base_url,
+    )
 
     excluded = similarity_excluded_genres_from_env()
     stats = get_library_stats()
@@ -618,7 +629,6 @@ def _synthesize_v1_light() -> Dict[str, Any]:
     source = "fallback"
     try:
         import httpx
-        from javstory.llm.llamacpp_backend import ensure_llamacpp_server_ready, llamacpp_openai_base_url
 
         model = persona_card_model_from_env()
         prompt = (
@@ -642,6 +652,8 @@ def _synthesize_v1_light() -> Dict[str, Any]:
             source = "llamacpp"
     except Exception:
         body = ""
+    finally:
+        cleanup_llamacpp_after_job(cancelled=False)
 
     if not body:
         fb = _fallback_v2()

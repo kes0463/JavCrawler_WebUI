@@ -91,7 +91,8 @@ export function VideoPlayer({ session, onClose }: VideoPlayerProps) {
   const [osd, setOsd] = useState<string | null>(null);
   const [videoSize, setVideoSize] = useState({ w: 0, h: 0 });
   const [loadError, setLoadError] = useState<string | null>(null);
-  const [proxyReady, setProxyReady] = useState(true);
+  const [proxyReady, setProxyReady] = useState(false);
+  const [streamEpoch, setStreamEpoch] = useState(0);
   const [preparingProxy, setPreparingProxy] = useState(false);
   const [proxyReason, setProxyReason] = useState<string | null>(null);
   const [subtitleOptions, setSubtitleOptions] = useState<SubtitleDisplayOptions>(loadSubtitleOptions);
@@ -296,7 +297,9 @@ export function VideoPlayer({ session, onClose }: VideoPlayerProps) {
           if (!cancelled) setProxyReason(reason);
         });
         if (!cancelled) {
+          setLoadError(null);
           setProxyReady(true);
+          setStreamEpoch(e => e + 1);
           setPreparingProxy(false);
         }
       } catch (e) {
@@ -425,7 +428,7 @@ export function VideoPlayer({ session, onClose }: VideoPlayerProps) {
         {streamReady && streamSrc ? (
         <video
           ref={videoRef}
-          key={streamSrc}
+          key={`${streamSrc}-${streamEpoch}`}
           src={streamSrc}
           className="max-w-full max-h-full w-full h-full object-contain"
           playsInline

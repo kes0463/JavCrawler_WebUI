@@ -1,12 +1,13 @@
 import { Search, Bell } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { isElectron } from "@/lib/folderPaths";
 import { useNavigation, type View } from "@/contexts/NavigationContext";
+import { ElectronWindowControls } from "@/components/layout/ElectronWindowControls";
 
 const VIEW_TITLES: Record<View, string> = {
   dashboard: "Dashboard",
   harvest: "Harvest",
   processing: "Processing",
-  mosaic: "Mosaic",
   library: "Library",
   actress: "배우",
   insight: "Insight",
@@ -23,17 +24,20 @@ export function AppHeader({ className, folderAlertCount = 0, onFolderAlertClick 
   const { currentView } = useNavigation();
   const title = VIEW_TITLES[currentView];
 
+  const electron = isElectron();
+
   return (
     <header
       className={cn(
-        "flex items-center gap-4 h-[60px] px-6 shrink-0",
+        "flex items-center gap-4 h-[60px] shrink-0",
         "border-b border-white/[0.06] bg-bg-panel/80 backdrop-blur-md",
+        electron ? "pl-6 pr-0 electron-drag" : "px-6",
         className,
       )}
     >
-      <h1 className="text-3xl font-bold text-white tracking-tight shrink-0">{title}</h1>
+      <h1 className="text-3xl font-bold text-white tracking-tight shrink-0 select-none">{title}</h1>
 
-      <div className="flex-1 max-w-lg mx-auto">
+      <div className="flex-1 max-w-lg mx-auto electron-no-drag">
         <div className="relative">
           <Search className="absolute left-3.5 top-1/2 -translate-y-1/2 w-5 h-5 text-slate-500" />
           <input
@@ -50,7 +54,7 @@ export function AppHeader({ className, folderAlertCount = 0, onFolderAlertClick 
         </div>
       </div>
 
-      <div className="flex items-center gap-2 shrink-0">
+      <div className="flex items-center gap-2 shrink-0 electron-no-drag">
         <button
           type="button"
           onClick={onFolderAlertClick}
@@ -64,6 +68,7 @@ export function AppHeader({ className, folderAlertCount = 0, onFolderAlertClick 
             </span>
           )}
         </button>
+        <ElectronWindowControls />
       </div>
     </header>
   );

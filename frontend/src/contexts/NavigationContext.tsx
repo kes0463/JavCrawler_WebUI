@@ -5,7 +5,6 @@ export type View =
   | "dashboard"
   | "harvest"
   | "processing"
-  | "mosaic"
   | "library"
   | "actress"
   | "insight"

@@ -32,9 +32,11 @@ from typing import Any, Dict, List, Mapping, Sequence
 import httpx
 
 from javstory.llm.llamacpp_backend import (
+    cleanup_managed_llamacpp_after_job,
     ensure_llamacpp_server_ready,
     llamacpp_openai_base_url,
     llamacpp_request_scope,
+    persona_chat_uses_managed_llamacpp,
 )
 from javstory.config.app_config import DATA_ROOT
 from javstory.persona.erotic_persona_engine import EroticPersonaEngine, build_focused_context
@@ -3402,114 +3404,71 @@ class PersonaChatService:
                     print(f"[PersonaChatService] memory turn save failed: {e}")
                 return _openai_compatible_response(model=self.model or "persona-chat", content=content)
 
+        managed_llamacpp = persona_chat_uses_managed_llamacpp()
         try:
-            base_url, model, api_key = self._resolve_backend()
-        except Exception as exc:
-            logger.warning("Persona chat backend unavailable, using degraded mode: %s", exc)
-            response = self._degraded_chat_response(text, history=history, product_code=product_code)
-            content = (
-                ((response.get("choices") or [{}])[0].get("message") or {}).get("content")
-                if isinstance(response, dict)
-                else ""
-            )
-            if content:
-                try:
-                    self.enhanced_memory_store.record_turn(text, content)
-                    self.enhanced_memory_store.save_to_json(str(ENHANCED_PERSONA_MEMORY_PATH))
-                except Exception as e:
-                    print(f"[PersonaChatService] memory turn save failed: {e}")
-            return response
-
-        req_temperature = (
-            _situational_temperature(text, self.temperature)
-            if temperature is None
-            else float(temperature)
-        )
-        req_max_tokens = (
-            _persona_chat_max_tokens_for_context(text, self.max_tokens)
-            if max_tokens is None
-            else max(800, min(_MAX_OUTPUT_TOKENS, int(max_tokens)))
-        )
-
-        # Build expensive context once — reused across all retry attempts.
-        ctx_cache = self._build_turn_context(text, history=history, product_code=product_code)
-
-        payload = self._build_payload(
-            model=model,
-            text=text,
-            history=history,
-            product_code=product_code,
-            temperature=req_temperature,
-            max_tokens=req_max_tokens,
-            compact=False,
-            _ctx_cache=ctx_cache,
-        )
-        headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
-        compact_for_ctx = False
-
-        with httpx.Client(timeout=httpx.Timeout(self.timeout_sec, connect=5.0)) as client:
             try:
-                raw = self._post_chat_completion(
-                    client,
-                    base_url=base_url,
-                    payload=payload,
-                    headers=headers,
+                base_url, model, api_key = self._resolve_backend()
+            except Exception as exc:
+                logger.warning("Persona chat backend unavailable, using degraded mode: %s", exc)
+                response = self._degraded_chat_response(text, history=history, product_code=product_code)
+                content = (
+                    ((response.get("choices") or [{}])[0].get("message") or {}).get("content")
+                    if isinstance(response, dict)
+                    else ""
                 )
-            except httpx.HTTPStatusError as e:
-                if e.response is None or e.response.status_code != 400:
-                    raise
-                payload = self._build_payload(
-                    model=model,
-                    text=text,
-                    history=[],
-                    product_code=product_code,
-                    temperature=min(0.78, req_temperature),
-                    max_tokens=min(700 if compact_for_ctx else 1200, req_max_tokens),
-                    force_final_only=True,
-                    compact=True,
-                    _ctx_cache=ctx_cache,
-                )
-                raw = self._post_chat_completion(
-                    client,
-                    base_url=base_url,
-                    payload=payload,
-                    headers=headers,
-                )
-            content = _strip_reasoning_leak(_coalesce_response_text(raw))
-            if content and _response_still_has_reasoning_leak(content):
-                content = _strip_reasoning_leak(content)
-            if content and _is_incomplete_stage_direction_response(content):
-                content = ""
-            if not content:
-                retry_payload = self._build_payload(
-                    model=model,
-                    text=text,
-                    history=history,
-                    product_code=product_code,
-                    temperature=min(0.78, req_temperature),
-                    max_tokens=min(700 if compact_for_ctx else 1200, req_max_tokens),
-                    force_final_only=True,
-                    compact=True,
-                    _ctx_cache=ctx_cache,
-                )
+                if content:
+                    try:
+                        self.enhanced_memory_store.record_turn(text, content)
+                        self.enhanced_memory_store.save_to_json(str(ENHANCED_PERSONA_MEMORY_PATH))
+                    except Exception as e:
+                        print(f"[PersonaChatService] memory turn save failed: {e}")
+                return response
+
+            req_temperature = (
+                _situational_temperature(text, self.temperature)
+                if temperature is None
+                else float(temperature)
+            )
+            req_max_tokens = (
+                _persona_chat_max_tokens_for_context(text, self.max_tokens)
+                if max_tokens is None
+                else max(800, min(_MAX_OUTPUT_TOKENS, int(max_tokens)))
+            )
+
+            # Build expensive context once — reused across all retry attempts.
+            ctx_cache = self._build_turn_context(text, history=history, product_code=product_code)
+
+            payload = self._build_payload(
+                model=model,
+                text=text,
+                history=history,
+                product_code=product_code,
+                temperature=req_temperature,
+                max_tokens=req_max_tokens,
+                compact=False,
+                _ctx_cache=ctx_cache,
+            )
+            headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+            compact_for_ctx = False
+
+            with httpx.Client(timeout=httpx.Timeout(self.timeout_sec, connect=5.0)) as client:
                 try:
                     raw = self._post_chat_completion(
                         client,
                         base_url=base_url,
-                        payload=retry_payload,
+                        payload=payload,
                         headers=headers,
                     )
-                    payload = retry_payload
                 except httpx.HTTPStatusError as e:
                     if e.response is None or e.response.status_code != 400:
                         raise
-                    retry_payload = self._build_payload(
+                    payload = self._build_payload(
                         model=model,
                         text=text,
                         history=[],
                         product_code=product_code,
-                        temperature=0.72,
-                        max_tokens=600 if compact_for_ctx else 900,
+                        temperature=min(0.78, req_temperature),
+                        max_tokens=min(700 if compact_for_ctx else 1200, req_max_tokens),
                         force_final_only=True,
                         compact=True,
                         _ctx_cache=ctx_cache,
@@ -3517,118 +3476,166 @@ class PersonaChatService:
                     raw = self._post_chat_completion(
                         client,
                         base_url=base_url,
-                        payload=retry_payload,
+                        payload=payload,
                         headers=headers,
                     )
-                    payload = retry_payload
                 content = _strip_reasoning_leak(_coalesce_response_text(raw))
+                if content and _response_still_has_reasoning_leak(content):
+                    content = _strip_reasoning_leak(content)
                 if content and _is_incomplete_stage_direction_response(content):
                     content = ""
+                if not content:
+                    retry_payload = self._build_payload(
+                        model=model,
+                        text=text,
+                        history=history,
+                        product_code=product_code,
+                        temperature=min(0.78, req_temperature),
+                        max_tokens=min(700 if compact_for_ctx else 1200, req_max_tokens),
+                        force_final_only=True,
+                        compact=True,
+                        _ctx_cache=ctx_cache,
+                    )
+                    try:
+                        raw = self._post_chat_completion(
+                            client,
+                            base_url=base_url,
+                            payload=retry_payload,
+                            headers=headers,
+                        )
+                        payload = retry_payload
+                    except httpx.HTTPStatusError as e:
+                        if e.response is None or e.response.status_code != 400:
+                            raise
+                        retry_payload = self._build_payload(
+                            model=model,
+                            text=text,
+                            history=[],
+                            product_code=product_code,
+                            temperature=0.72,
+                            max_tokens=600 if compact_for_ctx else 900,
+                            force_final_only=True,
+                            compact=True,
+                            _ctx_cache=ctx_cache,
+                        )
+                        raw = self._post_chat_completion(
+                            client,
+                            base_url=base_url,
+                            payload=retry_payload,
+                            headers=headers,
+                        )
+                        payload = retry_payload
+                    content = _strip_reasoning_leak(_coalesce_response_text(raw))
+                    if content and _is_incomplete_stage_direction_response(content):
+                        content = ""
 
-        if content:
-            candidates, recent_codes = _recommendation_candidates_from_payload(payload)
-            actress_filter = _actress_filter_from_payload(payload)
-            if _recommendation_response_needs_replacement(
-                text,
-                content,
-                candidates,
-                recent_codes,
-                actress_filter=actress_filter or None,
-            ):
-                content = _deterministic_recommendation_response(
+            if content:
+                candidates, recent_codes = _recommendation_candidates_from_payload(payload)
+                actress_filter = _actress_filter_from_payload(payload)
+                if _recommendation_response_needs_replacement(
                     text,
+                    content,
                     candidates,
                     recent_codes,
                     actress_filter=actress_filter or None,
-                )
-            if _rated_works_analysis_response_needs_replacement(text, content):
-                rated = fetch_user_rated_products(limit=25)
-                content = _deterministic_rated_works_pattern_summary(rated)
-            if _response_still_has_reasoning_leak(content):
-                leak_retry_payload = self._build_payload(
-                    model=model,
-                    text=text,
-                    history=[],
-                    product_code=product_code,
-                    temperature=min(0.72, req_temperature),
-                    max_tokens=min(1600, req_max_tokens),
-                    force_final_only=True,
-                    compact=_is_recommendation_request(text),
-                    fast=not _is_recommendation_request(text),
-                    _ctx_cache=ctx_cache,
-                )
-                try:
-                    leak_retry_raw = self._post_chat_completion(
-                        client,
-                        base_url=base_url,
-                        payload=leak_retry_payload,
-                        headers=headers,
+                ):
+                    content = _deterministic_recommendation_response(
+                        text,
+                        candidates,
+                        recent_codes,
+                        actress_filter=actress_filter or None,
                     )
-                    leak_retry_content = _strip_reasoning_leak(_coalesce_response_text(leak_retry_raw))
-                    if leak_retry_content and not _response_still_has_reasoning_leak(leak_retry_content):
-                        content = leak_retry_content
-                        payload = leak_retry_payload
+                if _rated_works_analysis_response_needs_replacement(text, content):
+                    rated = fetch_user_rated_products(limit=25)
+                    content = _deterministic_rated_works_pattern_summary(rated)
+                if _response_still_has_reasoning_leak(content):
+                    leak_retry_payload = self._build_payload(
+                        model=model,
+                        text=text,
+                        history=[],
+                        product_code=product_code,
+                        temperature=min(0.72, req_temperature),
+                        max_tokens=min(1600, req_max_tokens),
+                        force_final_only=True,
+                        compact=_is_recommendation_request(text),
+                        fast=not _is_recommendation_request(text),
+                        _ctx_cache=ctx_cache,
+                    )
+                    try:
+                        leak_retry_raw = self._post_chat_completion(
+                            client,
+                            base_url=base_url,
+                            payload=leak_retry_payload,
+                            headers=headers,
+                        )
+                        leak_retry_content = _strip_reasoning_leak(_coalesce_response_text(leak_retry_raw))
+                        if leak_retry_content and not _response_still_has_reasoning_leak(leak_retry_content):
+                            content = leak_retry_content
+                            payload = leak_retry_payload
+                    except Exception:
+                        pass
+                content = _format_chat_response_text(content)
+                if _looks_truncated_response(content):
+                    retry_payload = self._build_payload(
+                        model=model,
+                        text=text,
+                        history=[],
+                        product_code=product_code,
+                        temperature=min(0.76, req_temperature),
+                        max_tokens=min(1400, req_max_tokens),
+                        force_final_only=True,
+                        compact=True,
+                        _ctx_cache=ctx_cache,
+                    )
+                    try:
+                        retry_raw = self._post_chat_completion(
+                            client,
+                            base_url=base_url,
+                            payload=retry_payload,
+                            headers=headers,
+                        )
+                        retry_content = _format_chat_response_text(
+                            _strip_reasoning_leak(_coalesce_response_text(retry_raw))
+                        )
+                        if retry_content and not _looks_truncated_response(retry_content):
+                            raw = retry_raw
+                            content = retry_content
+                    except Exception:
+                        content = content.rstrip() + "\n\n[응답이 문장 중간에서 끊긴 것 같아요. '계속'이라고 입력하면 이어서 정리해드릴게요.]"
+                if _looks_truncated_response(content):
+                    content = content.rstrip() + "\n\n[응답이 문장 중간에서 끊긴 것 같아요. '계속'이라고 입력하면 이어서 정리해드릴게요.]"
+                try:
+                    self.enhanced_memory_store.record_turn(text, content)
+                    threading.Thread(
+                        target=_save_memory_async,
+                        args=(self.enhanced_memory_store, str(ENHANCED_PERSONA_MEMORY_PATH)),
+                        daemon=True,
+                    ).start()
+                except Exception as e:
+                    print(f"[PersonaChatService] memory turn save failed: {e}")
+                usage = raw.get("usage") if isinstance(raw.get("usage"), dict) else {}
+                finish = "stop"
+                try:
+                    finish = raw["choices"][0].get("finish_reason") or "stop"
                 except Exception:
                     pass
-            content = _format_chat_response_text(content)
-            if _looks_truncated_response(content):
-                retry_payload = self._build_payload(
-                    model=model,
-                    text=text,
-                    history=[],
-                    product_code=product_code,
-                    temperature=min(0.76, req_temperature),
-                    max_tokens=min(1400, req_max_tokens),
-                    force_final_only=True,
-                    compact=True,
-                    _ctx_cache=ctx_cache,
+                content = _with_truncation_note(content, finish)
+                return _openai_compatible_response(
+                    model=str(raw.get("model") or model),
+                    content=content,
+                    finish_reason=finish,
+                    usage=usage,
                 )
-                try:
-                    retry_raw = self._post_chat_completion(
-                        client,
-                        base_url=base_url,
-                        payload=retry_payload,
-                        headers=headers,
-                    )
-                    retry_content = _format_chat_response_text(
-                        _strip_reasoning_leak(_coalesce_response_text(retry_raw))
-                    )
-                    if retry_content and not _looks_truncated_response(retry_content):
-                        raw = retry_raw
-                        content = retry_content
-                except Exception:
-                    content = content.rstrip() + "\n\n[응답이 문장 중간에서 끊긴 것 같아요. '계속'이라고 입력하면 이어서 정리해드릴게요.]"
-            if _looks_truncated_response(content):
-                content = content.rstrip() + "\n\n[응답이 문장 중간에서 끊긴 것 같아요. '계속'이라고 입력하면 이어서 정리해드릴게요.]"
-            try:
-                self.enhanced_memory_store.record_turn(text, content)
-                threading.Thread(
-                    target=_save_memory_async,
-                    args=(self.enhanced_memory_store, str(ENHANCED_PERSONA_MEMORY_PATH)),
-                    daemon=True,
-                ).start()
-            except Exception as e:
-                print(f"[PersonaChatService] memory turn save failed: {e}")
-            usage = raw.get("usage") if isinstance(raw.get("usage"), dict) else {}
-            finish = "stop"
-            try:
-                finish = raw["choices"][0].get("finish_reason") or "stop"
-            except Exception:
-                pass
-            content = _with_truncation_note(content, finish)
+
             return _openai_compatible_response(
                 model=str(raw.get("model") or model),
-                content=content,
-                finish_reason=finish,
-                usage=usage,
+                content="답변 형식이 내부 초안처럼 생성돼서 표시하지 않았어요. 같은 질문을 한 번만 다시 보내 주세요.",
+                finish_reason="empty",
+                usage=raw.get("usage") if isinstance(raw.get("usage"), dict) else {},
             )
-
-        return _openai_compatible_response(
-            model=str(raw.get("model") or model),
-            content="답변 형식이 내부 초안처럼 생성돼서 표시하지 않았어요. 같은 질문을 한 번만 다시 보내 주세요.",
-            finish_reason="empty",
-            usage=raw.get("usage") if isinstance(raw.get("usage"), dict) else {},
-        )
+        finally:
+            if managed_llamacpp:
+                cleanup_managed_llamacpp_after_job(cancelled=False)
 
     def close_session(self) -> None:
         """Compress the active enhanced-memory session, then clear working memory."""

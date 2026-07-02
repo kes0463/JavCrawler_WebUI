@@ -29,7 +29,6 @@ class DashboardService:
             "library": lib,
             "watch": watch,
             "pending_count": pending_count,
-            "mosaic_queue_count": 0,
             "metadata_match_rate": metadata_rate,
         }
 
