@@ -176,6 +176,17 @@ Item {
                     }
 
                     ActionButton {
+                        text: "폴더 찾아보기"
+                        primary: false
+                        height: 40
+                        onClicked: {
+                            var paths = SettingsModel.browseFolders();
+                            if (paths && paths.length > 0)
+                                HarvestModel.queueFolders(paths);
+                        }
+                    }
+
+                    ActionButton {
                         text: "폴더 수집"
                         primary: false
                         height: 40

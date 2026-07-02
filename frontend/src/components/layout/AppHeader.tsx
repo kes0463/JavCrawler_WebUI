@@ -1,4 +1,4 @@
-import { Search, Bell, ChevronDown } from "lucide-react";
+import { Search, Bell } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useNavigation, type View } from "@/contexts/NavigationContext";
 
@@ -15,9 +15,11 @@ const VIEW_TITLES: Record<View, string> = {
 
 interface AppHeaderProps {
   className?: string;
+  folderAlertCount?: number;
+  onFolderAlertClick?: () => void;
 }
 
-export function AppHeader({ className }: AppHeaderProps) {
+export function AppHeader({ className, folderAlertCount = 0, onFolderAlertClick }: AppHeaderProps) {
   const { currentView } = useNavigation();
   const title = VIEW_TITLES[currentView];
 
@@ -51,21 +53,16 @@ export function AppHeader({ className }: AppHeaderProps) {
       <div className="flex items-center gap-2 shrink-0">
         <button
           type="button"
+          onClick={onFolderAlertClick}
           className="relative w-9 h-9 rounded-xl flex items-center justify-center text-slate-400 hover:text-white hover:bg-white/[0.05] transition-colors"
-          aria-label="Notifications"
+          aria-label="폴더 알림"
         >
           <Bell className="w-4 h-4" />
-          <span className="absolute top-1.5 right-1.5 w-2 h-2 rounded-full bg-rose-500 shadow-[0_0_8px_rgba(244,63,94,0.8)]" />
-        </button>
-        <button
-          type="button"
-          className="flex items-center gap-2.5 h-10 px-3.5 rounded-xl text-base text-slate-300 hover:bg-white/[0.05] transition-colors"
-        >
-          <span className="w-7 h-7 rounded-full bg-gradient-to-br from-indigo-500 to-violet-600 flex items-center justify-center text-xs font-bold text-white">
-            A
-          </span>
-          <span className="hidden sm:inline">Admin</span>
-          <ChevronDown className="w-3.5 h-3.5 text-slate-500" />
+          {folderAlertCount > 0 && (
+            <span className="absolute -top-0.5 -right-0.5 min-w-[16px] h-4 px-1 rounded-full bg-rose-500 text-white text-[10px] font-bold flex items-center justify-center shadow-[0_0_8px_rgba(244,63,94,0.8)]">
+              {folderAlertCount > 99 ? "99+" : folderAlertCount}
+            </span>
+          )}
         </button>
       </div>
     </header>

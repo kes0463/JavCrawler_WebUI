@@ -77,10 +77,12 @@ export interface PickFoldersResponse {
 export async function pickFoldersDialog(): Promise<string[]> {
   const bridge = window.javstory;
   if (bridge?.pickFolders) {
-    return bridge.pickFolders();
+    const paths = await bridge.pickFolders();
+    return paths;
   }
   const res = await post<PickFoldersResponse>("/api/harvest/pick-folders", {});
-  return res.cancelled ? [] : res.paths;
+  const paths = res.cancelled ? [] : res.paths;
+  return paths;
 }
 
 export const startStaged = (): Promise<{ ok: boolean; queued: number }> =>

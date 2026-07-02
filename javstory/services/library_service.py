@@ -14,6 +14,7 @@ from javstory.library.path_markers import (
 )
 from javstory.library.paths import library_root
 from javstory.library.service import load_work
+from javstory.library.genre_filter import aggregate_genre_counts, apply_genre_filters
 from javstory.library.snapshots import discover_snapshot_paths
 
 _SAFE_IMAGE_ROOTS = tuple(
@@ -35,6 +36,9 @@ HARVEST_FAILED_TITLE_MARKER = "(수집 실패/정보 없음)"
 
 _STATS_CACHE: tuple[float, dict[str, int]] | None = None
 _STATS_CACHE_TTL_SEC = 30.0
+
+_GENRES_CACHE: tuple[float, list[dict[str, Any]]] | None = None
+_GENRES_CACHE_TTL_SEC = 60.0
 
 
 def _failed_crawl_filter():
@@ -186,16 +190,9 @@ def _preview_media_for(cache: dict[str, Any] | None) -> str | None:
     if not raw:
         return None
     try:
-        from javstory.library.highlight.video_preview import is_montage_preview_fresh
+        from javstory.library.highlight.video_preview import resolve_preview_media_type
 
-        p = Path(raw)
-        if is_montage_preview_fresh(webp_path=p):
-            return "mp4"
-        if p.is_file() and p.stat().st_size > 0 and p.suffix.lower() == ".webp":
-            return "webp"
-        mp4 = p.with_suffix(".mp4")
-        if mp4.is_file() and mp4.stat().st_size > 0:
-            return "mp4"
+        return resolve_preview_media_type(Path(raw))
     except OSError:
         pass
     return None
@@ -309,6 +306,8 @@ class LibraryService:
         has_metadata: Optional[bool] = None,
         has_subtitle: Optional[bool] = None,
         has_mosaic_removed: Optional[bool] = None,
+        genres: Optional[list[str]] = None,
+        genre_mode: str = "and",
         include_total: bool = True,
     ) -> dict[str, Any]:
         with get_db_session_ctx() as db:
@@ -349,6 +348,8 @@ class LibraryService:
             if has_mosaic_removed:
                 query = query.filter(_mosaic_removed_filter())
 
+            query = apply_genre_filters(query, genres, mode=genre_mode)
+
             total = query.count() if include_total else 0
             sort_col = _SORT_COLS.get(sort, JAVMetadata.updated_at)
             query = query.order_by(
@@ -387,6 +388,38 @@ class LibraryService:
 
         _STATS_CACHE = (now, result)
         return dict(result)
+
+    def list_genres(self, *, limit: int = 200, force_refresh: bool = False) -> list[dict[str, Any]]:
+        global _GENRES_CACHE
+        now = time.time()
+        if (
+            not force_refresh
+            and _GENRES_CACHE
+            and (now - _GENRES_CACHE[0]) < _GENRES_CACHE_TTL_SEC
+        ):
+            return list(_GENRES_CACHE[1])
+
+        with get_db_session_ctx() as db:
+            rows = (
+                db.query(JAVMetadata.genres_ko, JAVMetadata.genres)
+                .filter(
+                    or_(
+                        and_(
+                            JAVMetadata.genres_ko.isnot(None),
+                            JAVMetadata.genres_ko != "",
+                        ),
+                        and_(
+                            JAVMetadata.genres.isnot(None),
+                            JAVMetadata.genres != "",
+                        ),
+                    )
+                )
+                .all()
+            )
+        raw_values = [(r[0] or r[1]) for r in rows]
+        items = aggregate_genre_counts(raw_values, limit=limit)
+        _GENRES_CACHE = (now, items)
+        return items
 
     def get_by_code(self, code: str) -> Optional[JAVMetadata]:
         with get_db_session_ctx() as db:

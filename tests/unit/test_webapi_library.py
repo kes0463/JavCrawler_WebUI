@@ -66,6 +66,9 @@ def library_client(monkeypatch):
         def list_items(self, **_kwargs):
             return {"total": 0, "page": 1, "per_page": 40, "items": []}
 
+        def list_genres(self, **_kwargs):
+            return [{"name": "미인", "count": 3}]
+
         def grok_scenes_for(self, _code):
             return []
 
@@ -168,3 +171,11 @@ def test_list_library_uses_batch_scene_counts(library_client, monkeypatch):
     assert r.status_code == 200
     assert batch_calls == [["TST-002"]]
     assert r.json()["items"][0]["scene_count"] == 0
+
+
+def test_library_genres(library_client) -> None:
+    res = library_client.get("/api/library/genres")
+    assert res.status_code == 200
+    body = res.json()
+    assert body[0]["name"] == "미인"
+    assert body[0]["count"] == 3

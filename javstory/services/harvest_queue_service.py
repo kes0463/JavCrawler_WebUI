@@ -93,6 +93,18 @@ class HarvestQueueService:
     def set_grok_enabled(self, enabled: bool) -> None:
         self._grok_enabled = bool(enabled)
 
+    @staticmethod
+    def _set_preview_paused(paused: bool) -> None:
+        try:
+            from javstory.library.highlight.preview_queue import preview_queue_manager
+
+            if paused:
+                preview_queue_manager.pause_for_harvest()
+            else:
+                preview_queue_manager.resume_after_harvest()
+        except Exception:
+            pass
+
     def snapshot(self) -> dict[str, Any]:
         return {
             "items": [i.to_dict() for i in self._queue],
@@ -372,6 +384,7 @@ class HarvestQueueService:
         if not pending:
             raise RuntimeError("empty")
         self._running = True
+        self._set_preview_paused(True)
         await self._emit({"type": "queue_started"})
         asyncio.create_task(self._run_queue())
         return len(pending)
@@ -409,6 +422,7 @@ class HarvestQueueService:
             finally:
                 self._running = False
                 self.persist_queue()
+                self._set_preview_paused(False)
                 await self._emit({"type": "queue_finished"})
 
     async def _process_item(self, item: HarvestQueueItem) -> None:

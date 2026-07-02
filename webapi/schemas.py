@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 from datetime import datetime
-from typing import Optional
+from typing import Any, Optional
 
 from pydantic import BaseModel, field_validator
 
@@ -49,6 +49,8 @@ class SceneSummary(BaseModel):
 
 
 class LibraryItemDetail(LibraryItem):
+    folder_monitoring_paused: bool = False
+    folder_binding_pending: bool = False
     synopsis_ko: Optional[str] = None
     synopsis_ja: Optional[str] = None
     synopsis_en: Optional[str] = None
@@ -80,6 +82,11 @@ class LibraryStats(BaseModel):
     with_metadata: int
     with_folder: int
     without_metadata: int
+
+
+class LibraryGenreItem(BaseModel):
+    name: str
+    count: int
 
 
 class LibraryItemUpdate(BaseModel):
@@ -140,6 +147,7 @@ class PlaybackPart(BaseModel):
     resume_ms: int = 0
     needs_proxy: bool = False
     proxy_ready: bool = True
+    proxy_reason: Optional[str] = None
     subtitle_tracks: list[SubtitleTrack] = []
 
 
@@ -147,6 +155,7 @@ class StreamPrepareResponse(BaseModel):
     ready: bool
     needs_proxy: bool = False
     status: str = "direct"
+    proxy_reason: Optional[str] = None
     error: Optional[str] = None
 
 
@@ -321,6 +330,10 @@ class PreviewQueueItem(BaseModel):
     started_at_ms: int = 0
     updated_at_ms: int = 0
     elapsed_sec: int = 0
+    segment_index: int = 0
+    segment_total: int = 0
+    source_position_sec: float = 0.0
+    source_duration_sec: float = 0.0
 
 
 class PreviewQueueStatus(BaseModel):
@@ -334,6 +347,9 @@ class PreviewQueueStatus(BaseModel):
     last_activity_at_ms: int = 0
     seconds_since_activity: int = 0
     stall_threshold_sec: int = 120
+    paused: bool = False
+    harvest_paused: bool = False
+    user_paused: bool = False
     items: list[PreviewQueueItem] = []
 
 
@@ -470,3 +486,62 @@ class AliasCreateRequest(BaseModel):
     alias_name: str
     alias_type: str = "stage"
     is_primary: bool = False
+
+
+# ── Folder watch ─────────────────────────────────────────────────────────────
+
+
+class FolderBindingInboxItemSchema(BaseModel):
+    product_code: str
+    old_path: str = ""
+    candidates: list[str] = []
+    monitoring_paused: bool = False
+
+
+class FolderBindingInboxResponse(BaseModel):
+    revision: int
+    items: list[FolderBindingInboxItemSchema]
+
+
+class FolderBindingCandidatesRequest(BaseModel):
+    product_code: str
+    old_path: str = ""
+
+
+class FolderBindingCandidatesResponse(BaseModel):
+    candidates: list[str]
+
+
+# ── Insight ──────────────────────────────────────────────────────────────────
+
+
+class InsightOverviewResponse(BaseModel):
+    stats: dict[str, Any] = {}
+    top_actors: list[dict[str, Any]] = []
+    top_genres: list[dict[str, Any]] = []
+    top_makers: list[dict[str, Any]] = []
+    recent_trend: dict[str, Any] = {}
+    weekly_digest: dict[str, Any] = {}
+    pipeline: dict[str, Any] = {}
+    monthly_genre_trend: list[dict[str, Any]] = []
+    monthly_additions: list[dict[str, Any]] = []
+    distribution: dict[str, Any] = {}
+
+
+class InsightTrendsResponse(BaseModel):
+    watch_summary: dict[str, Any] = {}
+    monthly_genre_trend: list[dict[str, Any]] = []
+    recent_trend: dict[str, Any] = {}
+
+
+class InsightRecommendResponse(BaseModel):
+    today_recs: list[dict[str, Any]] = []
+    next_watch: list[dict[str, Any]] = []
+    hidden_gems: list[dict[str, Any]] = []
+    favorite_actor_picks: list[dict[str, Any]] = []
+
+
+class InsightCollectionResponse(BaseModel):
+    distribution: dict[str, Any] = {}
+    actor_collections: dict[str, Any] = {}
+    pipeline: dict[str, Any] = {}

@@ -16,6 +16,7 @@ from webapi.schemas import (
     LibraryItemDetail,
     LibraryItemUpdate,
     LibraryListResponse,
+    LibraryGenreItem,
     LibraryStats,
     OpenFolderResponse,
     SceneSummary,
@@ -23,6 +24,31 @@ from webapi.schemas import (
 
 router = APIRouter()
 _library = LibraryService()
+
+
+def _folder_watch_flags(code: str) -> dict[str, bool]:
+    from javstory.folder_watch.inbox import inbox_contains
+    from javstory.folder_watch.paused import is_monitoring_paused
+
+    pc = (code or "").strip().upper()
+    if not pc:
+        return {"folder_monitoring_paused": False, "folder_binding_pending": False}
+    return {
+        "folder_monitoring_paused": is_monitoring_paused(pc),
+        "folder_binding_pending": inbox_contains(pc),
+    }
+
+
+def _after_folder_binding_change(code: str) -> None:
+    from javstory.folder_watch.inbox import remove_inbox_item
+    from javstory.folder_watch.service import get_folder_watch_service
+
+    pc = code.strip().upper()
+    remove_inbox_item(pc)
+    svc = get_folder_watch_service()
+    svc.clear_broken_flag(pc)
+    svc.refresh_paths_from_db()
+    svc.notify_change()
 
 
 def _to_item(
@@ -59,8 +85,11 @@ def list_library(
     has_metadata: Optional[bool] = None,
     has_subtitle: Optional[bool] = None,
     has_mosaic_removed: Optional[bool] = None,
+    genres: str = Query("", description="쉼표 구분 장르 (genre_mode에 따라 AND/OR)"),
+    genre_mode: str = Query("and", pattern="^(and|or)$", description="and=모두 포함, or=하나라도 포함"),
     include_total: bool = Query(True, description="false면 total 생략(append용)"),
 ):
+    genre_list = [g.strip() for g in genres.split(",") if g.strip()] if genres else None
     result = _library.list_items(
         q=q,
         page=page,
@@ -71,6 +100,8 @@ def list_library(
         has_metadata=has_metadata,
         has_subtitle=has_subtitle,
         has_mosaic_removed=has_mosaic_removed,
+        genres=genre_list,
+        genre_mode=genre_mode,
         include_total=include_total,
     )
     rows = result["items"]
@@ -90,6 +121,14 @@ def library_stats():
     return LibraryStats(**_library.stats())
 
 
+@router.get("/genres", response_model=list[LibraryGenreItem])
+def library_genres(
+    limit: int = Query(200, ge=1, le=500),
+    force: bool = Query(False, description="캐시 무시 재조회"),
+):
+    return [LibraryGenreItem(**row) for row in _library.list_genres(limit=limit, force_refresh=force)]
+
+
 @router.get("/cover/{code}")
 def get_cover(code: str):
     path = _library.resolve_cover_path(code)
@@ -106,7 +145,11 @@ def get_preview(code: str):
     return FileResponse(
         str(path),
         media_type="video/mp4" if path.suffix.lower() == ".mp4" else "image/webp",
-        headers={"Cache-Control": "no-cache"},
+        content_disposition_type="inline",
+        headers={
+            "Cache-Control": "no-cache",
+            "Accept-Ranges": "bytes",
+        },
     )
 
 
@@ -145,6 +188,10 @@ def bind_folder(code: str, body: FolderBindRequest):
             400 if result.get("mismatch") else 404,
             result.get("message") or "폴더 연결에 실패했습니다",
         )
+    try:
+        _after_folder_binding_change(code)
+    except Exception:
+        pass
     row = result.get("row")
     detail = _to_detail(row, code.upper()) if row else None
     return FolderBindResponse(
@@ -159,6 +206,10 @@ def clear_folder_binding(code: str):
     result = _library.clear_folder_binding(code)
     if not result.get("ok"):
         raise HTTPException(404, result.get("message") or "폴더 연결 해제에 실패했습니다")
+    try:
+        _after_folder_binding_change(code)
+    except Exception:
+        pass
     row = result.get("row")
     detail = _to_detail(row, code.upper()) if row else None
     return FolderBindResponse(ok=True, detail=detail)
@@ -220,6 +271,7 @@ def _to_detail(row: JAVMetadata, code: str) -> LibraryItemDetail:
             "scenes_source": scenes_source,
             "overall_summary": overall,
             "snapshot_count": _library.snapshot_count_for(code),
+            **_folder_watch_flags(code),
         }
     )
 

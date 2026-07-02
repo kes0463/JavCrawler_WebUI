@@ -27,6 +27,7 @@ if str(_ROOT) not in sys.path:
 
 from javstory.utils.njav_playwright import njavtv_detail_urls, scrape_njavtv_playwright_async
 from javstory.utils.common import log_ts
+
 try:
     from javstory.harvest.scrapers import av123_scraper
 except Exception:  # pragma: no cover
@@ -383,13 +384,14 @@ def _merge_empty_only(base: dict[str, Any], extra: dict[str, Any], *, source: st
 
 
 def _needs_fallback(d: dict[str, Any]) -> bool:
-    """없음/부족 판정: title·cover·synopsis 중 하나라도 부족하면 다음 소스 시도."""
+    """title·cover가 없거나 제목이 리다이렉트 안내 문구일 때만 다음 소스 시도."""
+    from javstory.harvest.scrapers.av123_scraper import _is_boilerplate_title
+
     title = str(d.get("title") or "").strip()
     cover = str(d.get("cover_url") or "").strip()
-    synopsis = str(d.get("synopsis") or "").strip()
     if (not title) or (not cover) or title == "제목 없음" or cover == "이미지 누락":
         return True
-    if not synopsis:
+    if _is_boilerplate_title(title):
         return True
     return False
 

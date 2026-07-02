@@ -22,7 +22,7 @@ import asyncio
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from webapi.routes import actress, dashboard, harvest, library, playback
+from webapi.routes import actress, dashboard, folder_watch, harvest, insight, library, playback
 from webapi.routes.harvest import bind_harvest_broadcast
 
 
@@ -59,6 +59,14 @@ async def lifespan(app: FastAPI):
     import threading
 
     threading.Thread(target=_preview_stale_backfill, daemon=True, name="PreviewStaleBackfill").start()
+
+    try:
+        from javstory.folder_watch.service import get_folder_watch_service
+
+        get_folder_watch_service().start()
+    except Exception:
+        pass
+
     yield
 
 
@@ -84,7 +92,8 @@ _CORS_ORIGINS: list[str] = (
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_CORS_ORIGINS,
-    allow_methods=["GET", "POST", "DELETE", "PATCH"],
+    allow_origin_regex=r"https?://(localhost|127\.0\.0\.1)(:\d+)?",
+    allow_methods=["GET", "HEAD", "POST", "DELETE", "PATCH", "OPTIONS"],
     allow_headers=["Content-Type", "Range"],
     expose_headers=["Accept-Ranges", "Content-Length", "Content-Range"],
 )
@@ -94,6 +103,8 @@ app.include_router(actress.router, prefix="/api/actresses", tags=["actresses"])
 app.include_router(playback.router, prefix="/api/playback", tags=["playback"])
 app.include_router(harvest.router, prefix="/api/harvest", tags=["harvest"])
 app.include_router(dashboard.router, prefix="/api/dashboard", tags=["dashboard"])
+app.include_router(folder_watch.router, prefix="/api/folder-watch", tags=["folder-watch"])
+app.include_router(insight.router, prefix="/api/insight", tags=["insight"])
 
 
 @app.get("/health")
@@ -120,6 +131,7 @@ def api_status():
         "actress_count": actress_count,
         "library_prefix": "/api/library",
         "library_patch": True,
+        "library_genres": True,
         "actresses_prefix": "/api/actresses",
         "harvest_prefix": "/api/harvest",
         "dashboard_prefix": "/api/dashboard",

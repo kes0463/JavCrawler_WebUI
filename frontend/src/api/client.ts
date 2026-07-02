@@ -13,6 +13,9 @@ export const fetchApiStatus = () => get<ApiStatus>("/api/status");
 
 function formatApiError(text: string): string {
   if (text.includes("Not Found") || text.includes('"detail":"Not Found"')) {
+    if (text.includes("insight") || text.includes("/api/insight")) {
+      return "인사이트 API를 찾을 수 없습니다. start_web.bat으로 webapi를 재시작해 주세요.";
+    }
     return "배우 API를 찾을 수 없습니다. JAVSTORY_WebUI 폴더에서 start_web.bat으로 webapi를 재시작해 주세요. (구버전 JAVSTORY webapi가 8765 포트를 점유 중일 수 있습니다)";
   }
   if (text.includes("Method Not Allowed") || text.includes('"detail":"Method Not Allowed"')) {
@@ -21,9 +24,12 @@ function formatApiError(text: string): string {
   return text;
 }
 
-async function request<T>(path: string, init?: RequestInit): Promise<T> {
+const DEFAULT_TIMEOUT_MS = 45_000;
+const MUTATION_TIMEOUT_MS = 30_000;
+
+async function request<T>(path: string, init?: RequestInit, timeoutMs = DEFAULT_TIMEOUT_MS): Promise<T> {
   const ctrl = new AbortController();
-  const timer = window.setTimeout(() => ctrl.abort(), 15000);
+  const timer = window.setTimeout(() => ctrl.abort(), timeoutMs);
   try {
     const res = await fetch(`${API_BASE}${path}`, { ...init, signal: ctrl.signal });
     if (!res.ok) {
@@ -41,23 +47,32 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   }
 }
 
-export const get = <T>(path: string) => request<T>(path);
+export const get = <T>(path: string, timeoutMs?: number) => request<T>(path, undefined, timeoutMs);
 
-export const post = <T>(path: string, body?: unknown) =>
-  request<T>(path, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: body !== undefined ? JSON.stringify(body) : undefined,
-  });
+export const post = <T>(path: string, body?: unknown, timeoutMs = MUTATION_TIMEOUT_MS) =>
+  request<T>(
+    path,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: body !== undefined ? JSON.stringify(body) : undefined,
+    },
+    timeoutMs,
+  );
 
-export const del = <T>(path: string) => request<T>(path, { method: "DELETE" });
+export const del = <T>(path: string, timeoutMs = MUTATION_TIMEOUT_MS) =>
+  request<T>(path, { method: "DELETE" }, timeoutMs);
 
-export const patch = <T>(path: string, body?: unknown) =>
-  request<T>(path, {
-    method: "PATCH",
-    headers: { "Content-Type": "application/json" },
-    body: body !== undefined ? JSON.stringify(body) : undefined,
-  });
+export const patch = <T>(path: string, body?: unknown, timeoutMs = MUTATION_TIMEOUT_MS) =>
+  request<T>(
+    path,
+    {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: body !== undefined ? JSON.stringify(body) : undefined,
+    },
+    timeoutMs,
+  );
 
 export const WS_BASE = API_BASE
   ? API_BASE.replace(/^http/, "ws")

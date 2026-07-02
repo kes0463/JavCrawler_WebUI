@@ -33,47 +33,84 @@ export default function DashboardView() {
   const [error, setError] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
-    try {
-      const [s, sys, pend, preview, queue] = await Promise.all([
-        fetchDashboardSummary(),
-        fetchSystemMetrics(),
-        fetchPendingItems(50),
-        fetchPreviewQueue(40),
-        fetchQueue(),
-      ]);
-      setSummary(s);
-      setSystem(sys);
-      setPending(pend);
-      setPreviewQueue(preview);
-      setHarvestItems(queue.items);
-      setError(null);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "API 연결 실패");
-    } finally {
-      setLoading(false);
+    const results = await Promise.allSettled([
+      fetchDashboardSummary(),
+      fetchSystemMetrics(),
+      fetchPendingItems(50),
+      fetchPreviewQueue(40),
+      fetchQueue(),
+    ]);
+
+    let anyOk = false;
+    let lastErr: string | null = null;
+
+    if (results[0].status === "fulfilled") {
+      setSummary(results[0].value);
+      anyOk = true;
+    } else {
+      lastErr = results[0].reason instanceof Error ? results[0].reason.message : "API 연결 실패";
     }
+    if (results[1].status === "fulfilled") {
+      setSystem(results[1].value);
+      anyOk = true;
+    } else if (!lastErr) {
+      lastErr = results[1].reason instanceof Error ? results[1].reason.message : "API 연결 실패";
+    }
+    if (results[2].status === "fulfilled") {
+      setPending(results[2].value);
+      anyOk = true;
+    }
+    if (results[3].status === "fulfilled") {
+      setPreviewQueue(results[3].value);
+      anyOk = true;
+    }
+    if (results[4].status === "fulfilled") {
+      setHarvestItems(results[4].value.items);
+      anyOk = true;
+    }
+
+    if (anyOk) {
+      setError(null);
+    } else {
+      setError(lastErr ?? "API 연결 실패");
+    }
+    setLoading(false);
   }, []);
 
   useEffect(() => {
     refresh();
     let id: ReturnType<typeof setInterval> | undefined;
+    let previewId: ReturnType<typeof setInterval> | undefined;
+
+    const refreshPreview = () => {
+      if (document.visibilityState !== "visible") return;
+      fetchPreviewQueue(40)
+        .then(setPreviewQueue)
+        .catch(() => {});
+    };
 
     const startPolling = () => {
       if (id !== undefined) return;
       id = setInterval(() => {
         if (document.visibilityState === "visible") refresh();
       }, 12000);
+      previewId = setInterval(refreshPreview, 4000);
     };
     const stopPolling = () => {
       if (id !== undefined) {
         clearInterval(id);
         id = undefined;
       }
+      if (previewId !== undefined) {
+        clearInterval(previewId);
+        previewId = undefined;
+      }
     };
 
     const onVisibility = () => {
       if (document.visibilityState === "visible") {
         refresh();
+        refreshPreview();
         startPolling();
       } else {
         stopPolling();
@@ -92,10 +129,9 @@ export default function DashboardView() {
     const ws = createHarvestWS(event => {
       if (event.type === "state") {
         setHarvestItems(event.items);
-      } else if (event.type === "queue_started") {
+      } else if (event.type === "queue_started" || event.type === "queue_finished") {
         fetchQueue().then(q => setHarvestItems(q.items));
-      } else if (event.type === "queue_finished") {
-        fetchQueue().then(q => setHarvestItems(q.items));
+        fetchPreviewQueue(40).then(setPreviewQueue);
       } else if (event.type === "item_started") {
         setHarvestItems(prev =>
           prev.map(i => (i.id === event.id ? { ...i, status: "running", progress: 0 } : i)),
@@ -222,6 +258,8 @@ export default function DashboardView() {
         pendingItems={pending}
         previewQueue={previewQueue}
         className="w-full"
+        onQueueChange={refresh}
+        onPreviewQueueUpdate={setPreviewQueue}
       />
     </div>
   );

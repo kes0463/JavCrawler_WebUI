@@ -1,4 +1,4 @@
-import { get } from "./client";
+import { get, post, del } from "./client";
 
 export interface LibraryStatsBlock {
   total: number;
@@ -53,6 +53,30 @@ export interface PreviewQueueItem {
   started_at_ms: number;
   updated_at_ms: number;
   elapsed_sec: number;
+  segment_index: number;
+  segment_total: number;
+  source_position_sec: number;
+  source_duration_sec: number;
+}
+
+function formatMediaTimestamp(sec: number): string {
+  const total = Math.max(0, Math.floor(sec));
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  const s = total % 60;
+  return `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
+}
+
+export function formatPreviewSegmentProgress(item: PreviewQueueItem): string | null {
+  if (item.message?.includes("구간")) return item.message;
+  if (
+    item.segment_total > 0
+    && item.segment_index > 0
+    && item.source_duration_sec > 0
+  ) {
+    return `구간 ${item.segment_index}/${item.segment_total} · 원본 ${formatMediaTimestamp(item.source_position_sec)} / ${formatMediaTimestamp(item.source_duration_sec)}`;
+  }
+  return null;
 }
 
 export interface PreviewQueueStatus {
@@ -66,6 +90,9 @@ export interface PreviewQueueStatus {
   last_activity_at_ms: number;
   seconds_since_activity: number;
   stall_threshold_sec: number;
+  paused: boolean;
+  harvest_paused: boolean;
+  user_paused: boolean;
   items: PreviewQueueItem[];
 }
 
@@ -80,3 +107,21 @@ export const fetchSystemMetrics = (): Promise<SystemMetrics> =>
 
 export const fetchPreviewQueue = (limit = 40): Promise<PreviewQueueStatus> =>
   get(`/api/dashboard/preview-queue?limit=${limit}`);
+
+export const clearPreviewFinished = (): Promise<{ ok: boolean; removed: number }> =>
+  del("/api/dashboard/preview-queue/finished");
+
+export const pauseAllPreview = (): Promise<{ ok: boolean; paused: boolean }> =>
+  post("/api/dashboard/preview-queue/pause-all");
+
+export const resumeAllPreview = (): Promise<{ ok: boolean; resumed: number }> =>
+  post("/api/dashboard/preview-queue/resume-all");
+
+export const removePreviewJob = (jobId: string): Promise<{ ok: boolean }> =>
+  del(`/api/dashboard/preview-queue/${encodeURIComponent(jobId)}`);
+
+export const pausePreviewJob = (jobId: string): Promise<{ ok: boolean }> =>
+  post(`/api/dashboard/preview-queue/${encodeURIComponent(jobId)}/pause`);
+
+export const resumePreviewJob = (jobId: string): Promise<{ ok: boolean }> =>
+  post(`/api/dashboard/preview-queue/${encodeURIComponent(jobId)}/resume`);

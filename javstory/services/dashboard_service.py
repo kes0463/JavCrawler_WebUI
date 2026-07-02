@@ -105,11 +105,24 @@ class DashboardService:
     @staticmethod
     def _poll_gpu(out: dict[str, Any]) -> None:
         try:
-            raw = subprocess.check_output(
-                "nvidia-smi --query-gpu=name,memory.total,memory.used,utilization.gpu "
-                "--format=csv,nounits,noheader",
-                shell=True,
-            ).decode().strip()
+            cp = subprocess.run(
+                [
+                    "nvidia-smi",
+                    "--query-gpu=name,memory.total,memory.used,utilization.gpu",
+                    "--format=csv,nounits,noheader",
+                ],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=5,
+                check=False,
+            )
+            if cp.returncode != 0:
+                return
+            raw = (cp.stdout or "").strip()
+            if not raw:
+                return
             parts = [p.strip() for p in raw.split(",")]
             name = parts[0]
             total = float(parts[1])

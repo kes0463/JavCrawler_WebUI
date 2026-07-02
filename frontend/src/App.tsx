@@ -2,6 +2,7 @@ import { Suspense, lazy, useEffect, useState } from "react";
 import { cn } from "@/lib/utils";
 import { NavigationProvider, useNavigation, type View } from "@/contexts/NavigationContext";
 import { ToastProvider } from "@/contexts/ToastContext";
+import { FolderWatchProvider, useFolderWatch } from "@/contexts/FolderWatchContext";
 import { PlayerProvider } from "@/contexts/PlayerContext";
 import { NavSidebar } from "@/components/nav/NavSidebar";
 import { AppHeader } from "@/components/layout/AppHeader";
@@ -89,12 +90,13 @@ function PageSkeleton() {
 
 function AppShell() {
   useGlobalDragScroll();
+  const { alertCount, openInbox } = useFolderWatch();
 
   return (
     <div className="flex h-screen bg-bg-base text-[#e2e2f0] overflow-hidden">
-      <NavSidebar />
+      <NavSidebar folderAlertCount={alertCount} onFolderAlertClick={openInbox} />
       <div className="flex flex-col flex-1 min-w-0">
-        <AppHeader />
+        <AppHeader folderAlertCount={alertCount} onFolderAlertClick={openInbox} />
         <ViewStack />
       </div>
     </div>
@@ -105,9 +107,11 @@ export default function App() {
   return (
     <NavigationProvider>
       <ToastProvider>
-        <PlayerProvider>
-          <AppShell />
-        </PlayerProvider>
+        <FolderWatchProvider>
+          <PlayerProvider>
+            <AppShell />
+          </PlayerProvider>
+        </FolderWatchProvider>
       </ToastProvider>
     </NavigationProvider>
   );

@@ -15,7 +15,7 @@ const NAV_ITEMS: { view: View; icon: React.ElementType; label: string; badge?: s
   { view: "mosaic",     icon: Layers,          label: "Mosaic", badge: "Soon" },
   { view: "harvest",    icon: Search,          label: "Queues" },
   { view: "processing", icon: Mic2,            label: "Tasks", badge: "Soon" },
-  { view: "insight",    icon: BarChart2,       label: "System", badge: "Soon" },
+  { view: "insight",    icon: BarChart2,       label: "Insight" },
 ];
 
 interface NavItemButtonProps {
@@ -170,15 +170,6 @@ export function NavSidebar({ folderAlertCount = 0, onFolderAlertClick }: NavSide
           collapsed={collapsed}
           onClick={() => navigateTo("settings")}
         />
-
-        {!collapsed && (
-          <div className="flex items-center gap-3.5 px-4 py-3 mt-1 rounded-xl text-slate-400">
-            <span className="w-9 h-9 rounded-full bg-gradient-to-br from-slate-600 to-slate-800 flex items-center justify-center text-sm font-bold text-white shrink-0">
-              U
-            </span>
-            <span className="text-lg font-medium truncate">User Profile</span>
-          </div>
-        )}
       </div>
     </aside>
   );

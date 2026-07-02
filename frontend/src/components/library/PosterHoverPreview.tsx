@@ -36,6 +36,8 @@ export function PosterHoverPreview({
   const hovering = useRef(false);
   const [previewActive, setPreviewActive] = useState(false);
   const [webpFallback, setWebpFallback] = useState(false);
+  const [mediaReady, setMediaReady] = useState(false);
+  const [mediaFailed, setMediaFailed] = useState(false);
 
   const clearHoverTimer = useCallback(() => {
     if (hoverTimer.current) {
@@ -47,6 +49,8 @@ export function PosterHoverPreview({
   const deactivatePreview = useCallback(() => {
     clearHoverTimer();
     setPreviewActive(false);
+    setMediaReady(false);
+    setMediaFailed(false);
     releasePreviewHover(slotId);
   }, [clearHoverTimer, slotId]);
 
@@ -83,13 +87,26 @@ export function PosterHoverPreview({
 
   useEffect(() => {
     setWebpFallback(false);
+    setMediaReady(false);
+    setMediaFailed(false);
   }, [previewSrc, previewMedia]);
 
-  const showPreviewLayer = previewActive && hasPreview && !!previewSrc;
+  const showPreviewLayer = previewActive && hasPreview && !!previewSrc && !mediaFailed;
+  const hideCover = showPreviewLayer && mediaReady;
   const showMp4Preview =
     showPreviewLayer && previewSrc && (previewMedia === "mp4" || (!previewMedia && !webpFallback));
   const showWebpPreview =
     showPreviewLayer && previewSrc && (previewMedia === "webp" || webpFallback);
+
+  const handleMediaError = () => {
+    if (previewMedia === "mp4") {
+      setMediaFailed(true);
+      setPreviewActive(false);
+      return;
+    }
+    setWebpFallback(true);
+    setMediaReady(false);
+  };
 
   return (
     <div
@@ -106,7 +123,7 @@ export function PosterHoverPreview({
           onError={onCoverError}
           className={cn(
             "w-full h-auto block object-contain pointer-events-none transition-opacity duration-150",
-            showPreviewLayer ? "opacity-0" : "opacity-100",
+            hideCover ? "opacity-0" : "opacity-100",
           )}
         />
       ) : (
@@ -124,7 +141,9 @@ export function PosterHoverPreview({
           muted
           playsInline
           preload="auto"
-          onError={() => setWebpFallback(true)}
+          onLoadedData={() => setMediaReady(true)}
+          onCanPlay={() => setMediaReady(true)}
+          onError={handleMediaError}
           className="absolute inset-0 w-full h-full object-cover pointer-events-none"
         />
       )}
@@ -135,6 +154,8 @@ export function PosterHoverPreview({
           src={previewSrc}
           alt=""
           draggable={false}
+          onLoad={() => setMediaReady(true)}
+          onError={handleMediaError}
           className="absolute inset-0 w-full h-full object-cover pointer-events-none"
         />
       )}

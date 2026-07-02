@@ -1,11 +1,12 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { Search, SlidersHorizontal, FolderOpen, FolderX, RefreshCw, Subtitles, Layers } from "lucide-react";
 import { cn } from "@/lib/utils";
-import { fetchLibrary, fetchLibraryStats, coverUrl, previewUrl, openLibraryFolder, hasRealLibraryMetadata } from "@/api/library";
-import type { LibraryItem, LibraryStats, LibraryQuery } from "@/api/library";
+import { fetchLibraryListed, fetchLibraryGenresResilient, fetchLibraryStats, coverUrl, previewUrl, openLibraryFolder, hasRealLibraryMetadata, clearLibraryGenreScanCache, probeLibraryGenreFilterSupport, prefetchLibraryClientIndex, isClientLibraryIndexReady } from "@/api/library";
+import type { LibraryItem, LibraryStats, LibraryQuery, LibraryGenreItem } from "@/api/library";
 import { GlassCard } from "@/components/ui/GlassCard";
 import { Skeleton } from "@/components/ui/Skeleton";
 import { PosterCard } from "@/components/library/PosterCard";
+import { GenreFilterBar, GenreFilterChipPanel } from "@/components/library/GenreFilterPanel";
 import { LibraryDetailPanel } from "@/components/library/LibraryDetailPanel";
 import { useToast } from "@/contexts/ToastContext";
 import { usePlayer } from "@/contexts/PlayerContext";
@@ -99,6 +100,11 @@ export default function LibraryView() {
   const [loadingMore, setLoadingMore] = useState(false);
   const [scrollRoot, setScrollRoot] = useState<HTMLElement | null>(null);
   const [coverRev, setCoverRev] = useState<Record<string, number>>({});
+  const [genreOptions, setGenreOptions] = useState<LibraryGenreItem[]>([]);
+  const [genresLoading, setGenresLoading] = useState(false);
+  const [genreOpen, setGenreOpen] = useState(true);
+  const [genreFiltering, setGenreFiltering] = useState(false);
+  const genreApiWarnedRef = useRef(false);
   const skipInitialFetchRef = useRef(boot.fromSession);
   const pendingScrollRef = useRef(boot.scrollTop);
   const suppressCardAnimRef = useRef(boot.fromSession);
@@ -138,8 +144,40 @@ export default function LibraryView() {
   }, [refreshStats, stats]);
 
   useEffect(() => {
+    if (currentView !== "library") return;
+    prefetchLibraryClientIndex();
+    let cancelled = false;
+    setGenresLoading(true);
+    fetchLibraryGenresResilient()
+      .then(({ genres, source }) => {
+        if (cancelled) return;
+        setGenreOptions(genres);
+        if (source === "bootstrap" && !genreApiWarnedRef.current) {
+          genreApiWarnedRef.current = true;
+          showToast(
+            "장르 목록을 라이브러리 전체에서 집계했습니다. webapi 재시작 시 더 빠르게 로드됩니다.",
+            "info",
+          );
+        }
+      })
+      .catch(() => {
+        if (!cancelled) setGenreOptions([]);
+      })
+      .finally(() => {
+        if (!cancelled) setGenresLoading(false);
+      });
+    return () => { cancelled = true; };
+  }, [currentView, showToast]);
+
+  useEffect(() => {
     if (libraryDetailSku) setSelectedCode(libraryDetailSku);
   }, [libraryDetailSku]);
+
+  useEffect(() => {
+    if (currentView !== "library") {
+      setSelectedCode(null);
+    }
+  }, [currentView]);
 
   const handleCloseDetail = useCallback(() => {
     setSelectedCode(null);
@@ -147,12 +185,14 @@ export default function LibraryView() {
   }, [closeLibraryDetail]);
 
   const handleActorClick = useCallback(async (name: string) => {
+    setSelectedCode(null);
+    closeLibraryDetail();
     try {
       await openActressByName(name);
     } catch (e) {
       showToast(e instanceof Error ? e.message : "배우 정보를 불러오지 못했습니다.", "error");
     }
-  }, [openActressByName, showToast]);
+  }, [closeLibraryDetail, openActressByName, showToast]);
 
   const loadItems = useCallback((
     q: LibraryQuery,
@@ -170,8 +210,15 @@ export default function LibraryView() {
       include_total: append ? false : true,
     };
 
-    fetchLibrary(apiQuery)
-      .then(({ items: newItems, total: t }) => {
+    const run = async () => {
+      const needsClientGenre =
+        (q.genres?.length ?? 0) > 0 && !(await probeLibraryGenreFilterSupport());
+      if (needsClientGenre && !append && !silent && !isClientLibraryIndexReady()) {
+        setGenreFiltering(true);
+      }
+
+      try {
+        const { items: newItems, total: t } = await fetchLibraryListed(apiQuery);
         if (
           !append && !apiWarnedRef.current && newItems.length > 0
           && !("favorite_score" in newItems[0])
@@ -200,8 +247,7 @@ export default function LibraryView() {
           setItems(newItems);
           setTotal(t);
         }
-      })
-      .catch(err => {
+      } catch (err) {
         if (!append && !silent) {
           setItems([]);
           setTotal(0);
@@ -209,11 +255,14 @@ export default function LibraryView() {
         if (!silent) {
           showToast(err instanceof Error ? err.message : "라이브러리 목록을 불러오지 못했습니다.", "error");
         }
-      })
-      .finally(() => {
+      } finally {
+        setGenreFiltering(false);
         setLoading(false);
         setLoadingMore(false);
-      });
+      }
+    };
+
+    void run();
   }, [showToast]);
 
   useEffect(() => {
@@ -224,6 +273,7 @@ export default function LibraryView() {
     const filterChanged = filterKey !== queryFilterKeyRef.current;
     if (filterChanged) {
       queryFilterKeyRef.current = filterKey;
+      clearLibraryGenreScanCache();
       clearSession();
       skipInitialFetchRef.current = false;
       suppressCardAnimRef.current = false;
@@ -340,6 +390,26 @@ export default function LibraryView() {
   const updateQueryFilter = useCallback((patch: Partial<LibraryQuery>) => {
     setQuery(q => ({ ...q, ...patch, page: 1 }));
   }, []);
+
+  const toggleGenre = useCallback((name: string) => {
+    setQuery(q => {
+      const current = q.genres ?? [];
+      const adding = !current.includes(name);
+      const next = adding
+        ? [...current, name]
+        : current.filter(g => g !== name);
+      if (adding) setGenreOpen(true);
+      return {
+        ...q,
+        genres: next.length ? next : undefined,
+        page: 1,
+      };
+    });
+  }, []);
+
+  const clearGenres = useCallback(() => {
+    updateQueryFilter({ genres: undefined, genre_mode: undefined });
+  }, [updateQueryFilter]);
 
   return (
     <div className="space-y-5">
@@ -480,10 +550,40 @@ export default function LibraryView() {
           모자이크 제거
         </button>
 
+        <GenreFilterBar
+          open={genreOpen}
+          onOpenChange={setGenreOpen}
+          genres={genreOptions}
+          selected={query.genres ?? []}
+          mode={query.genre_mode ?? "and"}
+          loading={genresLoading}
+          onToggleGenre={toggleGenre}
+          onModeChange={mode => updateQueryFilter({ genre_mode: mode })}
+          onClear={clearGenres}
+        />
+
         <span className="text-sm text-muted-foreground ml-auto tabular-nums">
           {items.length.toLocaleString()} / {total.toLocaleString()}건
         </span>
       </div>
+
+      {genreOpen && (
+        <GenreFilterChipPanel
+          genres={genreOptions}
+          selected={query.genres ?? []}
+          mode={query.genre_mode ?? "and"}
+          loading={genresLoading}
+          onToggleGenre={toggleGenre}
+          onModeChange={mode => updateQueryFilter({ genre_mode: mode })}
+          onClear={clearGenres}
+        />
+      )}
+
+      {genreFiltering && (
+        <p className="text-sm text-violet-300/90 text-center py-1 animate-pulse">
+          장르 필터 적용 중…
+        </p>
+      )}
 
       <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-4 w-full">
         {items.map((item, i) => {

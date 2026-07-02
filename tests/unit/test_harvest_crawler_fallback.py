@@ -8,7 +8,7 @@ def test_needs_fallback_when_synopsis_missing():
         "title": "STARS-001 Title",
         "cover_url": "https://example.com/poster.jpg",
         "synopsis": "",
-    }) is True
+    }) is False
 
 
 def test_needs_fallback_complete_metadata():
@@ -17,6 +17,14 @@ def test_needs_fallback_complete_metadata():
         "cover_url": "https://example.com/poster.jpg",
         "synopsis": "あらすじ本文",
     }) is False
+
+
+def test_needs_fallback_boilerplate_title():
+    assert _needs_fallback({
+        "title": "123av.com — 새 도메인을 기억해 주세요",
+        "cover_url": "https://example.com/poster.jpg",
+        "synopsis": "",
+    }) is True
 
 
 def test_needs_fallback_missing_title():

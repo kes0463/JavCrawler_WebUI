@@ -11,7 +11,7 @@ import {
   pickFoldersDialog,
 } from "@/api/harvest";
 import type { HarvestItem, HarvestQueueResponse, LogEntry } from "@/api/harvest";
-import { extractFolderPathsFromDataTransfer } from "@/lib/folderPaths";
+import { extractFolderPathsFromDataTransferAsync, isElectron } from "@/lib/folderPaths";
 import { GlassCard } from "@/components/ui/GlassCard";
 import { ActionButton } from "@/components/ui/ActionButton";
 import { LogPanel } from "@/components/log/LogPanel";
@@ -173,7 +173,10 @@ export default function HarvestView() {
   const handleQueueFolders = useCallback(async (paths: string[]) => {
     const normalized = [...new Set(paths.map(p => p.trim()).filter(Boolean))];
     if (!normalized.length) {
-      showToast("드롭된 경로를 인식하지 못했습니다 (Windows 탐색기에서 폴더를 드롭하세요)", "warn");
+      const hint = isElectron()
+        ? "드롭된 경로를 인식하지 못했습니다. 폴더를 드롭하거나 찾아보기를 사용하세요."
+        : "드롭된 경로를 인식하지 못했습니다. start_web.bat(Electron)으로 실행하거나 찾아보기를 사용하세요.";
+      showToast(hint, "warn");
       return;
     }
     setFolderBusy(true);
@@ -197,6 +200,9 @@ export default function HarvestView() {
     try {
       const paths = await pickFoldersDialog();
       if (!paths.length) return;
+      if (paths.length === 1) {
+        setFolderPath(paths[0]);
+      }
       await handleQueueFolders(paths);
     } catch (e) {
       showToast(e instanceof Error ? e.message : "폴더 선택 실패", "error");
@@ -222,11 +228,11 @@ export default function HarvestView() {
     e.dataTransfer.dropEffect = "copy";
   }, []);
 
-  const handleDrop = useCallback((e: React.DragEvent) => {
+  const handleDrop = useCallback(async (e: React.DragEvent) => {
     e.preventDefault();
     dragDepthRef.current = 0;
     setDragging(false);
-    const paths = extractFolderPathsFromDataTransfer(e.dataTransfer);
+    const paths = await extractFolderPathsFromDataTransferAsync(e.dataTransfer);
     void handleQueueFolders(paths);
   }, [handleQueueFolders]);
 
@@ -420,7 +426,7 @@ export default function HarvestView() {
             </ActionButton>
           </div>
           <p className="text-sm text-muted-foreground">
-            찾아보기: Ctrl+클릭으로 여러 폴더 선택 · 스테이징 후 「수집 시작」
+            찾아보기: Windows 탐색기에서 Ctrl+클릭 다중 선택 · 실패 시 「폴더 추가」 패널에서 여러 폴더 지정
           </p>
         </GlassCard>
 

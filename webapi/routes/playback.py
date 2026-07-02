@@ -39,7 +39,7 @@ def stream_video(code: str, part: int):
     return FileResponse(
         str(path),
         media_type=guess_video_mime(path),
-        filename=path.name,
+        filename=f"{code}_part{part}{path.suffix.lower()}",
         content_disposition_type="inline",
         headers={"Accept-Ranges": "bytes"},
     )

@@ -35,6 +35,7 @@ SELECTORS = {
     "player": "#player",
     "player_watch": ".player",
     "description": "#details .description.short p",
+    "description_watch": "p.watch__desc-text",
     "detail_item": "#details .detail-item",
     "watch_info": "dl.watch__info",
     "favourite": "button.btn-action.favourite[data-code]",
@@ -173,6 +174,21 @@ def _normalize_scraped_title(raw: str, code: str = "") -> str:
         if m:
             title = m.group(1).strip()
     return title
+
+
+def _description_from_soup(soup: BeautifulSoup) -> str:
+    for sel in (
+        SELECTORS["description_watch"],
+        SELECTORS["description"],
+        "#details .description p",
+        ".watch__desc p",
+    ):
+        el = soup.select_one(sel)
+        if el:
+            text = _text(el)
+            if text:
+                return text
+    return ""
 
 
 def _title_from_soup(soup: BeautifulSoup) -> str:
@@ -474,9 +490,7 @@ def parse_video_html(
     raw_title = _title_from_soup(soup)
     info.poster_url = _poster_from_soup(soup, base_url=base_url)
 
-    desc = soup.select_one(SELECTORS["description"])
-    if desc:
-        info.description = _text(desc)
+    info.description = _description_from_soup(soup)
 
     info.code = _code_from_favourite(soup)
     info.favourite_count = _favourite_count_from_button(soup)

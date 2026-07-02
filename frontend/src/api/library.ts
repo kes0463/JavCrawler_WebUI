@@ -49,6 +49,8 @@ export interface SceneSummary {
 }
 
 export interface LibraryItemDetail extends LibraryItem {
+  folder_monitoring_paused?: boolean;
+  folder_binding_pending?: boolean;
   synopsis_ko: string | null;
   synopsis_ja: string | null;
   title_en: string | null;
@@ -95,6 +97,11 @@ export interface LibraryStats {
   without_metadata: number;
 }
 
+export interface LibraryGenreItem {
+  name: string;
+  count: number;
+}
+
 export interface LibraryQuery {
   q?: string;
   page?: number;
@@ -105,13 +112,23 @@ export interface LibraryQuery {
   has_metadata?: boolean;
   has_subtitle?: boolean;
   has_mosaic_removed?: boolean;
+  genres?: string[];
+  genre_mode?: "and" | "or";
   include_total?: boolean;
 }
 
 function toQueryString(params: Record<string, unknown>): string {
-  const entries = Object.entries(params).filter(([, v]) => v !== undefined && v !== "");
-  if (!entries.length) return "";
-  return "?" + entries.map(([k, v]) => `${k}=${encodeURIComponent(String(v))}`).join("&");
+  const parts: string[] = [];
+  for (const [k, v] of Object.entries(params)) {
+    if (v === undefined || v === "") continue;
+    if (Array.isArray(v)) {
+      if (!v.length) continue;
+      parts.push(`${k}=${encodeURIComponent(v.join(","))}`);
+      continue;
+    }
+    parts.push(`${k}=${encodeURIComponent(String(v))}`);
+  }
+  return parts.length ? "?" + parts.join("&") : "";
 }
 
 export const fetchLibrary = (q: LibraryQuery): Promise<LibraryListResponse> =>
@@ -119,6 +136,332 @@ export const fetchLibrary = (q: LibraryQuery): Promise<LibraryListResponse> =>
 
 export const fetchLibraryStats = (): Promise<LibraryStats> =>
   get("/api/library/stats");
+
+export const fetchLibraryGenres = (force = false): Promise<LibraryGenreItem[]> =>
+  get(`/api/library/genres${force ? "?force=true" : ""}`);
+
+export function genresFromLibraryItems(items: Iterable<LibraryItem>): LibraryGenreItem[] {
+  const counts = new Map<string, number>();
+  for (const item of items) {
+    const raw = item.genres_ko || "";
+    for (const part of raw.split(",")) {
+      const name = part.trim();
+      if (!name) continue;
+      counts.set(name, (counts.get(name) || 0) + 1);
+    }
+  }
+  return [...counts.entries()]
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0], "ko"))
+    .map(([name, count]) => ({ name, count }));
+}
+
+let _genreServerFilter: boolean | null = null;
+let _genreScanCache: { key: string; items: LibraryItem[] } | null = null;
+let _allLibraryItemsCache: LibraryItem[] | null = null;
+let _allLibraryLoadPromise: Promise<LibraryItem[]> | null = null;
+let _genreIndex: Map<string, LibraryItem[]> | null = null;
+
+const LIBRARY_PAGE_FETCH = 200;
+const LIBRARY_FETCH_CONCURRENCY = 8;
+
+export function clearLibraryGenreScanCache(): void {
+  _genreScanCache = null;
+}
+
+export function clearLibraryClientIndex(): void {
+  _genreScanCache = null;
+  _allLibraryItemsCache = null;
+  _genreIndex = null;
+  _allLibraryLoadPromise = null;
+}
+
+export function isClientLibraryIndexReady(): boolean {
+  return _allLibraryItemsCache !== null && _allLibraryItemsCache.length > 0;
+}
+
+export function isClientLibraryIndexLoading(): boolean {
+  return _allLibraryLoadPromise !== null;
+}
+
+function buildGenreIndex(items: LibraryItem[]): Map<string, LibraryItem[]> {
+  const index = new Map<string, LibraryItem[]>();
+  for (const item of items) {
+    for (const token of itemGenreTokens(item)) {
+      const bucket = index.get(token);
+      if (bucket) bucket.push(item);
+      else index.set(token, [item]);
+    }
+  }
+  return index;
+}
+
+function filterIndexedByGenres(
+  all: LibraryItem[],
+  genres: string[],
+  mode: "and" | "or",
+): LibraryItem[] {
+  const selected = genres.map(g => g.trim()).filter(Boolean);
+  if (!selected.length) return all;
+
+  const index = _genreIndex;
+  if (!index) {
+    return all.filter(item => matchesLibraryGenres(item, selected, mode));
+  }
+
+  if (mode === "or") {
+    const seen = new Set<string>();
+    const out: LibraryItem[] = [];
+    for (const g of selected) {
+      for (const item of index.get(g) ?? []) {
+        const pc = item.product_code.toUpperCase();
+        if (seen.has(pc)) continue;
+        seen.add(pc);
+        out.push(item);
+      }
+    }
+    return out;
+  }
+
+  let codes: Set<string> | undefined;
+  for (const g of selected) {
+    const pageCodes = new Set((index.get(g) ?? []).map(i => i.product_code.toUpperCase()));
+    if (!codes) {
+      codes = pageCodes;
+      continue;
+    }
+    const next = new Set<string>();
+    for (const c of codes) {
+      if (pageCodes.has(c)) next.add(c);
+    }
+    codes = next;
+  }
+  if (!codes || codes.size === 0) return [];
+  const byCode = new Map(all.map(i => [i.product_code.toUpperCase(), i]));
+  return [...codes].map(c => byCode.get(c)).filter((i): i is LibraryItem => !!i);
+}
+
+async function fetchAllLibraryPages(): Promise<LibraryItem[]> {
+  const first = await fetchLibrary({
+    page: 1,
+    per_page: LIBRARY_PAGE_FETCH,
+    sort: "updated_at",
+    order: "desc",
+    include_total: true,
+  });
+  const items = [...first.items];
+  const pageCount = Math.max(1, Math.ceil(first.total / LIBRARY_PAGE_FETCH));
+
+  for (let start = 2; start <= pageCount; start += LIBRARY_FETCH_CONCURRENCY) {
+    const pages = Array.from(
+      { length: Math.min(LIBRARY_FETCH_CONCURRENCY, pageCount - start + 1) },
+      (_, i) => start + i,
+    );
+    const chunks = await Promise.all(
+      pages.map(page =>
+        fetchLibrary({
+          page,
+          per_page: LIBRARY_PAGE_FETCH,
+          sort: "updated_at",
+          order: "desc",
+          include_total: false,
+        }),
+      ),
+    );
+    for (const res of chunks) items.push(...res.items);
+  }
+  return items;
+}
+
+/** 라이브러리 전체 목록 (구 webapi 장르 칩·필터용, 1회 캐시 + 병렬 로드) */
+async function loadAllLibraryItems(): Promise<LibraryItem[]> {
+  if (_allLibraryItemsCache) return _allLibraryItemsCache;
+  if (_allLibraryLoadPromise) return _allLibraryLoadPromise;
+
+  _allLibraryLoadPromise = (async () => {
+    const items = await fetchAllLibraryPages();
+    _allLibraryItemsCache = items;
+    _genreIndex = buildGenreIndex(items);
+    return items;
+  })();
+
+  try {
+    return await _allLibraryLoadPromise;
+  } finally {
+    _allLibraryLoadPromise = null;
+  }
+}
+
+/** 구 webapi: 라이브러리 진입 시 백그라운드 인덱스 빌드 */
+export function prefetchLibraryClientIndex(): void {
+  void probeLibraryGenreFilterSupport().then(supported => {
+    if (!supported) void loadAllLibraryItems();
+  });
+}
+
+/** /api/library/genres 미지원 시 전체 라이브러리에서 장르 집계 */
+export async function bootstrapLibraryGenres(): Promise<LibraryGenreItem[]> {
+  const items = await loadAllLibraryItems();
+  return genresFromLibraryItems(items);
+}
+
+export async function fetchLibraryGenresResilient(): Promise<{
+  genres: LibraryGenreItem[];
+  source: "api" | "bootstrap";
+}> {
+  try {
+    const genres = await fetchLibraryGenres();
+    if (genres.length > 0) return { genres, source: "api" };
+  } catch {
+    /* 구 webapi — /genres 없음 */
+  }
+  const genres = await bootstrapLibraryGenres();
+  return { genres, source: "bootstrap" };
+}
+
+export function itemGenreTokens(item: Pick<LibraryItem, "genres_ko">): Set<string> {
+  const raw = item.genres_ko || "";
+  return new Set(
+    raw.split(",").map(s => s.trim()).filter(Boolean),
+  );
+}
+
+export function matchesLibraryGenres(
+  item: LibraryItem,
+  genres: string[],
+  mode: "and" | "or" = "and",
+): boolean {
+  if (!genres.length) return true;
+  const tokens = itemGenreTokens(item);
+  const selected = genres.map(g => g.trim()).filter(Boolean);
+  if (mode === "or") return selected.some(g => tokens.has(g));
+  return selected.every(g => tokens.has(g));
+}
+
+export function resetLibraryGenreFilterProbe(): void {
+  _genreServerFilter = null;
+}
+
+export async function probeLibraryGenreFilterSupport(): Promise<boolean> {
+  if (_genreServerFilter !== null) return _genreServerFilter;
+  try {
+    await fetchLibraryGenres();
+    _genreServerFilter = true;
+  } catch {
+    _genreServerFilter = false;
+  }
+  return _genreServerFilter;
+}
+
+function libraryListFilterKey(q: LibraryQuery): string {
+  const { page: _p, per_page: _n, include_total: _t, ...rest } = q;
+  return JSON.stringify(rest);
+}
+
+function hasNonGenreListFilters(q: LibraryQuery): boolean {
+  return !!(
+    (q.q && q.q.trim())
+    || q.has_folder !== undefined
+    || q.has_metadata !== undefined
+    || q.has_subtitle
+    || q.has_mosaic_removed
+  );
+}
+
+function sortLibraryItems(
+  items: LibraryItem[],
+  sort: LibraryQuery["sort"] = "updated_at",
+  order: LibraryQuery["order"] = "desc",
+): LibraryItem[] {
+  const key = sort ?? "updated_at";
+  const dir = order === "asc" ? 1 : -1;
+  const sorted = [...items];
+  sorted.sort((a, b) => {
+    let cmp = 0;
+    switch (key) {
+      case "release_date":
+        cmp = (a.release_date ?? "").localeCompare(b.release_date ?? "");
+        break;
+      case "product_code":
+        cmp = (a.product_code ?? "").localeCompare(b.product_code ?? "", undefined, { sensitivity: "base" });
+        break;
+      case "title_ko":
+        cmp = (a.title_ko ?? "").localeCompare(b.title_ko ?? "", "ko");
+        break;
+      case "favorite_score":
+        cmp = (Number(a.favorite_score) || 0) - (Number(b.favorite_score) || 0);
+        break;
+      case "updated_at":
+      default:
+        cmp = (a.updated_at ?? "").localeCompare(b.updated_at ?? "");
+        break;
+    }
+    return cmp * dir;
+  });
+  return sorted;
+}
+
+async function scanLibraryForGenres(q: LibraryQuery): Promise<LibraryItem[]> {
+  const key = libraryListFilterKey(q);
+  if (_genreScanCache?.key === key) return _genreScanCache.items;
+
+  const genres = q.genres ?? [];
+  const mode = q.genre_mode ?? "and";
+
+  if (!hasNonGenreListFilters(q)) {
+    const all = await loadAllLibraryItems();
+    const matched = filterIndexedByGenres(all, genres, mode);
+    _genreScanCache = { key, items: matched };
+    return matched;
+  }
+
+  const matched: LibraryItem[] = [];
+  for (let page = 1; page <= 150; page += 1) {
+    const res = await fetchLibrary({
+      ...q,
+      genres: undefined,
+      genre_mode: undefined,
+      page,
+      per_page: 200,
+      include_total: false,
+    });
+    for (const item of res.items) {
+      if (matchesLibraryGenres(item, genres, mode)) matched.push(item);
+    }
+    if (res.items.length < 200) break;
+  }
+
+  _genreScanCache = { key, items: matched };
+  return matched;
+}
+
+/** 장르 필터 포함 목록 — 구 webapi는 클라이언트 스캔 폴백 */
+export async function fetchLibraryListed(q: LibraryQuery): Promise<LibraryListResponse> {
+  const genres = q.genres;
+  if (!genres?.length) {
+    return fetchLibrary(q);
+  }
+
+  const serverSupported = await probeLibraryGenreFilterSupport();
+  if (serverSupported) {
+    return fetchLibrary(q);
+  }
+
+  const matched = sortLibraryItems(
+    await scanLibraryForGenres(q),
+    q.sort,
+    q.order,
+  );
+  const perPage = q.per_page ?? 64;
+  const page = q.page ?? 1;
+  const start = (page - 1) * perPage;
+
+  return {
+    total: matched.length,
+    page,
+    per_page: perPage,
+    items: matched.slice(start, start + perPage),
+  };
+}
 
 export const fetchLibraryDetail = (code: string): Promise<LibraryItemDetail> =>
   get(`/api/library/${code}`);

@@ -7,24 +7,42 @@ import shutil
 import subprocess
 import tempfile
 import threading
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Optional
 
 from javstory.utils.ffmpeg_path import get_ffmpeg, get_ffprobe, path_for_ffmpeg
 
-ProgressCb = Optional[Callable[[int], None]]
+
+@dataclass(frozen=True)
+class PreviewProgressInfo:
+    segment_index: int = 0
+    segment_total: int = 0
+    source_position_sec: float = 0.0
+    source_duration_sec: float = 0.0
+
+
+ProgressCb = Optional[Callable[[int, PreviewProgressInfo | None], None]]
 
 logger = logging.getLogger(__name__)
 
 SEGMENT_COUNT = 10
-SEGMENT_SEC = 3.0
-MARGIN_RATIO = 0.02  # 앞뒤 2% 여유 — 처음~끝 구간을 10등분 샘플링
-MAX_PREVIEW_BYTES = 3 * 1024 * 1024
+SEGMENT_SEC = 2.0
+MARGIN_RATIO = 0.02  # 앞뒤 2% 여유 — 처음~끝 구간을 균등 샘플링
+MAX_PREVIEW_BYTES = 5 * 1024 * 1024
 ENCODE_QUALITIES = (75, 45)
 MP4_CRF_FROM_QUALITY = {90: 23, 75: 26, 60: 28, 45: 30}
-PREVIEW_FPS = 15
-PREVIEW_WIDTH = 480
+PREVIEW_FPS = 20
+PREVIEW_WIDTH = 720
 MONTAGE_META_KEY = f"{SEGMENT_COUNT}x{SEGMENT_SEC}@segment-ss-mp4"
+# 구버전 몽타주 — 이미 생성된 프리뷰는 재큐잉하지 않음
+LEGACY_MONTAGE_META_KEYS = frozenset(
+    {
+        "5x3.0@segment-ss-mp4",
+        "10x3.0@segment-ss-mp4",
+    }
+)
+ACCEPTED_MONTAGE_META_KEYS = frozenset({MONTAGE_META_KEY, *LEGACY_MONTAGE_META_KEYS})
 
 
 def _preview_ffmpeg_threads() -> int:
@@ -42,7 +60,90 @@ def _preview_x264_preset() -> str:
 
 
 def _preview_vf() -> str:
-    return f"fps={PREVIEW_FPS},scale={PREVIEW_WIDTH}:-2:flags=bilinear"
+    return f"fps={PREVIEW_FPS},scale={PREVIEW_WIDTH}:-2:flags=lanczos"
+
+
+def _preview_use_nvenc() -> bool:
+    raw = (os.environ.get("JAVSTORY_PREVIEW_USE_NVENC", "") or "").strip().lower()
+    if not raw:
+        return True
+    return raw not in {"0", "false", "no", "off"}
+
+
+def _nvenc_cq_from_crf(crf: int) -> int:
+    return max(18, min(40, int(crf)))
+
+
+def _append_h264_encode_args(
+    cmd: list[str],
+    *,
+    crf: int,
+    threads: int,
+    use_nvenc: bool,
+) -> None:
+    if use_nvenc:
+        cmd += [
+            "-c:v",
+            "h264_nvenc",
+            "-preset",
+            "p4",
+            "-rc",
+            "vbr",
+            "-cq",
+            str(_nvenc_cq_from_crf(crf)),
+            "-profile:v",
+            "main",
+            "-level:v",
+            "4.1",
+            "-tag:v",
+            "avc1",
+            "-pix_fmt",
+            "yuv420p",
+        ]
+    else:
+        cmd += [
+            "-c:v",
+            "libx264",
+            "-preset",
+            _preview_x264_preset(),
+            "-crf",
+            str(crf),
+            "-threads",
+            str(threads),
+            "-profile:v",
+            "main",
+            "-level:v",
+            "4.1",
+            "-pix_fmt",
+            "yuv420p",
+        ]
+
+
+def _append_mp4_mux_flags(cmd: list[str]) -> None:
+    cmd += ["-movflags", "+faststart"]
+
+
+def _segment_output_ok(out: Path, seg_len: float) -> bool:
+    if not out.is_file():
+        return False
+    try:
+        if out.stat().st_size <= 0:
+            return False
+    except OSError:
+        return False
+    return _ffprobe_duration_sec(out) >= seg_len * 0.65
+
+
+def _concat_output_ok(out: Path, segment_count: int, *, seg_len: float = SEGMENT_SEC) -> bool:
+    if not out.is_file():
+        return False
+    try:
+        if out.stat().st_size <= 0:
+            return False
+    except OSError:
+        return False
+    min_expected = max(8.0, segment_count * seg_len * 0.55)
+    return _ffprobe_duration_sec(out) >= min_expected
 
 
 def _preview_skip_webp_default() -> bool:
@@ -123,12 +224,43 @@ def _meta_skip_webp(meta_path: Path) -> bool:
     return bool(_meta_params(meta_path).get("skip_webp"))
 
 
+def _expected_duration_for_montage_key(key: str | None) -> float:
+    if not key:
+        return 0.0
+    m = re.match(r"^(\d+)x([\d.]+)@", key.strip())
+    if not m:
+        return 0.0
+    try:
+        return float(m.group(1)) * float(m.group(2))
+    except ValueError:
+        return 0.0
+
+
+def resolve_preview_media_type(webp_path: Path | str) -> str | None:
+    """UI/API용 프리뷰 미디어 종류 (mp4|webp). 몽타주 메타가 있으면 구 webp보다 mp4 우선."""
+    webp, mp4, meta_path = preview_asset_paths(webp_path)
+    try:
+        mp4_ok = mp4.is_file() and mp4.stat().st_size > 0
+        if mp4_ok and meta_path.is_file():
+            if _meta_montage_key(meta_path) in ACCEPTED_MONTAGE_META_KEYS:
+                return "mp4"
+        if is_montage_preview_fresh(webp_path=webp_path):
+            return "mp4"
+        if webp.is_file() and webp.stat().st_size > 0:
+            return "webp"
+        if mp4_ok:
+            return "mp4"
+    except OSError:
+        pass
+    return None
+
+
 def is_montage_preview_fresh(
     *,
     webp_path: Path | str,
     video_path: Path | str | None = None,
 ) -> bool:
-    """10×3초 MP4 몽타주가 최신인지 확인 (구버전 단일 루프 WebP는 False)."""
+    """10×2초(또는 구버전 5×3·10×3) MP4 몽타주가 최신인지 확인."""
     webp, mp4, meta_path = preview_asset_paths(webp_path)
     try:
         if not mp4.is_file() or mp4.stat().st_size <= 0:
@@ -140,11 +272,12 @@ def is_montage_preview_fresh(
     except OSError:
         return False
 
-    expected = SEGMENT_COUNT * SEGMENT_SEC
-    if _ffprobe_duration_sec(mp4) < expected * 0.85:
+    meta_key = _meta_montage_key(meta_path)
+    if meta_key not in ACCEPTED_MONTAGE_META_KEYS:
         return False
 
-    if _meta_montage_key(meta_path) != MONTAGE_META_KEY:
+    expected = _expected_duration_for_montage_key(meta_key)
+    if expected > 0 and _ffprobe_duration_sec(mp4) < expected * 0.85:
         return False
 
     if video_path is None:
@@ -155,18 +288,16 @@ def is_montage_preview_fresh(
     vp = Path(video_path)
     if not vp.is_file():
         return False
-    seed = 0
-    skip_webp = False
-    try:
-        params = _meta_params(meta_path)
-        seed = int(params.get("seed") or 0)
-        skip_webp = bool(params.get("skip_webp"))
-    except Exception:
-        pass
+    params = _meta_params(meta_path)
+    check_params = {
+        "montage": meta_key,
+        "seed": int(params.get("seed") or 0),
+        "skip_webp": bool(params.get("skip_webp")),
+    }
     return is_up_to_date(
         meta_path=meta_path,
         inputs={"video": vp},
-        params=montage_preview_params(seed=seed, skip_webp=skip_webp),
+        params=check_params,
     )
 
 
@@ -183,6 +314,36 @@ def _clamp(p: int) -> int:
         return int(max(0, min(100, p)))
     except Exception:
         return 0
+
+
+def _format_media_timestamp(sec: float) -> str:
+    total = max(0, int(sec))
+    h, rem = divmod(total, 3600)
+    m, s = divmod(rem, 60)
+    return f"{h:02d}:{m:02d}:{s:02d}"
+
+
+def format_preview_progress_message(info: PreviewProgressInfo | None) -> str:
+    if (
+        info
+        and info.segment_total > 0
+        and info.segment_index > 0
+        and info.source_duration_sec > 0
+    ):
+        pos = _format_media_timestamp(info.source_position_sec)
+        total = _format_media_timestamp(info.source_duration_sec)
+        return f"구간 {info.segment_index}/{info.segment_total} · 원본 {pos} / {total}"
+    return "인코딩 중…"
+
+
+def _emit_progress(
+    progress_callback: ProgressCb,
+    percent: int,
+    info: PreviewProgressInfo | None = None,
+) -> None:
+    if not progress_callback:
+        return
+    progress_callback(_clamp(percent), info)
 
 
 _FFMPEG_TIME_RE = re.compile(r"time=(\d+):(\d+):(\d+(?:\.\d+)?)")
@@ -324,7 +485,7 @@ def _build_montage_filter(segments: list[tuple[float, float]]) -> str:
         end = start + seg_len
         return (
             f"[0:v]trim=start={start:.3f}:end={end:.3f},setpts=PTS-STARTPTS,"
-            f"fps=20,scale=640:-2:flags=lanczos[outv]"
+            f"fps={PREVIEW_FPS},scale={PREVIEW_WIDTH}:-2:flags=lanczos[outv]"
         )
     split_labels = "".join(f"[s{i}]" for i in range(n))
     parts = [f"[0:v]split={n}{split_labels}"]
@@ -333,7 +494,7 @@ def _build_montage_filter(segments: list[tuple[float, float]]) -> str:
         end = start + seg_len
         parts.append(
             f"[s{i}]trim=start={start:.3f}:end={end:.3f},setpts=PTS-STARTPTS,"
-            f"fps=20,scale=640:-2:flags=lanczos[v{i}]"
+            f"fps={PREVIEW_FPS},scale={PREVIEW_WIDTH}:-2:flags=lanczos[v{i}]"
         )
         vlabels.append(f"[v{i}]")
     parts.append(f"{''.join(vlabels)}concat=n={n}:v=1:a=0[outv]")
@@ -348,7 +509,7 @@ def _encode_segment_webp(
     seg_len: float,
     quality: int,
 ) -> tuple[int, str]:
-    frame_count = max(1, int(seg_len * 20))
+    frame_count = max(1, int(seg_len * PREVIEW_FPS))
     cmd = [
         get_ffmpeg(),
         "-y",
@@ -360,7 +521,7 @@ def _encode_segment_webp(
         f"{seg_len:.3f}",
         "-an",
         "-vf",
-        "fps=20,scale=640:-2:flags=lanczos",
+        _preview_vf(),
         "-frames:v",
         str(frame_count),
         "-preset",
@@ -449,51 +610,60 @@ def _extract_segment_mp4(
     seg_len: float,
     crf: int,
     threads: int,
-    fast_seek: bool = False,
+    fast_seek: bool = True,
+    prefer_nvenc: bool | None = None,
 ) -> tuple[int, str]:
-    cmd = [
-        get_ffmpeg(),
-        "-y",
-        "-err_detect",
-        "ignore_err",
-    ]
-    src_path = path_for_ffmpeg(src)
-    out_path = path_for_ffmpeg(out, output=True)
-    if fast_seek:
-        cmd += ["-ss", f"{start:.3f}", "-i", src_path, "-t", f"{seg_len:.3f}"]
-    else:
-        # 입력 뒤 -ss: 구간 길이가 정확해 몽타주 총 길이 검증 통과율이 높음
-        cmd += ["-i", src_path, "-ss", f"{start:.3f}", "-t", f"{seg_len:.3f}"]
-    cmd += [
-        "-an",
-        "-vf",
-        _preview_vf(),
-        "-c:v",
-        "libx264",
-        "-preset",
-        _preview_x264_preset(),
-        "-crf",
-        str(crf),
-        "-threads",
-        str(threads),
-        "-pix_fmt",
-        "yuv420p",
-        out_path,
-    ]
-    try:
-        cp = subprocess.run(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            startupinfo=_startupinfo_hidden(),
-            check=False,
-            timeout=_segment_extract_timeout_sec(),
-        )
-        return cp.returncode, (cp.stderr or b"").decode("utf-8", errors="replace")
-    except subprocess.TimeoutExpired as e_to:
-        return -999, f"TimeoutExpired: {e_to}"
-    except Exception as e_run:
-        return -1, f"subprocess exception: {e_run!r}"
+    if prefer_nvenc is None:
+        prefer_nvenc = _preview_use_nvenc()
+
+    def _attempt(*, nvenc: bool, seek_fast: bool) -> tuple[int, str]:
+        cmd = [
+            get_ffmpeg(),
+            "-y",
+            "-err_detect",
+            "ignore_err",
+        ]
+        if nvenc:
+            cmd += ["-hwaccel", "auto"]
+        src_path = path_for_ffmpeg(src)
+        out_path = path_for_ffmpeg(out, output=True)
+        if seek_fast:
+            cmd += ["-ss", f"{start:.3f}", "-i", src_path, "-t", f"{seg_len:.3f}"]
+        else:
+            cmd += ["-i", src_path, "-ss", f"{start:.3f}", "-t", f"{seg_len:.3f}"]
+        cmd += ["-an", "-vf", _preview_vf()]
+        _append_h264_encode_args(cmd, crf=crf, threads=threads, use_nvenc=nvenc)
+        _append_mp4_mux_flags(cmd)
+        cmd.append(out_path)
+        try:
+            cp = subprocess.run(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                startupinfo=_startupinfo_hidden(),
+                check=False,
+                timeout=_segment_extract_timeout_sec(),
+            )
+            return cp.returncode, (cp.stderr or b"").decode("utf-8", errors="replace")
+        except subprocess.TimeoutExpired as e_to:
+            return -999, f"TimeoutExpired: {e_to}"
+        except Exception as e_run:
+            return -1, f"subprocess exception: {e_run!r}"
+
+    encoders = (True, False) if prefer_nvenc else (False,)
+    last_rc = -1
+    last_stderr = ""
+    for nvenc in encoders:
+        last_rc, last_stderr = _attempt(nvenc=nvenc, seek_fast=fast_seek)
+        if last_rc == 0 and _segment_output_ok(out, seg_len):
+            return last_rc, last_stderr
+        if nvenc and prefer_nvenc:
+            logger.warning(
+                "preview segment NVENC failed, CPU fallback: %s (seek_fast=%s)",
+                src.name,
+                fast_seek,
+            )
+    return last_rc, last_stderr
 
 
 def _concat_mp4_segments(segment_paths: list[Path], out: Path) -> tuple[int, str]:
@@ -513,41 +683,49 @@ def _concat_mp4_segments(segment_paths: list[Path], out: Path) -> tuple[int, str
 
         out_path = path_for_ffmpeg(out, output=True)
         list_arg = str(list_path.resolve())
-        cmd_reencode = [
-            get_ffmpeg(),
-            "-y",
-            "-f",
-            "concat",
-            "-safe",
-            "0",
-            "-i",
-            list_arg,
-            "-an",
-            "-c:v",
-            "libx264",
-            "-preset",
-            _preview_x264_preset(),
-            "-crf",
-            "28",
-            "-threads",
-            str(_preview_ffmpeg_threads()),
-            "-pix_fmt",
-            "yuv420p",
-            "-movflags",
-            "+faststart",
-            "-reset_timestamps",
-            "1",
-            out_path,
-        ]
-        cp2 = subprocess.run(
-            cmd_reencode,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            startupinfo=_startupinfo_hidden(),
-            check=False,
-            timeout=300,
-        )
-        return cp2.returncode, (cp2.stderr or b"").decode("utf-8", errors="replace")
+        # concat -c copy는 구간별 SPS/PPS가 달라 브라우저 <video> 재생이 실패하는 경우가 많음 → 항상 재인코딩
+        threads = _preview_ffmpeg_threads()
+        last_stderr = ""
+        encoders = (True, False) if _preview_use_nvenc() else (False,)
+        last_rc = -1
+        for nvenc in encoders:
+            cmd_reencode = [
+                get_ffmpeg(),
+                "-y",
+                "-f",
+                "concat",
+                "-safe",
+                "0",
+                "-i",
+                list_arg,
+                "-an",
+            ]
+            _append_h264_encode_args(
+                cmd_reencode,
+                crf=28,
+                threads=threads,
+                use_nvenc=nvenc,
+            )
+            cmd_reencode += [
+                "-reset_timestamps",
+                "1",
+            ]
+            _append_mp4_mux_flags(cmd_reencode)
+            cmd_reencode.append(out_path)
+            cp2 = subprocess.run(
+                cmd_reencode,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                startupinfo=_startupinfo_hidden(),
+                check=False,
+                timeout=300,
+            )
+            last_stderr = (cp2.stderr or b"").decode("utf-8", errors="replace")
+            if cp2.returncode == 0 and _concat_output_ok(out, len(segment_paths)):
+                return cp2.returncode, last_stderr
+            if nvenc:
+                logger.warning("preview concat NVENC failed, CPU fallback")
+        return cp2.returncode, last_stderr
     finally:
         try:
             list_path.unlink(missing_ok=True)
@@ -564,6 +742,7 @@ def _run_ffmpeg_montage_segmented(
     progress_callback: ProgressCb = None,
     progress_from: int = 20,
     progress_to: int = 82,
+    source_duration_sec: float = 0.0,
 ) -> tuple[int, str]:
     """구간별 추출 후 concat (긴 원본에서 filter_complex split보다 빠름)."""
     threads = _preview_ffmpeg_threads()
@@ -574,22 +753,23 @@ def _run_ffmpeg_montage_segmented(
         seg_paths: list[Path] = []
         n = max(1, len(segments))
         span = max(1, progress_to - progress_from)
+        src_dur = source_duration_sec if source_duration_sec > 0 else _ffprobe_duration_sec(src)
         for i, (start, seg_len) in enumerate(segments):
+            if progress_callback:
+                _emit_progress(
+                    progress_callback,
+                    _clamp(progress_from + int(span * i / n)),
+                    PreviewProgressInfo(
+                        segment_index=i + 1,
+                        segment_total=n,
+                        source_position_sec=start,
+                        source_duration_sec=src_dur,
+                    ),
+                )
             seg_out = temp_dir / f"seg_{i:02d}.mp4"
-            rc, stderr = _extract_segment_mp4(
-                src=src,
-                out=seg_out,
-                start=start,
-                seg_len=seg_len,
-                crf=crf,
-                threads=threads,
-                fast_seek=False,
-            )
-            last_stderr = stderr
-            if rc != 0 or not seg_out.is_file() or seg_out.stat().st_size <= 0:
-                return rc, stderr
-            seg_dur = _ffprobe_duration_sec(seg_out)
-            if seg_dur < seg_len * 0.65:
+            rc = -1
+            stderr = ""
+            for seek_fast in (True, False):
                 rc, stderr = _extract_segment_mp4(
                     src=src,
                     out=seg_out,
@@ -597,14 +777,25 @@ def _run_ffmpeg_montage_segmented(
                     seg_len=seg_len,
                     crf=crf,
                     threads=threads,
-                    fast_seek=True,
+                    fast_seek=seek_fast,
                 )
                 last_stderr = stderr
-                if rc != 0 or not seg_out.is_file() or seg_out.stat().st_size <= 0:
-                    return rc, stderr
+                if rc == 0 and _segment_output_ok(seg_out, seg_len):
+                    break
+            if rc != 0 or not _segment_output_ok(seg_out, seg_len):
+                return rc, stderr
             seg_paths.append(seg_out)
             if progress_callback:
-                progress_callback(_clamp(progress_from + int(span * (i + 1) / n)))
+                _emit_progress(
+                    progress_callback,
+                    _clamp(progress_from + int(span * (i + 1) / n)),
+                    PreviewProgressInfo(
+                        segment_index=i + 1,
+                        segment_total=n,
+                        source_position_sec=start,
+                        source_duration_sec=src_dur,
+                    ),
+                )
 
         rc, stderr = _concat_mp4_segments(seg_paths, out)
         last_stderr = stderr or last_stderr
@@ -622,6 +813,7 @@ def _run_ffmpeg_montage(
     progress_callback: ProgressCb = None,
     progress_from: int = 20,
     progress_to: int = 82,
+    source_duration_sec: float = 0.0,
 ) -> tuple[int, str]:
     rc, stderr = _run_ffmpeg_montage_segmented(
         src=src,
@@ -631,6 +823,7 @@ def _run_ffmpeg_montage(
         progress_callback=progress_callback,
         progress_from=progress_from,
         progress_to=progress_to,
+        source_duration_sec=source_duration_sec,
     )
     if (
         rc == 0
@@ -653,6 +846,7 @@ def _run_ffmpeg_montage(
         progress_callback=progress_callback,
         progress_from=progress_from,
         progress_to=progress_to,
+        source_duration_sec=source_duration_sec,
     )
 
 
@@ -665,58 +859,15 @@ def _run_ffmpeg_montage_filter_complex(
     progress_callback: ProgressCb = None,
     progress_from: int = 20,
     progress_to: int = 82,
+    source_duration_sec: float = 0.0,
 ) -> tuple[int, str]:
     filter_complex = _build_montage_filter(segments)
     is_mp4 = out.suffix.lower() == ".mp4"
-    cmd = [
-        get_ffmpeg(),
-        "-y",
-        "-fflags",
-        "+genpts+igndts",
-        "-probesize",
-        "50M",
-        "-analyzeduration",
-        "50M",
-        "-err_detect",
-        "ignore_err",
-        "-i",
-        path_for_ffmpeg(src),
-        "-filter_complex",
-        filter_complex,
-        "-map",
-        "[outv]",
-        "-an",
-    ]
-    if is_mp4:
-        crf = MP4_CRF_FROM_QUALITY.get(quality, 28)
-        cmd += [
-            "-c:v",
-            "libx264",
-            "-preset",
-            "fast",
-            "-crf",
-            str(crf),
-            "-pix_fmt",
-            "yuv420p",
-            "-movflags",
-            "+faststart",
-            path_for_ffmpeg(out, output=True),
-        ]
-    else:
-        cmd += [
-            "-loop",
-            "0",
-            "-preset",
-            "picture",
-            "-quality",
-            str(quality),
-            "-compression_level",
-            "6",
-            path_for_ffmpeg(out, output=True),
-        ]
     expected_out = max(1.0, sum(s[1] for s in segments))
     span = max(1, progress_to - progress_from)
     last_reported = -1
+    n = max(1, len(segments))
+    src_dur = source_duration_sec if source_duration_sec > 0 else _ffprobe_duration_sec(src)
 
     def _on_stderr_line(txt: str) -> None:
         nonlocal last_reported
@@ -729,8 +880,79 @@ def _run_ffmpeg_montage_filter_complex(
         p = progress_from + int(span * frac)
         if p > last_reported:
             last_reported = p
-            progress_callback(_clamp(p))
+            seg_idx = min(n, max(1, int(frac * n) + (1 if frac > 0 else 0)))
+            start = segments[seg_idx - 1][0] if seg_idx <= len(segments) else 0.0
+            _emit_progress(
+                progress_callback,
+                p,
+                PreviewProgressInfo(
+                    segment_index=seg_idx,
+                    segment_total=n,
+                    source_position_sec=start,
+                    source_duration_sec=src_dur,
+                ),
+            )
 
+    def _base_cmd(*, nvenc: bool) -> list[str]:
+        cmd = [
+            get_ffmpeg(),
+            "-y",
+            "-fflags",
+            "+genpts+igndts",
+            "-probesize",
+            "50M",
+            "-analyzeduration",
+            "50M",
+            "-err_detect",
+            "ignore_err",
+        ]
+        if nvenc:
+            cmd += ["-hwaccel", "auto"]
+        cmd += [
+            "-i",
+            path_for_ffmpeg(src),
+            "-filter_complex",
+            filter_complex,
+            "-map",
+            "[outv]",
+            "-an",
+        ]
+        return cmd
+
+    if is_mp4:
+        crf = MP4_CRF_FROM_QUALITY.get(quality, 28)
+        threads = _preview_ffmpeg_threads()
+        encoders = (True, False) if _preview_use_nvenc() else (False,)
+        last_rc = -1
+        last_stderr = ""
+        for nvenc in encoders:
+            cmd = _base_cmd(nvenc=nvenc)
+            _append_h264_encode_args(cmd, crf=crf, threads=threads, use_nvenc=nvenc)
+            _append_mp4_mux_flags(cmd)
+            cmd.append(path_for_ffmpeg(out, output=True))
+            last_rc, last_stderr = _run_ffmpeg_with_stderr_progress(
+                cmd,
+                timeout=_preview_montage_timeout_sec(),
+                on_stderr_line=_on_stderr_line,
+            )
+            if last_rc == 0 and out.is_file() and out.stat().st_size > 0:
+                return last_rc, last_stderr
+            if nvenc:
+                logger.warning("preview filter_complex NVENC failed, CPU fallback: %s", src.name)
+        return last_rc, last_stderr
+
+    cmd = _base_cmd(nvenc=False)
+    cmd += [
+        "-loop",
+        "0",
+        "-preset",
+        "picture",
+        "-quality",
+        str(quality),
+        "-compression_level",
+        "6",
+        path_for_ffmpeg(out, output=True),
+    ]
     try:
         return _run_ffmpeg_with_stderr_progress(
             cmd,
@@ -749,7 +971,7 @@ def _webp_from_mp4(
 ) -> tuple[int, str]:
     """데스크톱(QML AnimatedImage)용 WebP — MP4 몽타주에서 파생."""
     if progress_callback:
-        progress_callback(_clamp(85))
+        _emit_progress(progress_callback, 85, None)
     cmd = [
         get_ffmpeg(),
         "-y",
@@ -780,7 +1002,7 @@ def _webp_from_mp4(
         rc = cp.returncode
         stderr = (cp.stderr or b"").decode("utf-8", errors="replace")
         if rc == 0 and progress_callback:
-            progress_callback(_clamp(98))
+            _emit_progress(progress_callback, 98, None)
         return rc, stderr
     except subprocess.TimeoutExpired as e_to:
         return -999, f"TimeoutExpired: {e_to}"
@@ -827,7 +1049,7 @@ def create_golden_preview(
     skip_webp: bool | None = None,
 ) -> Path | None:
     """
-    Golden Preview: 10구간×3초 몽타주 MP4 (+ 선택적 WebP).
+    Golden Preview: 10구간×2초 몽타주 MP4 (+ 선택적 WebP).
 
     - 원본 영상 전체(앞뒤 2% 제외)를 10등분 샘플링 → 재생 시 처음~끝 순서로 훑음
     - highlight.mp4는 사용하지 않음 (video_path 원본만)
@@ -840,7 +1062,7 @@ def create_golden_preview(
     out.parent.mkdir(parents=True, exist_ok=True)
 
     if progress_callback:
-        progress_callback(_clamp(5))
+        _emit_progress(progress_callback, 5, None)
 
     src = _resolve_preview_source(Path(video_path))
     if not src or not src.is_file():
@@ -857,7 +1079,16 @@ def create_golden_preview(
         return None
 
     if progress_callback:
-        progress_callback(_clamp(15))
+        _emit_progress(
+            progress_callback,
+            15,
+            PreviewProgressInfo(
+                segment_index=1,
+                segment_total=len(segments),
+                source_position_sec=segments[0][0],
+                source_duration_sec=dur,
+            ),
+        )
 
     tmp_mp4: Path | None = None
     try:
@@ -876,6 +1107,7 @@ def create_golden_preview(
                 progress_callback=progress_callback,
                 progress_from=20,
                 progress_to=82,
+                source_duration_sec=dur,
             )
             if last_rc != 0 or not tmp_mp4.is_file() or tmp_mp4.stat().st_size <= 0:
                 break
@@ -906,8 +1138,13 @@ def create_golden_preview(
         tmp_mp4 = None
 
         if skip_webp:
+            if out.is_file() and out.resolve() != out_mp4.resolve():
+                try:
+                    out.unlink()
+                except OSError:
+                    pass
             if progress_callback:
-                progress_callback(_clamp(100))
+                _emit_progress(progress_callback, 100, None)
             return out_mp4
 
         wrc, wstderr = _webp_from_mp4(
@@ -918,7 +1155,7 @@ def create_golden_preview(
             raise RuntimeError(f"WebP 파생 실패(rc={wrc}): {reason}")
 
         if progress_callback:
-            progress_callback(_clamp(100))
+            _emit_progress(progress_callback, 100, None)
         return out
     finally:
         if tmp_mp4 and tmp_mp4.is_file():

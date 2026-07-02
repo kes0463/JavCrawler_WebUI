@@ -317,38 +317,32 @@ class InsightModel(QObject):
 
     @classmethod
     def _fetch_phase(cls, phase: str) -> dict[str, str]:
-        excluded = cls._excluded_genres()
+        from javstory.services.insight_service import InsightService
+
         dump = lambda o: json.dumps(o, ensure_ascii=False)
+        raw = InsightService().fetch_phase(phase)
 
         if phase == cls._PHASE_CORE:
-            from javstory.analytics.preference_engine import (
-                get_top_actors,
-                get_top_genres,
-                get_top_makers,
-                compute_recent_trend,
-            )
-            from javstory.analytics.library_stats import get_library_stats, get_monthly_genre_trend
             from javstory.analytics.persona_card import get_persona_card
-            from javstory.analytics.pipeline_stats import get_pipeline_report
-            from javstory.analytics.weekly_digest import get_weekly_digest
 
             return {
-                "actors": dump(get_top_actors(5)),
-                "genres": dump(get_top_genres(8, excluded=excluded)),
-                "makers": dump(get_top_makers(5)),
-                "stats": dump(get_library_stats()),
-                "trend": dump(compute_recent_trend(excluded_genres=excluded)),
+                "actors": dump(raw.get("top_actors", [])),
+                "genres": dump(raw.get("top_genres", [])),
+                "makers": dump(raw.get("top_makers", [])),
+                "stats": dump(raw.get("stats", {})),
+                "trend": dump(raw.get("recent_trend", {})),
                 "persona": dump(get_persona_card(cache_only=True)),
-                "pipeline": dump(get_pipeline_report(30)),
-                "monthly": dump(get_monthly_genre_trend(3)),
-                "weekly_digest": dump(get_weekly_digest()),
+                "pipeline": dump(raw.get("pipeline", {})),
+                "monthly": dump(raw.get("monthly_genre_trend", [])),
+                "weekly_digest": dump(raw.get("weekly_digest", {})),
             }
 
         if phase == cls._PHASE_TRENDS:
+            excluded = cls._excluded_genres()
             from javstory.analytics.library_stats import (
                 compute_taste_vector,
-                get_watch_heatmap,
                 get_preference_timeline,
+                get_watch_heatmap,
             )
 
             return {
@@ -360,29 +354,17 @@ class InsightModel(QObject):
             }
 
         if phase == cls._PHASE_RECOMMEND:
-            from javstory.analytics.preference_engine import get_recommendations
-            from javstory.analytics.actor_content_recommender import recommend_favorite_actor_content
-            from javstory.analytics.library_stats import (
-                get_today_recommendation,
-                get_unwatched_gems,
-            )
-
             return {
-                "recs": dump(get_today_recommendation(6)),
-                "next_watch": dump(get_recommendations(5, use_embeddings=False)),
-                "hidden_gems": dump(get_unwatched_gems(6)),
-                "favorite_actor_picks": dump(recommend_favorite_actor_content(6)),
+                "recs": dump(raw.get("today_recs", [])),
+                "next_watch": dump(raw.get("next_watch", [])),
+                "hidden_gems": dump(raw.get("hidden_gems", [])),
+                "favorite_actor_picks": dump(raw.get("favorite_actor_picks", [])),
             }
 
         if phase == cls._PHASE_COLLECTION:
-            from javstory.analytics.library_stats import (
-                get_actor_collection_stats,
-                get_library_distribution,
-            )
-
             return {
-                "dist": dump(get_library_distribution()),
-                "actor_collections": dump(get_actor_collection_stats(12)),
+                "dist": dump(raw.get("distribution", {})),
+                "actor_collections": dump(raw.get("actor_collections", {})),
             }
 
         return {}

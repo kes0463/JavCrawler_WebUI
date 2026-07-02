@@ -2011,7 +2011,7 @@ class LibraryModel(QObject):
     @Slot(str, str, result=list)
     def searchFolderBindingCandidates(self, product_code: str, old_path: str) -> list[str]:
         """라이브러리·미디어 루트에서 품번 폴더 후보 경로를 다시 검색한다 (팝업의 ‘다시 검색’용)."""
-        from gui.folder_watch_service import search_folder_candidates
+        from javstory.folder_watch.candidates import search_folder_candidates
 
         pc = (product_code or "").strip().upper()
         op = (old_path or "").strip()

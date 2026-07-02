@@ -1,18 +1,35 @@
+import { useCallback, useEffect, useRef, useState } from "react";
+import { Pause, Play, Trash2 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { GlowCard } from "@/components/ui/GlowCard";
-import { StatusBadge } from "@/components/ui/StatusBadge";
-import type { HarvestItem } from "@/api/harvest";
-import type { PendingItem, PreviewQueueItem, PreviewQueueStatus } from "@/api/dashboard";
+import { StatusBadge, type StatusType } from "@/components/ui/StatusBadge";
+import {
+  clearPreviewFinished,
+  fetchPreviewQueue,
+  formatPreviewSegmentProgress,
+  pauseAllPreview,
+  pausePreviewJob,
+  removePreviewJob,
+  resumeAllPreview,
+  resumePreviewJob,
+  type PendingItem,
+  type PreviewQueueItem,
+  type PreviewQueueStatus,
+} from "@/api/dashboard";
+import { cancelHarvestItem, clearFinished, removeFromQueue, type HarvestItem } from "@/api/harvest";
 
 export interface TaskRow {
   id: string;
   name: string;
   kind: "harvest" | "preview" | "pending";
-  status: "pending" | "running" | "done" | "error" | "active" | "analyzing";
+  status: "pending" | "running" | "done" | "error" | "active" | "analyzing" | "paused";
   progress: number;
   eta: string;
   detail?: string;
   activity?: PreviewQueueItem["activity"];
+  previewJobId?: string;
+  harvestItemId?: string;
+  rawPreviewStatus?: string;
 }
 
 function mapHarvestItem(item: HarvestItem): TaskRow {
@@ -25,6 +42,7 @@ function mapHarvestItem(item: HarvestItem): TaskRow {
     progress: item.progress,
     eta: item.status === "running" ? "진행 중" : staged ? "스테이징" : item.status === "pending" ? "대기" : "—",
     detail: item.message || undefined,
+    harvestItemId: item.id,
   };
 }
 
@@ -60,24 +78,34 @@ const PREVIEW_STATE_LABEL: Record<
 };
 
 function mapPreviewItem(item: PreviewQueueItem): TaskRow {
+  const segmentLabel = formatPreviewSegmentProgress(item);
   const status =
-    item.status === "queued"
-      ? "pending"
-      : item.status === "running"
-        ? "running"
-        : item.status === "done"
-          ? "done"
-          : item.status === "error"
-            ? "error"
-            : "pending";
+    item.status === "paused"
+      ? "paused"
+      : item.status === "queued"
+        ? "pending"
+        : item.status === "running"
+          ? "running"
+          : item.status === "done"
+            ? "done"
+            : item.status === "error"
+              ? "error"
+              : "pending";
   let eta = "—";
-  if (status === "running") {
-    eta =
-      item.activity === "stalled"
-        ? "정체?"
-        : item.elapsed_sec > 0
-          ? `${Math.floor(item.elapsed_sec / 60)}분 경과`
-          : "인코딩";
+  if (status === "paused") eta = "일시정지";
+  else if (status === "running") {
+    if (segmentLabel) {
+      eta = segmentLabel;
+    } else if (item.message?.includes("구간")) {
+      eta = item.message;
+    } else {
+      eta =
+        item.activity === "stalled"
+          ? "정체?"
+          : item.elapsed_sec > 0
+            ? `${Math.floor(item.elapsed_sec / 60)}분 경과`
+            : "인코딩";
+    }
   } else if (status === "pending") eta = "대기";
   else if (status === "done") eta = "완료";
   else if (status === "error") eta = "실패";
@@ -89,8 +117,11 @@ function mapPreviewItem(item: PreviewQueueItem): TaskRow {
     status,
     progress: item.progress,
     eta,
-    detail: item.message || undefined,
+    detail: segmentLabel
+      ?? (status === "running" && item.message ? item.message : undefined),
     activity: item.activity,
+    previewJobId: item.id,
+    rawPreviewStatus: item.status,
   };
 }
 
@@ -100,11 +131,31 @@ const KIND_LABEL: Record<TaskRow["kind"], string> = {
   pending: "Meta",
 };
 
+function rowStatusBadge(row: TaskRow, rowPaused: boolean): StatusType {
+  if (rowPaused || row.status === "paused") return "warning";
+  if (row.status === "analyzing") return "pending";
+  if (row.status === "active") return "running";
+  if (row.status === "done" || row.status === "error" || row.status === "running" || row.status === "pending") {
+    return row.status;
+  }
+  return "pending";
+}
+
+function formatActionError(e: unknown): string {
+  const msg = e instanceof Error ? e.message : "작업 실패";
+  if (msg.includes("Not Found")) {
+    return "일시정지 API를 찾을 수 없습니다. start_web.bat으로 webapi를 재시작해 주세요.";
+  }
+  return msg;
+}
+
 interface TaskQueueTableProps {
   harvestItems: HarvestItem[];
   pendingItems: PendingItem[];
   previewQueue: PreviewQueueStatus | null;
   className?: string;
+  onQueueChange?: () => void;
+  onPreviewQueueUpdate?: (queue: PreviewQueueStatus) => void;
 }
 
 export function TaskQueueTable({
@@ -112,12 +163,55 @@ export function TaskQueueTable({
   pendingItems,
   previewQueue,
   className,
+  onQueueChange,
+  onPreviewQueueUpdate,
 }: TaskQueueTableProps) {
+  const [busy, setBusy] = useState(false);
+  const [actionError, setActionError] = useState<string | null>(null);
+  const [userPaused, setUserPaused] = useState(false);
+  const [rowPausedIds, setRowPausedIds] = useState<Set<string>>(() => new Set());
+  const busyRef = useRef(false);
+
+  useEffect(() => {
+    setUserPaused(previewQueue?.user_paused ?? false);
+    const paused = new Set<string>();
+    for (const item of previewQueue?.items ?? []) {
+      if (item.status === "paused") paused.add(item.id);
+    }
+    setRowPausedIds(paused);
+  }, [previewQueue]);
+
+  const syncPreviewQueue = useCallback(async () => {
+    const preview = await fetchPreviewQueue(40);
+    onPreviewQueueUpdate?.(preview);
+    return preview;
+  }, [onPreviewQueueUpdate]);
+
+  const runAction = useCallback(
+    async (fn: () => Promise<unknown>) => {
+      if (busyRef.current) return;
+      busyRef.current = true;
+      setBusy(true);
+      setActionError(null);
+      try {
+        await fn();
+        await syncPreviewQueue();
+        onQueueChange?.();
+      } catch (e) {
+        setActionError(formatActionError(e));
+      } finally {
+        busyRef.current = false;
+        setBusy(false);
+      }
+    },
+    [onQueueChange, syncPreviewQueue],
+  );
+
   const activeHarvest = harvestItems.filter(i => i.status === "running" || i.status === "pending");
   const previewRows = (previewQueue?.items ?? []).map(mapPreviewItem);
 
   const activePreview = previewRows.filter(
-    r => r.status === "running" || r.status === "pending",
+    r => r.status === "running" || r.status === "pending" || r.status === "paused",
   );
   const recentPreviewDone = previewRows.filter(r => r.status === "done" || r.status === "error").slice(0, 5);
 
@@ -139,34 +233,140 @@ export function TaskQueueTable({
   const idleLabel = previewQueue
     ? formatIdleSec(previewQueue.seconds_since_activity)
     : "";
+  const harvestPaused = previewQueue?.harvest_paused ?? false;
+
+  const handleClearFinished = () =>
+    runAction(async () => {
+      await Promise.all([clearPreviewFinished(), clearFinished()]);
+    });
+
+  const handleTogglePauseAll = async () => {
+    if (busyRef.current || harvestPaused) return;
+    const nextPaused = !userPaused;
+    setUserPaused(nextPaused);
+    setActionError(null);
+    busyRef.current = true;
+    setBusy(true);
+    try {
+      if (nextPaused) {
+        await pauseAllPreview();
+      } else {
+        await resumeAllPreview();
+      }
+      const preview = await syncPreviewQueue();
+      setUserPaused(preview.user_paused ?? nextPaused);
+      onQueueChange?.();
+    } catch (e) {
+      setUserPaused(!nextPaused);
+      setActionError(formatActionError(e));
+    } finally {
+      busyRef.current = false;
+      setBusy(false);
+    }
+  };
+
+  const isRowPaused = (row: TaskRow) =>
+    row.status === "paused"
+    || row.rawPreviewStatus === "paused"
+    || (row.previewJobId ? rowPausedIds.has(row.previewJobId) : false);
+
+  const toggleRowPause = async (row: TaskRow) => {
+    if (!row.previewJobId || busyRef.current || harvestPaused) return;
+    const jobId = row.previewJobId;
+    const wasPaused = isRowPaused(row);
+    const prevIds = rowPausedIds;
+    const nextIds = new Set(rowPausedIds);
+    if (wasPaused) nextIds.delete(jobId);
+    else nextIds.add(jobId);
+    setRowPausedIds(nextIds);
+    setActionError(null);
+    busyRef.current = true;
+    setBusy(true);
+    try {
+      if (wasPaused) await resumePreviewJob(jobId);
+      else await pausePreviewJob(jobId);
+      await syncPreviewQueue();
+      onQueueChange?.();
+    } catch (e) {
+      setRowPausedIds(prevIds);
+      setActionError(formatActionError(e));
+    } finally {
+      busyRef.current = false;
+      setBusy(false);
+    }
+  };
 
   return (
     <GlowCard accent="blue" className={cn("overflow-hidden !p-6", className)}>
       <div className="flex flex-wrap items-center justify-between gap-3 mb-5">
         <h2 className="text-xl font-semibold text-white">Task Queue</h2>
-        <div className="flex flex-wrap items-center gap-3 text-sm text-slate-400">
-          <span>{rows.length} 표시</span>
-          {previewQueue && (
-            <>
-              <span
-                className={cn(
-                  "inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-semibold",
-                  stateUi.className,
-                )}
-              >
-                {stateUi.pulse && (
-                  <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
-                )}
-                Preview {stateUi.label}
-              </span>
-              <span className="text-violet-300/90">
-                실행 {previewRunning} / 대기 {previewPending.toLocaleString()} / 완료{" "}
-                {previewDone.toLocaleString()}
-              </span>
-              <span className="text-slate-500">활동 {idleLabel}</span>
-            </>
-          )}
+        <div className="flex flex-wrap items-center gap-2">
+          <button
+            type="button"
+            disabled={busy}
+            onClick={handleClearFinished}
+            className="px-3 py-1.5 text-xs font-medium rounded-md bg-white/[0.06] text-slate-300 hover:bg-white/[0.1] disabled:opacity-50"
+          >
+            완료 목록 삭제
+          </button>
+          <button
+            type="button"
+            disabled={busy || harvestPaused}
+            title={harvestPaused ? "크롤링 중에는 프리뷰가 자동 일시정지됩니다" : undefined}
+            onClick={handleTogglePauseAll}
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md bg-violet-500/20 text-violet-200 hover:bg-violet-500/30 disabled:opacity-50"
+          >
+            {userPaused && !harvestPaused ? (
+              <>
+                <Play className="w-3.5 h-3.5" />
+                모두 재개
+              </>
+            ) : (
+              <>
+                <Pause className="w-3.5 h-3.5" />
+                모두 일시정지
+              </>
+            )}
+          </button>
         </div>
+      </div>
+      {actionError && (
+        <p className="mb-3 text-sm text-rose-400">{actionError}</p>
+      )}
+      <div className="flex flex-wrap items-center gap-3 text-sm text-slate-400 mb-4">
+        <span>{rows.length} 표시</span>
+        {previewQueue && (
+          <>
+            <span
+              className={cn(
+                "inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-semibold",
+                harvestPaused
+                  ? "bg-amber-500/20 text-amber-300"
+                  : userPaused
+                    ? "bg-violet-500/20 text-violet-300"
+                    : stateUi.className,
+              )}
+            >
+              {harvestPaused ? (
+                "크롤링 중 — Preview 일시정지"
+              ) : userPaused ? (
+                "Preview 일시정지"
+              ) : (
+                <>
+                  {stateUi.pulse && (
+                    <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+                  )}
+                  Preview {stateUi.label}
+                </>
+              )}
+            </span>
+            <span className="text-violet-300/90">
+              실행 {previewRunning} / 대기 {previewPending.toLocaleString()} / 완료{" "}
+              {previewDone.toLocaleString()}
+            </span>
+            <span className="text-slate-500">활동 {idleLabel}</span>
+          </>
+        )}
       </div>
       <div className="overflow-x-auto -mx-1">
         <table className="w-full text-left text-base">
@@ -176,18 +376,21 @@ export function TaskQueueTable({
               <th className="pb-3 font-semibold">Task</th>
               <th className="pb-3 font-semibold">Status</th>
               <th className="pb-3 font-semibold min-w-[160px]">Progress</th>
-              <th className="pb-3 pr-1 font-semibold text-right">ETA</th>
+              <th className="pb-3 font-semibold text-right">ETA</th>
+              <th className="pb-3 pr-1 font-semibold text-right w-24">Actions</th>
             </tr>
           </thead>
           <tbody>
             {rows.length === 0 ? (
               <tr>
-                <td colSpan={5} className="py-10 text-center text-lg text-slate-500">
+                <td colSpan={6} className="py-10 text-center text-lg text-slate-500">
                   대기 중인 작업이 없습니다
                 </td>
               </tr>
             ) : (
-              rows.map(row => (
+              rows.map(row => {
+                const rowPaused = row.kind === "preview" && isRowPaused(row);
+                return (
                 <tr
                   key={row.id}
                   className="border-b border-white/[0.04] last:border-0 hover:bg-white/[0.02]"
@@ -209,7 +412,15 @@ export function TaskQueueTable({
                   <td className="py-3 font-mono text-lg text-indigo-300">
                     <div>{row.name}</div>
                     {row.detail && (
-                      <div className="text-xs text-slate-500 font-sans mt-0.5 truncate max-w-[280px]">
+                      <div
+                        className={cn(
+                          "text-xs font-sans mt-0.5 truncate max-w-[360px]",
+                          row.detail.includes("구간")
+                            ? "text-violet-300/90 font-medium"
+                            : "text-slate-500",
+                        )}
+                        title={row.detail}
+                      >
                         {row.detail}
                       </div>
                     )}
@@ -217,13 +428,8 @@ export function TaskQueueTable({
                   <td className="py-3">
                     <div className="flex flex-col gap-1">
                       <StatusBadge
-                        status={
-                          row.status === "analyzing"
-                            ? "pending"
-                            : row.status === "active"
-                              ? "running"
-                              : row.status
-                        }
+                        status={rowStatusBadge(row, rowPaused)}
+                        label={rowPaused ? "일시정지" : undefined}
                         showDot
                         className="text-base px-2.5 py-1 w-fit"
                       />
@@ -257,9 +463,80 @@ export function TaskQueueTable({
                       </span>
                     </div>
                   </td>
-                  <td className="py-3 pr-1 text-right text-base text-slate-400">{row.eta}</td>
+                  <td className="py-3 text-right text-base text-slate-400 max-w-[220px]">
+                    <span className="block truncate" title={row.eta}>
+                      {rowPaused ? "일시정지" : row.eta}
+                    </span>
+                  </td>
+                  <td className="py-3 pr-1 text-right">
+                    <div className="inline-flex items-center gap-1">
+                      {row.kind === "preview" && row.previewJobId && (
+                        <>
+                          {(row.status === "pending" ||
+                            row.status === "running" ||
+                            row.status === "paused") && (
+                            <button
+                              type="button"
+                              disabled={busy || harvestPaused}
+                              title={isRowPaused(row) ? "재개" : "일시정지"}
+                              onClick={() => toggleRowPause(row)}
+                              className="p-1.5 rounded-md text-slate-400 hover:text-violet-300 hover:bg-white/[0.06] disabled:opacity-40"
+                            >
+                              {isRowPaused(row) ? (
+                                <Play className="w-4 h-4" />
+                              ) : (
+                                <Pause className="w-4 h-4" />
+                              )}
+                            </button>
+                          )}
+                          <button
+                            type="button"
+                            disabled={busy}
+                            title="삭제"
+                            onClick={() =>
+                              runAction(() => removePreviewJob(row.previewJobId!))
+                            }
+                            className="p-1.5 rounded-md text-slate-400 hover:text-rose-400 hover:bg-white/[0.06] disabled:opacity-40"
+                          >
+                            <Trash2 className="w-4 h-4" />
+                          </button>
+                        </>
+                      )}
+                      {row.kind === "harvest" && row.harvestItemId && (
+                        <>
+                          {row.status === "running" && (
+                            <button
+                              type="button"
+                              disabled={busy}
+                              title="취소"
+                              onClick={() =>
+                                runAction(() => cancelHarvestItem(row.harvestItemId!))
+                              }
+                              className="p-1.5 rounded-md text-slate-400 hover:text-amber-300 hover:bg-white/[0.06] disabled:opacity-40"
+                            >
+                              <Pause className="w-4 h-4" />
+                            </button>
+                          )}
+                          {row.status !== "running" && (
+                            <button
+                              type="button"
+                              disabled={busy}
+                              title="삭제"
+                              onClick={() =>
+                                runAction(() => removeFromQueue(row.harvestItemId!))
+                              }
+                              className="p-1.5 rounded-md text-slate-400 hover:text-rose-400 hover:bg-white/[0.06] disabled:opacity-40"
+                            >
+                              <Trash2 className="w-4 h-4" />
+                            </button>
+                          )}
+                        </>
+                      )}
+                    </div>
+                  </td>
                 </tr>
-              ))
+              );
+              })
             )}
           </tbody>
         </table>

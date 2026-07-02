@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { BookOpen, FolderOpen, FolderX, Heart, ImagePlus, Link2, Pencil, Play, RefreshCw, Save, Upload, X } from "lucide-react";
+import { Bell, BookOpen, FolderOpen, FolderX, Heart, ImagePlus, Link2, Pause, Pencil, Play, RefreshCw, Save, Upload, X } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { GlassCard } from "@/components/ui/GlassCard";
 import { Skeleton } from "@/components/ui/Skeleton";
@@ -19,6 +19,8 @@ import {
 } from "@/api/library";
 import type { LibraryItemDetail, LibraryItemUpdate } from "@/api/library";
 import { pickFoldersDialog, recrawlProducts } from "@/api/harvest";
+import { pauseFolderMonitoring, resumeFolderMonitoring } from "@/api/folderWatch";
+import { useFolderWatch } from "@/contexts/FolderWatchContext";
 import { ActorCommaAutocompleteField } from "@/components/library/ActorCommaAutocompleteField";
 import { CoverLightbox } from "@/components/library/CoverLightbox";
 import { SnapshotGallery } from "@/components/library/SnapshotGallery";
@@ -131,28 +133,38 @@ function FolderBindingSection({
   folderDraft,
   onDraftChange,
   binding,
+  monitoringPaused,
+  monitoringToggling,
+  bindingPending,
   onPick,
   onBind,
   onForceBind,
   onClear,
   onOpenFolder,
+  onToggleMonitoring,
+  onOpenBindingReview,
 }: {
   folderPath: string | null | undefined;
   folderDraft: string;
   onDraftChange: (v: string) => void;
   binding: boolean;
+  monitoringPaused?: boolean;
+  monitoringToggling?: boolean;
+  bindingPending?: boolean;
   onPick: () => void;
   onBind: () => void;
   onForceBind: () => void;
   onClear: () => void;
   onOpenFolder: () => void;
+  onToggleMonitoring?: () => void;
+  onOpenBindingReview?: () => void;
 }) {
   const linked = !!(folderPath && folderPath.trim());
   const btnClass =
     "inline-flex items-center gap-1.5 px-3 py-2 rounded-lg border text-sm font-medium transition-colors disabled:opacity-50";
   return (
     <div className="rounded-xl border border-white/[0.10] bg-white/[0.03] p-4 space-y-3">
-      <div className="flex items-center gap-2">
+      <div className="flex items-center gap-2 flex-wrap">
         <FolderOpen className="w-5 h-5 text-indigo-300 shrink-0" />
         <span className="text-base font-semibold text-slate-200">폴더 연동</span>
         {linked ? (
@@ -164,7 +176,30 @@ function FolderBindingSection({
             미연결
           </span>
         )}
+        {monitoringPaused && (
+          <span className="text-xs px-2 py-0.5 rounded-md bg-slate-500/15 text-slate-300 border border-slate-500/30">
+            감시 중지됨
+          </span>
+        )}
       </div>
+
+      {bindingPending && (
+        <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2.5 flex flex-wrap items-center gap-2">
+          <Bell className="w-4 h-4 text-amber-300 shrink-0" />
+          <p className="text-sm text-amber-100/90 flex-1 min-w-[12rem]">
+            저장된 폴더를 찾을 수 없습니다. 후보 경로를 확인하세요.
+          </p>
+          {onOpenBindingReview && (
+            <button
+              type="button"
+              onClick={onOpenBindingReview}
+              className={cn(btnClass, "bg-amber-500/20 border-amber-500/40 text-amber-100 hover:bg-amber-500/30")}
+            >
+              폴더 확인…
+            </button>
+          )}
+        </div>
+      )}
       <input
         type="text"
         value={folderDraft}
@@ -220,6 +255,17 @@ function FolderBindingSection({
           <FolderX className="w-4 h-4" />
           해제
         </button>
+        {linked && onToggleMonitoring && (
+          <button
+            type="button"
+            disabled={binding || monitoringToggling}
+            onClick={onToggleMonitoring}
+            className={cn(btnClass, "bg-slate-500/15 border-slate-500/35 text-slate-200 hover:bg-slate-500/25")}
+          >
+            <Pause className="w-4 h-4" />
+            {monitoringPaused ? "감시 재개" : "감시 중지"}
+          </button>
+        )}
       </div>
     </div>
   );
@@ -234,6 +280,7 @@ export function LibraryDetailPanel({
 }: LibraryDetailPanelProps) {
   const { showToast } = useToast();
   const { openActressByName } = useNavigation();
+  const { refreshInbox, openReviewForCode, isBindingPending } = useFolderWatch();
   const [detail, setDetail] = useState<LibraryItemDetail | null>(null);
   const [loading, setLoading] = useState(true);
   const [recrawling, setRecrawling] = useState(false);
@@ -246,6 +293,7 @@ export function LibraryDetailPanel({
   const [coverDragOver, setCoverDragOver] = useState(false);
   const [folderBinding, setFolderBinding] = useState(false);
   const [folderDraft, setFolderDraft] = useState("");
+  const [monitoringToggling, setMonitoringToggling] = useState(false);
   const [coverLightboxOpen, setCoverLightboxOpen] = useState(false);
   const [snapshotStackOpen, setSnapshotStackOpen] = useState(false);
   const coverInputRef = useRef<HTMLInputElement>(null);
@@ -257,12 +305,13 @@ export function LibraryDetailPanel({
       if (onActorClick) {
         await onActorClick(name);
       } else {
+        onClose();
         await openActressByName(name);
       }
     } catch (e) {
       showToast(e instanceof Error ? e.message : "배우 정보를 불러오지 못했습니다.", "error");
     }
-  }, [onActorClick, openActressByName, showToast]);
+  }, [onActorClick, onClose, openActressByName, showToast]);
 
   useEffect(() => {
     backdropCloseReadyRef.current = false;
@@ -395,12 +444,13 @@ export function LibraryDetailPanel({
         force ? `강제 연결됨: ${res.path ?? path}` : `폴더가 연결되었습니다.`,
         force ? "warn" : "success",
       );
+      void refreshInbox();
     } catch (e) {
       showToast(e instanceof Error ? e.message : "폴더 연결 실패", "error");
     } finally {
       setFolderBinding(false);
     }
-  }, [applyDetailUpdate, code, showToast]);
+  }, [applyDetailUpdate, code, refreshInbox, showToast]);
 
   const handlePickFolder = useCallback(async () => {
     try {
@@ -425,12 +475,38 @@ export function LibraryDetailPanel({
         setFolderDraft("");
       }
       showToast("폴더 연결이 해제되었습니다.", "success");
+      void refreshInbox();
     } catch (e) {
       showToast(e instanceof Error ? e.message : "연결 해제 실패", "error");
     } finally {
       setFolderBinding(false);
     }
-  }, [applyDetailUpdate, code, showToast]);
+  }, [applyDetailUpdate, code, refreshInbox, showToast]);
+
+  const handleToggleMonitoring = useCallback(async () => {
+    if (!detail) return;
+    const paused = !!detail.folder_monitoring_paused;
+    setMonitoringToggling(true);
+    try {
+      await (paused ? resumeFolderMonitoring(code) : pauseFolderMonitoring(code));
+      setDetail(prev =>
+        prev ? { ...prev, folder_monitoring_paused: !paused } : prev,
+      );
+      void refreshInbox();
+      showToast(
+        paused ? `${code} — 폴더 감시를 재개했습니다.` : `${code} — 폴더 감시를 중지했습니다.`,
+        "info",
+      );
+    } catch (e) {
+      showToast(e instanceof Error ? e.message : "감시 설정 변경 실패", "error");
+    } finally {
+      setMonitoringToggling(false);
+    }
+  }, [code, detail, refreshInbox, showToast]);
+
+  const handleOpenBindingReview = useCallback(() => {
+    void openReviewForCode(code);
+  }, [code, openReviewForCode]);
 
   const handleOpenFolder = useCallback(async () => {
     try {
@@ -440,6 +516,23 @@ export function LibraryDetailPanel({
       showToast(e instanceof Error ? e.message : "폴더 열기 실패", "error");
     }
   }, [code, detail?.folder_path, showToast]);
+
+  const folderBindingProps = {
+    folderPath: detail?.folder_path,
+    folderDraft,
+    onDraftChange: setFolderDraft,
+    binding: folderBinding,
+    monitoringPaused: !!detail?.folder_monitoring_paused,
+    monitoringToggling,
+    bindingPending: isBindingPending(code) || !!detail?.folder_binding_pending,
+    onPick: () => void handlePickFolder(),
+    onBind: () => void bindFolder(folderDraft, false),
+    onForceBind: () => void bindFolder(folderDraft, true),
+    onClear: () => void handleClearFolder(),
+    onOpenFolder: () => void handleOpenFolder(),
+    onToggleMonitoring: () => void handleToggleMonitoring(),
+    onOpenBindingReview: () => handleOpenBindingReview(),
+  };
 
   const saveEdit = async () => {
     setSaving(true);
@@ -781,17 +874,7 @@ export function LibraryDetailPanel({
                     onChange={v => patchDraft({ synopsis_ja: v })}
                     rows={5}
                   />
-                  <FolderBindingSection
-                    folderPath={detail.folder_path}
-                    folderDraft={folderDraft}
-                    onDraftChange={setFolderDraft}
-                    binding={folderBinding}
-                    onPick={() => void handlePickFolder()}
-                    onBind={() => void bindFolder(folderDraft, false)}
-                    onForceBind={() => void bindFolder(folderDraft, true)}
-                    onClear={() => void handleClearFolder()}
-                    onOpenFolder={() => void handleOpenFolder()}
-                  />
+                  <FolderBindingSection {...folderBindingProps} />
                 </div>
               ) : (
                 <>
@@ -815,17 +898,7 @@ export function LibraryDetailPanel({
                   </div>
 
                   <div className="mt-4">
-                    <FolderBindingSection
-                      folderPath={detail.folder_path}
-                      folderDraft={folderDraft}
-                      onDraftChange={setFolderDraft}
-                      binding={folderBinding}
-                      onPick={() => void handlePickFolder()}
-                      onBind={() => void bindFolder(folderDraft, false)}
-                      onForceBind={() => void bindFolder(folderDraft, true)}
-                      onClear={() => void handleClearFolder()}
-                      onOpenFolder={() => void handleOpenFolder()}
-                    />
+                    <FolderBindingSection {...folderBindingProps} />
                   </div>
 
                   {(detail.overall_summary || detail.synopsis_ko || detail.synopsis_ja) && (

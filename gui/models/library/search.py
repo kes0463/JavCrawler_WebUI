@@ -200,6 +200,9 @@ def preview_path_for(
         try:
             if p.is_file() and p.stat().st_size > 0:
                 return str(p.resolve())
+            mp4 = p.with_suffix(".mp4")
+            if mp4.is_file() and mp4.stat().st_size > 0:
+                return str(p.resolve())
         except Exception:
             continue
     return ""

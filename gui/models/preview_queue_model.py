@@ -298,6 +298,13 @@ class PreviewQueueController(QObject):
                 return True
         except Exception:
             pass
+        try:
+            from javstory.services.harvest_queue_service import harvest_queue
+
+            if harvest_queue.running:
+                return True
+        except Exception:
+            pass
         return False
 
     @Slot(str, result="QVariantMap")

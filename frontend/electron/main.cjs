@@ -101,13 +101,34 @@ function createWindow() {
 
 app.whenReady().then(async () => {
   ipcMain.handle("harvest:pick-folders", async () => {
-    const win = BrowserWindow.getFocusedWindow();
-    const result = await dialog.showOpenDialog(win ?? undefined, {
+    const cwd = path.join(__dirname, "../..");
+    const python = findPython();
+    const { spawnSync } = require("child_process");
+    const result = spawnSync(
+      python,
+      ["-m", "javstory.utils.native_folder_picker"],
+      { cwd, encoding: "utf-8", timeout: 600_000, windowsHide: false },
+    );
+    if (result.status === 0 && result.stdout) {
+      try {
+        const paths = JSON.parse(result.stdout.trim());
+        if (Array.isArray(paths)) {
+          return paths;
+        }
+      } catch {
+        /* fall through */
+      }
+    }
+    if (result.stderr) {
+      console.error("[pick-folders]", result.stderr);
+    }
+    const win = BrowserWindow.getFocusedWindow() ?? mainWindow;
+    const fallback = await dialog.showOpenDialog(win ?? undefined, {
       properties: ["openDirectory", "multiSelections"],
-      title: "Harvest 큐에 추가할 폴더 선택",
+      title: "Harvest 큐에 추가할 폴더 선택 (Ctrl+클릭 다중 선택)",
     });
-    if (result.canceled) return [];
-    return result.filePaths;
+    if (fallback.canceled) return [];
+    return fallback.filePaths;
   });
 
   startApiServer();

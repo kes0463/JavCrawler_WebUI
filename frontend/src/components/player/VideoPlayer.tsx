@@ -1,8 +1,4 @@
-import {
-  useCallback,
-  useEffect,
-  useRef,
-  useState,
+import { useCallback, useEffect, useMemo, useRef, useState,
   type KeyboardEvent as ReactKeyboardEvent,
 } from "react";
 import {
@@ -47,6 +43,21 @@ function formatTime(sec: number): string {
   return `${m}:${String(s).padStart(2, "0")}`;
 }
 
+function proxyPreparingMessage(reason?: string | null): string {
+  switch (reason) {
+    case "hevc":
+      return "HEVC → H.264 변환 중… (GPU 가속 시도)";
+    case "fragmented":
+      return "스트리밍 재생용 MP4 재배치 중…";
+    case "container":
+      return "브라우저 재생용 MP4 변환 중…";
+    case "codec":
+      return "브라우저 호환 코덱으로 변환 중…";
+    default:
+      return "브라우저 재생용 MP4 변환 중…";
+  }
+}
+
 interface VideoPlayerProps {
   session: PlaybackInfo;
   onClose: () => void;
@@ -80,13 +91,27 @@ export function VideoPlayer({ session, onClose }: VideoPlayerProps) {
   const [osd, setOsd] = useState<string | null>(null);
   const [videoSize, setVideoSize] = useState({ w: 0, h: 0 });
   const [loadError, setLoadError] = useState<string | null>(null);
-  const [streamReady, setStreamReady] = useState(false);
+  const [proxyReady, setProxyReady] = useState(true);
   const [preparingProxy, setPreparingProxy] = useState(false);
+  const [proxyReason, setProxyReason] = useState<string | null>(null);
   const [subtitleOptions, setSubtitleOptions] = useState<SubtitleDisplayOptions>(loadSubtitleOptions);
   const [subtitleSettingsOpen, setSubtitleSettingsOpen] = useState(false);
 
   const part = session.parts[partIndex] ?? session.parts[0];
   const code = session.product_code;
+  const needsProxyWait = useMemo(() => {
+    if (!part) return false;
+    return (
+      part.needs_proxy === true
+      || part.proxy_ready === false
+      || /\.(ts|avi|mkv|wmv|mov)$/i.test(part.filename)
+    );
+  }, [part]);
+  const streamReady = !needsProxyWait || proxyReady;
+  const streamSrc = useMemo(
+    () => (streamReady && part ? streamUrl(code, part.index) : undefined),
+    [streamReady, part, code],
+  );
 
   const showOsd = useCallback((msg: string) => {
     setOsd(msg);
@@ -246,8 +271,6 @@ export function VideoPlayer({ session, onClose }: VideoPlayerProps) {
     setCurrentTime(0);
     setDuration(0);
     setPlaying(false);
-    setStreamReady(false);
-    setPreparingProxy(false);
     shouldAutoPlayRef.current = true;
   }, [partIndex, code]);
 
@@ -255,17 +278,25 @@ export function VideoPlayer({ session, onClose }: VideoPlayerProps) {
     if (!part) return;
     let cancelled = false;
 
-    const needsPrep =
-      part.needs_proxy === true
-      || part.proxy_ready === false
-      || /\.(ts|avi|mkv|wmv|mov)$/i.test(part.filename);
+    if (!needsProxyWait) {
+      setProxyReady(true);
+      setPreparingProxy(false);
+      setProxyReason(null);
+      return () => {
+        cancelled = true;
+      };
+    }
 
+    setProxyReady(false);
+    setProxyReason(part.proxy_reason ?? null);
     const run = async () => {
-      if (needsPrep) setPreparingProxy(true);
+      setPreparingProxy(true);
       try {
-        await waitForPlaybackStream(code, part.index);
+        await waitForPlaybackStream(code, part.index, (reason: string | null) => {
+          if (!cancelled) setProxyReason(reason);
+        });
         if (!cancelled) {
-          setStreamReady(true);
+          setProxyReady(true);
           setPreparingProxy(false);
         }
       } catch (e) {
@@ -283,7 +314,19 @@ export function VideoPlayer({ session, onClose }: VideoPlayerProps) {
     return () => {
       cancelled = true;
     };
-  }, [code, part, partIndex]);
+  }, [code, part, partIndex, needsProxyWait]);
+
+  useEffect(() => {
+    if (!streamReady) return;
+    const timer = window.setTimeout(() => {
+      const v = videoRef.current;
+      if (!v || loadError) return;
+      if (!Number.isFinite(v.duration) || v.duration <= 0) {
+        setLoadError("영상 메타데이터를 읽지 못했습니다. 새로고침 후 다시 시도해 주세요.");
+      }
+    }, 20_000);
+    return () => window.clearTimeout(timer);
+  }, [streamReady, code, partIndex, loadError]);
 
   useEffect(() => {
     if (trackIndex < 0 || !part) {
@@ -299,16 +342,11 @@ export function VideoPlayer({ session, onClose }: VideoPlayerProps) {
 
   useEffect(() => {
     const v = videoRef.current;
-    if (!v) return;
+    if (!v || !streamReady) return;
     v.volume = volume;
-    try { localStorage.setItem("javstory.player.volume", String(volume)); } catch { /* ignore */ }
-  }, [volume]);
-
-  useEffect(() => {
-    const v = videoRef.current;
-    if (!v) return;
     v.muted = muted;
-  }, [muted]);
+    try { localStorage.setItem("javstory.player.volume", String(volume)); } catch { /* ignore */ }
+  }, [streamReady, volume, muted]);
 
   useEffect(() => {
     const ms = (currentTime || 0) * 1000;
@@ -384,21 +422,28 @@ export function VideoPlayer({ session, onClose }: VideoPlayerProps) {
       onClick={bumpControls}
     >
       <div className="relative flex-1 flex items-center justify-center min-h-0 bg-black">
-        {streamReady ? (
+        {streamReady && streamSrc ? (
         <video
           ref={videoRef}
-          key={`${code}-${part.index}`}
-          src={streamUrl(code, part.index)}
+          key={streamSrc}
+          src={streamSrc}
           className="max-w-full max-h-full w-full h-full object-contain"
           playsInline
           autoPlay
-          crossOrigin="anonymous"
+          preload="auto"
           onLoadedMetadata={() => {
             const v = videoRef.current;
             if (!v) return;
             setDuration(v.duration);
             setVideoSize({ w: v.videoWidth, h: v.videoHeight });
             tryResume();
+            void attemptAutoPlay();
+          }}
+          onLoadedData={() => {
+            const v = videoRef.current;
+            if (!v || !Number.isFinite(v.duration) || v.duration <= 0) return;
+            setDuration(v.duration);
+            setVideoSize({ w: v.videoWidth, h: v.videoHeight });
             void attemptAutoPlay();
           }}
           onCanPlay={() => {
@@ -409,11 +454,12 @@ export function VideoPlayer({ session, onClose }: VideoPlayerProps) {
           onPause={() => setPlaying(false)}
           onEnded={goNextPart}
           onError={() => {
-            const code = videoRef.current?.error?.code;
+            const err = videoRef.current?.error;
+            const errCode = err?.code;
             const detail =
-              code === 4 ? " (코덱/컨테이너 미지원)"
-              : code === 3 ? " (디코딩 오류)"
-              : code === 2 ? " (네트워크 오류)"
+              errCode === 4 ? " (코덱/컨테이너 미지원)"
+              : errCode === 3 ? " (디코딩 오류)"
+              : errCode === 2 ? " (네트워크 오류 — webapi 실행 여부 확인)"
               : "";
             setLoadError(`브라우저에서 이 형식을 재생할 수 없습니다 (MP4/H.264 권장)${detail}`);
           }}
@@ -430,7 +476,7 @@ export function VideoPlayer({ session, onClose }: VideoPlayerProps) {
         ) : preparingProxy ? (
           <div className="flex flex-col items-center gap-3 text-center px-6">
             <div className="w-10 h-10 border-2 border-indigo-400/30 border-t-indigo-400 rounded-full animate-spin" />
-            <p className="text-white text-sm font-medium">브라우저 재생용 MP4 변환 중…</p>
+            <p className="text-white text-sm font-medium">{proxyPreparingMessage(proxyReason ?? part.proxy_reason)}</p>
             <p className="text-slate-400 text-xs max-w-sm break-all">{part.filename}</p>
           </div>
         ) : null}

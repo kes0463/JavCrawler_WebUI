@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, HTTPException, Query
 
 from javstory.services.dashboard_service import DashboardService
 from webapi.schemas import (
@@ -56,3 +56,54 @@ def cancel_pending(body: CancelPendingRequest):
 def clear_pending():
     count = _dashboard.clear_pending()
     return {"ok": True, "cleared": count}
+
+
+@router.delete("/preview-queue/finished")
+def clear_preview_finished():
+    from javstory.library.highlight.preview_queue import preview_queue_manager
+
+    removed = preview_queue_manager.clear_finished()
+    return {"ok": True, "removed": removed}
+
+
+@router.post("/preview-queue/pause-all")
+def pause_all_preview():
+    from javstory.library.highlight.preview_queue import preview_queue_manager
+
+    preview_queue_manager.set_user_paused(True)
+    return {"ok": True, "paused": True}
+
+
+@router.post("/preview-queue/resume-all")
+def resume_all_preview():
+    from javstory.library.highlight.preview_queue import preview_queue_manager
+
+    resumed = preview_queue_manager.resume_all_paused()
+    return {"ok": True, "resumed": resumed}
+
+
+@router.delete("/preview-queue/{job_id}")
+def remove_preview_job(job_id: str):
+    from javstory.library.highlight.preview_queue import preview_queue_manager
+
+    if not preview_queue_manager.remove_job(job_id):
+        raise HTTPException(404, "작업을 찾을 수 없습니다") from None
+    return {"ok": True}
+
+
+@router.post("/preview-queue/{job_id}/pause")
+def pause_preview_job(job_id: str):
+    from javstory.library.highlight.preview_queue import preview_queue_manager
+
+    if not preview_queue_manager.pause_job(job_id):
+        raise HTTPException(400, "일시정지할 수 없는 작업입니다") from None
+    return {"ok": True}
+
+
+@router.post("/preview-queue/{job_id}/resume")
+def resume_preview_job(job_id: str):
+    from javstory.library.highlight.preview_queue import preview_queue_manager
+
+    if not preview_queue_manager.resume_job(job_id):
+        raise HTTPException(400, "재개할 수 없는 작업입니다") from None
+    return {"ok": True}

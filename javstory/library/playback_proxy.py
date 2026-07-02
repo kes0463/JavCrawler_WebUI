@@ -26,6 +26,7 @@ _BROWSER_AUDIO_CODECS = frozenset({"aac", "mp3"})
 
 _LOCK = threading.Lock()
 _JOBS: dict[str, dict[str, Any]] = {}
+_CACHED_FFMPEG_ENCODERS: set[str] | None = None
 
 
 def _playback_proxy_timeout_sec() -> int | None:
@@ -67,6 +68,60 @@ def _ffprobe_json(path: Path) -> dict[str, Any] | None:
         return None
 
 
+def _read_mp4_atom(f, pos: int, file_size: int) -> tuple[str, int] | None:
+    f.seek(pos)
+    hdr = f.read(8)
+    if len(hdr) < 8:
+        return None
+    size = int.from_bytes(hdr[:4], "big")
+    typ = hdr[4:8].decode("latin1", errors="replace")
+    if size == 0:
+        size = file_size - pos
+    elif size == 1:
+        ext = f.read(8)
+        if len(ext) < 8:
+            return None
+        size = int.from_bytes(ext, "big")
+    if size < 8:
+        return None
+    return typ, size
+
+
+def is_fragmented_mp4(path: Path) -> bool:
+    """
+    다수의 mdat/moof 조각으로 나뉜 MP4는 브라우저가 메타데이터를 읽지 못한다.
+    (H.264/AAC여도 스트리밍 재생 불가 → faststart remux 필요)
+    """
+    if path.suffix.lower() not in {".mp4", ".m4v"}:
+        return False
+    try:
+        file_size = path.stat().st_size
+        if file_size < 64:
+            return False
+    except OSError:
+        return False
+    try:
+        with open(path, "rb") as f:
+            pos = 0
+            mdat_count = 0
+            scan_until = min(file_size, 32 * 1024 * 1024)
+            while pos < scan_until:
+                atom = _read_mp4_atom(f, pos, file_size)
+                if not atom:
+                    break
+                typ, size = atom
+                if typ == "moof":
+                    return True
+                if typ == "mdat":
+                    mdat_count += 1
+                    if mdat_count >= 3:
+                        return True
+                pos += size
+        return False
+    except OSError:
+        return False
+
+
 def is_browser_playable(path: Path) -> bool:
     """HTML5 `<video>`(Chrome/Edge)에서 재생 가능한 H.264/AAC MP4 등인지 판별."""
     ext = path.suffix.lower()
@@ -106,10 +161,104 @@ def needs_browser_proxy(path: Path) -> bool:
     if ext in _PROXY_EXT:
         return True
     if ext in (".mp4", ".m4v"):
+        if is_fragmented_mp4(path):
+            return True
         return not is_browser_playable(path)
     if ext == ".webm":
         return False
     return ext not in _BROWSER_DIRECT_EXT
+
+
+def proxy_reason(path: Path) -> str:
+    """UI/로그용 프록시 사유: fragmented | hevc | codec | container."""
+    ext = path.suffix.lower()
+    if ext in _PROXY_EXT:
+        return "container"
+    if ext in (".mp4", ".m4v"):
+        if is_fragmented_mp4(path):
+            return "fragmented"
+        data = _ffprobe_json(path)
+        if data:
+            for stream in data.get("streams") or []:
+                if not isinstance(stream, dict):
+                    continue
+                if (stream.get("codec_type") or "").lower() != "video":
+                    continue
+                name = (stream.get("codec_name") or "").lower()
+                if name in ("hevc", "h265"):
+                    return "hevc"
+                if name and name not in _BROWSER_VIDEO_CODECS:
+                    return "codec"
+        if not is_browser_playable(path):
+            return "codec"
+    return "codec"
+
+
+def _hw_encode_enabled() -> bool:
+    raw = (os.environ.get("JAVSTORY_PLAYBACK_HW_ENCODE", "auto") or "auto").strip().lower()
+    if raw in ("0", "false", "no", "off"):
+        return False
+    if raw in ("1", "true", "yes", "on"):
+        return True
+    return True
+
+
+def _ffmpeg_encoder_ids() -> set[str]:
+    global _CACHED_FFMPEG_ENCODERS
+    if _CACHED_FFMPEG_ENCODERS is not None:
+        return _CACHED_FFMPEG_ENCODERS
+    ids: set[str] = set()
+    try:
+        from javstory.utils.ffmpeg_path import get_ffmpeg
+
+        proc = subprocess.run(
+            [get_ffmpeg(), "-hide_banner", "-encoders"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            errors="replace",
+            check=False,
+            timeout=30,
+        )
+        for line in (proc.stdout or "").splitlines():
+            parts = line.split()
+            if len(parts) >= 2 and parts[0].startswith("V"):
+                ids.add(parts[1].strip())
+    except Exception:
+        pass
+    _CACHED_FFMPEG_ENCODERS = ids
+    return ids
+
+
+def _h264_transcode_plans() -> list[tuple[str, list[str], list[str]]]:
+    """(이름, 입력 옵션, 비디오 인코더 옵션) — 실패 시 다음 플랜 시도."""
+    plans: list[tuple[str, list[str], list[str]]] = []
+    if _hw_encode_enabled():
+        enc = _ffmpeg_encoder_ids()
+        if "h264_nvenc" in enc:
+            plans.append((
+                "h264_nvenc",
+                [],
+                ["-c:v", "h264_nvenc", "-preset", "p4", "-rc", "vbr", "-cq", "23", "-pix_fmt", "yuv420p"],
+            ))
+        if "h264_qsv" in enc:
+            plans.append((
+                "h264_qsv",
+                [],
+                ["-c:v", "h264_qsv", "-global_quality", "23"],
+            ))
+        if "h264_amf" in enc:
+            plans.append((
+                "h264_amf",
+                [],
+                ["-c:v", "h264_amf", "-quality", "balanced", "-rc", "cqp", "-qp_i", "23", "-qp_p", "23"],
+            ))
+    plans.append((
+        "libx264",
+        [],
+        ["-c:v", "libx264", "-preset", "ultrafast", "-crf", "20", "-pix_fmt", "yuv420p"],
+    ))
+    return plans
 
 
 def proxy_cache_path(source: Path) -> Path:
@@ -162,6 +311,32 @@ def _processing_cache_ready(proxy: Path) -> bool:
     except OSError:
         return False
     return _probe_duration_sec(proxy) > 0.0
+
+
+def _remux_mp4_faststart(source: Path, tmp: Path) -> tuple[bool, str]:
+    from javstory.utils.ffmpeg_path import get_ffmpeg
+
+    ffmpeg = get_ffmpeg()
+    tmp.parent.mkdir(parents=True, exist_ok=True)
+    return _run_ffmpeg(
+        [
+            ffmpeg,
+            "-hide_banner",
+            "-y",
+            "-i",
+            path_for_ffmpeg(source),
+            "-map",
+            "0:v:0",
+            "-map",
+            "0:a:0?",
+            "-c",
+            "copy",
+            "-movflags",
+            "+faststart",
+            path_for_ffmpeg(tmp, output=True),
+        ],
+        timeout=_playback_proxy_timeout_sec(),
+    )
 
 
 def _remux_ts_stream_copy(source: Path, tmp: Path) -> tuple[bool, str]:
@@ -294,14 +469,21 @@ def resolve_playback_file(source: Path) -> Path | None:
 
 
 def prepare_playback_file(source: Path) -> dict[str, Any]:
+    reason = proxy_reason(source) if source.is_file() else ""
+
+    def _with_reason(payload: dict[str, Any]) -> dict[str, Any]:
+        if reason:
+            payload["proxy_reason"] = reason
+        return payload
+
     if not source.is_file():
-        return {"ready": False, "needs_proxy": False, "status": "failed", "error": "파일 없음"}
+        return _with_reason({"ready": False, "needs_proxy": False, "status": "failed", "error": "파일 없음"})
 
     if not needs_browser_proxy(source):
-        return {"ready": True, "needs_proxy": False, "status": "direct"}
+        return _with_reason({"ready": True, "needs_proxy": False, "status": "direct"})
 
     if proxy_is_ready(source):
-        return {"ready": True, "needs_proxy": True, "status": "ready"}
+        return _with_reason({"ready": True, "needs_proxy": True, "status": "ready"})
 
     key = _job_key(source)
     proxy = proxy_cache_path(source)
@@ -314,27 +496,27 @@ def prepare_playback_file(source: Path) -> dict[str, Any]:
             if st == "failed":
                 err = row.get("error") or "ffmpeg 변환 실패 (브라우저 호환 H.264/AAC MP4 생성 불가)"
                 _JOBS.pop(key, None)
-                return {
+                return _with_reason({
                     "ready": False,
                     "needs_proxy": True,
                     "status": "failed",
                     "error": err,
-                }
+                })
             if st == "building":
                 if proxy_is_ready(source):
                     _JOBS[key] = {"status": "ready", "error": None}
-                    return {"ready": True, "needs_proxy": True, "status": "ready"}
-                return {"ready": False, "needs_proxy": True, "status": "building"}
+                    return _with_reason({"ready": True, "needs_proxy": True, "status": "ready"})
+                return _with_reason({"ready": False, "needs_proxy": True, "status": "building"})
             if st == "ready":
                 if proxy_is_ready(source):
-                    return {"ready": True, "needs_proxy": True, "status": "ready"}
+                    return _with_reason({"ready": True, "needs_proxy": True, "status": "ready"})
                 _JOBS.pop(key, None)
 
     try:
         if tmp.is_file() and tmp.stat().st_size > 0:
             with _LOCK:
                 _JOBS[key] = {"status": "building", "error": None}
-            return {"ready": False, "needs_proxy": True, "status": "building"}
+            return _with_reason({"ready": False, "needs_proxy": True, "status": "building"})
     except OSError:
         pass
 
@@ -349,7 +531,7 @@ def prepare_playback_file(source: Path) -> dict[str, Any]:
     )
     thread.start()
     logger.info("Playback proxy transcode started: %s", source.name)
-    return {"ready": False, "needs_proxy": True, "status": "building"}
+    return _with_reason({"ready": False, "needs_proxy": True, "status": "building"})
 
 
 def _run_ffmpeg(cmd: list[str], *, timeout: int | None = None) -> tuple[bool, str]:
@@ -386,37 +568,41 @@ def _transcode_to_h264_mp4(source: Path, tmp: Path) -> tuple[bool, str]:
 
     ffmpeg = get_ffmpeg()
     tmp.parent.mkdir(parents=True, exist_ok=True)
-    ok, log = _run_ffmpeg(
-        [
-            ffmpeg,
-            "-hide_banner",
-            "-y",
-            *_ffmpeg_input_opts(source),
-            "-i",
-            path_for_ffmpeg(source),
-            "-map",
-            "0:v:0",
-            "-map",
-            "0:a:0?",
-            "-c:v",
-            "libx264",
-            "-preset",
-            "ultrafast",
-            "-crf",
-            "20",
-            "-pix_fmt",
-            "yuv420p",
-            "-c:a",
-            "aac",
-            "-b:a",
-            "192k",
-            "-movflags",
-            "+faststart",
-            path_for_ffmpeg(tmp, output=True),
-        ],
-        timeout=_playback_proxy_timeout_sec(),
-    )
-    return ok and tmp.is_file() and tmp.stat().st_size > 0, log
+    last_log = ""
+    for _encoder_name, input_opts, video_opts in _h264_transcode_plans():
+        try:
+            if tmp.is_file():
+                tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
+        ok, log = _run_ffmpeg(
+            [
+                ffmpeg,
+                "-hide_banner",
+                "-y",
+                *input_opts,
+                *_ffmpeg_input_opts(source),
+                "-i",
+                path_for_ffmpeg(source),
+                "-map",
+                "0:v:0",
+                "-map",
+                "0:a:0?",
+                *video_opts,
+                "-c:a",
+                "aac",
+                "-b:a",
+                "192k",
+                "-movflags",
+                "+faststart",
+                path_for_ffmpeg(tmp, output=True),
+            ],
+            timeout=_playback_proxy_timeout_sec(),
+        )
+        if ok and tmp.is_file() and tmp.stat().st_size > 0:
+            return True, log
+        last_log = log or last_log
+    return False, last_log
 
 
 def _build_proxy(source: Path, tmp: Path) -> tuple[bool, str]:
@@ -424,6 +610,15 @@ def _build_proxy(source: Path, tmp: Path) -> tuple[bool, str]:
 
     ffmpeg = get_ffmpeg()
     tmp.parent.mkdir(parents=True, exist_ok=True)
+
+    if source.suffix.lower() in {".mp4", ".m4v"} and is_browser_playable(source) and is_fragmented_mp4(source):
+        ok, log = _remux_mp4_faststart(source, tmp)
+        if ok and tmp.is_file() and tmp.stat().st_size > 0 and _proxy_file_ready(tmp):
+            return True, log
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
 
     if source.suffix.lower() == ".ts":
         ok, log = _remux_ts_stream_copy(source, tmp)

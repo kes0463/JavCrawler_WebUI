@@ -12,6 +12,7 @@ from javstory.library.playback_proxy import (
     needs_browser_proxy,
     prepare_playback_file,
     proxy_is_ready,
+    proxy_reason,
     resolve_playback_file,
 )
 from javstory.library.subtitle_parser import find_subtitle_files, load_subtitle_cues
@@ -97,6 +98,7 @@ class PlaybackService:
                     "resume_ms": _resume_ms(pc, str(path)),
                     "needs_proxy": needs_proxy,
                     "proxy_ready": (not needs_proxy) or proxy_is_ready(path),
+                    "proxy_reason": proxy_reason(path) if needs_proxy else None,
                     "subtitle_tracks": [
                         {
                             "index": ti,

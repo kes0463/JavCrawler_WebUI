@@ -1404,6 +1404,13 @@ class SettingsModel(QObject):
         d = QFileDialog.getExistingDirectory(None, "폴더 선택")
         return d or ""
 
+    @Slot(result=list)
+    def browseFolders(self):
+        """QML에서 호출: 네이티브 폴더 선택 대화상자 (다중, Ctrl+클릭)."""
+        from javstory.utils.native_folder_picker import pick_folders
+
+        return pick_folders(title="Harvest 큐에 추가할 폴더 선택 (Ctrl+클릭 다중 선택)")
+
     @Slot(result=str)
     def browseFile(self):
         """QML에서 호출: 네이티브 파일 선택 대화상자."""

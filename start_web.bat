@@ -54,7 +54,7 @@ if not exist "frontend\node_modules" (
     popd
 )
 
-echo Starting Vite dev server...
+echo Starting Vite dev server (browser)...
 pushd frontend
 call npm run dev
 popd

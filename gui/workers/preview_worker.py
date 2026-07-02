@@ -34,6 +34,7 @@ class PreviewWorker(CancellableQThread):
 
             from javstory.library.highlight.video_preview import (
                 create_golden_preview,
+                format_preview_progress_message,
                 is_montage_preview_fresh,
                 montage_preview_params,
             )
@@ -61,7 +62,10 @@ class PreviewWorker(CancellableQThread):
                     product_code=self.product_code,
                     video_path=self.video_path,
                     output_path=self.output_path,
-                    progress_callback=lambda p: self.progressUpdated.emit(int(p), "인코딩 중..."),
+                    progress_callback=lambda p, info=None: self.progressUpdated.emit(
+                        int(p),
+                        format_preview_progress_message(info),
+                    ),
                     seed=self.seed,
                 )
             if self.is_cancelled():

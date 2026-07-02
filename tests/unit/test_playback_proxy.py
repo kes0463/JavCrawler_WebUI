@@ -7,6 +7,7 @@ from pathlib import Path
 from javstory.library.playback_proxy import (
     ensure_ffmpeg_processing_source,
     is_browser_playable,
+    is_fragmented_mp4,
     needs_browser_proxy,
     needs_ffmpeg_processing_remux,
     prepare_playback_file,
@@ -15,10 +16,45 @@ from javstory.library.playback_proxy import (
 )
 
 
+def test_proxy_reason_hevc(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "javstory.library.playback_proxy.is_fragmented_mp4",
+        lambda _path: False,
+    )
+    monkeypatch.setattr(
+        "javstory.library.playback_proxy._ffprobe_json",
+        lambda _path: {
+            "streams": [
+                {"codec_type": "video", "codec_name": "hevc"},
+                {"codec_type": "audio", "codec_name": "aac"},
+            ]
+        },
+    )
+    from javstory.library.playback_proxy import proxy_reason
+
+    assert proxy_reason(Path("clip.mp4")) == "hevc"
+
+
+def test_h264_transcode_plans_includes_software_fallback(monkeypatch) -> None:
+    from javstory.library.playback_proxy import _h264_transcode_plans
+
+    monkeypatch.setattr(
+        "javstory.library.playback_proxy._hw_encode_enabled",
+        lambda: False,
+    )
+    plans = _h264_transcode_plans()
+    assert len(plans) == 1
+    assert plans[0][0] == "libx264"
+
+
 def test_needs_browser_proxy_by_extension(monkeypatch) -> None:
     monkeypatch.setattr(
         "javstory.library.playback_proxy.is_browser_playable",
         lambda _path: True,
+    )
+    monkeypatch.setattr(
+        "javstory.library.playback_proxy.is_fragmented_mp4",
+        lambda _path: False,
     )
     assert needs_browser_proxy(Path("a.ts")) is True
     assert needs_browser_proxy(Path("a.avi")) is True
@@ -32,7 +68,44 @@ def test_needs_browser_proxy_hevc_mp4(monkeypatch) -> None:
         "javstory.library.playback_proxy.is_browser_playable",
         lambda _path: False,
     )
+    monkeypatch.setattr(
+        "javstory.library.playback_proxy.is_fragmented_mp4",
+        lambda _path: False,
+    )
     assert needs_browser_proxy(Path("clip.mp4")) is True
+
+
+def test_needs_browser_proxy_fragmented_mp4(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "javstory.library.playback_proxy.is_browser_playable",
+        lambda _path: True,
+    )
+    monkeypatch.setattr(
+        "javstory.library.playback_proxy.is_fragmented_mp4",
+        lambda _path: True,
+    )
+    assert needs_browser_proxy(Path("clip.mp4")) is True
+
+
+def test_is_fragmented_mp4_detects_multiple_mdat(tmp_path: Path) -> None:
+    data = bytearray()
+    data += (16).to_bytes(4, "big") + b"ftyp" + b"isom" + (0).to_bytes(4, "big")
+    data += (32).to_bytes(4, "big") + b"moov" + b"\x00" * 24
+    for _ in range(3):
+        data += (24).to_bytes(4, "big") + b"mdat" + b"\x00" * 16
+    path = tmp_path / "frag.mp4"
+    path.write_bytes(data)
+    assert is_fragmented_mp4(path) is True
+
+
+def test_is_fragmented_mp4_normal_single_mdat(tmp_path: Path) -> None:
+    data = bytearray()
+    data += (16).to_bytes(4, "big") + b"ftyp" + b"isom" + (0).to_bytes(4, "big")
+    data += (32).to_bytes(4, "big") + b"moov" + b"\x00" * 24
+    data += (40).to_bytes(4, "big") + b"mdat" + b"\x00" * 32
+    path = tmp_path / "ok.mp4"
+    path.write_bytes(data)
+    assert is_fragmented_mp4(path) is False
 
 
 def test_is_browser_playable_from_probe(monkeypatch) -> None:
@@ -74,6 +147,10 @@ def test_prepare_direct_mp4(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(
         "javstory.library.playback_proxy.is_browser_playable",
         lambda _path: True,
+    )
+    monkeypatch.setattr(
+        "javstory.library.playback_proxy.is_fragmented_mp4",
+        lambda _path: False,
     )
     out = prepare_playback_file(source)
     assert out["ready"] is True

@@ -940,3 +940,52 @@ def get_watch_heatmap(year: int | None = None) -> Dict[str, Any]:
     days = {k: int(v) for k, v in sorted(day_counts.items())}
     mx = max(days.values()) if days else 0
     return {"year": y, "days": days, "max": mx}
+
+
+def get_monthly_library_additions(months: int = 6) -> List[Dict[str, Any]]:
+    """
+    월별 라이브러리 추가(created_at) 건수.
+    Returns: [{"month": "2026-04", "label": "4월", "count": 42}, ...] (오래된 순)
+    """
+    limit = max(1, min(24, int(months or 6)))
+    now = datetime.datetime.now()
+    month_keys: list[str] = []
+    for i in range(limit - 1, -1, -1):
+        dt = now - datetime.timedelta(days=i * 28)
+        month_keys.append(f"{dt.year:04d}-{dt.month:02d}")
+
+    # 정확한 월 경계: 최근 N개월 1일부터
+    start_month = now.month - (limit - 1)
+    start_year = now.year
+    while start_month <= 0:
+        start_month += 12
+        start_year -= 1
+    start = datetime.datetime(start_year, start_month, 1)
+
+    counts: Counter = Counter()
+    with get_db_session_ctx() as session:
+        rows = (
+            session.query(JAVMetadata.created_at)
+            .filter(JAVMetadata.created_at.isnot(None), JAVMetadata.created_at >= start)
+            .all()
+        )
+        for (created_at,) in rows:
+            if not created_at:
+                continue
+            key = created_at.strftime("%Y-%m")
+            counts[key] += 1
+
+    result: List[Dict[str, Any]] = []
+    cursor = datetime.datetime(start_year, start_month, 1)
+    for _ in range(limit):
+        key = cursor.strftime("%Y-%m")
+        result.append({
+            "month": key,
+            "label": f"{cursor.month}월",
+            "count": int(counts.get(key, 0)),
+        })
+        if cursor.month == 12:
+            cursor = datetime.datetime(cursor.year + 1, 1, 1)
+        else:
+            cursor = datetime.datetime(cursor.year, cursor.month + 1, 1)
+    return result
