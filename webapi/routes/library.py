@@ -10,6 +10,7 @@ from javstory.harvest.database import JAVMetadata
 from javstory.services.library_service import LibraryService
 from webapi.schemas import (
     CoverUploadResponse,
+    EmbeddingsWarmupResponse,
     FolderBindRequest,
     FolderBindResponse,
     LibraryItem,
@@ -55,23 +56,29 @@ def _to_item(
     row: JAVMetadata,
     cache: dict | None = None,
     scene_counts: dict[str, int] | None = None,
+    *,
+    search_score: float | None = None,
+    search_source: str | None = None,
 ) -> LibraryItem:
     base = LibraryItem.model_validate(row)
     fav = int(getattr(row, "favorite_score", 0) or 0)
     pc = (row.product_code or "").strip().upper()
     count = (scene_counts or {}).get(pc, 0)
     media = _library.media_flags_for(row, cache)
-    return base.model_copy(
-        update={
-            "scene_count": count,
-            "favorite_score": fav,
-            "has_subtitle": media["has_subtitle"],
-            "has_hardcoded_subtitle": media["has_hardcoded_subtitle"],
-            "has_mosaic_removed": media["has_mosaic_removed"],
-            "has_preview": media["has_preview"],
-            "preview_media": media["preview_media"],
-        }
-    )
+    update: dict = {
+        "scene_count": count,
+        "favorite_score": fav,
+        "has_subtitle": media["has_subtitle"],
+        "has_hardcoded_subtitle": media["has_hardcoded_subtitle"],
+        "has_mosaic_removed": media["has_mosaic_removed"],
+        "has_preview": media["has_preview"],
+        "preview_media": media["preview_media"],
+    }
+    if search_score is not None:
+        update["search_score"] = search_score
+    if search_source:
+        update["search_source"] = search_source
+    return base.model_copy(update=update)
 
 
 @router.get("", response_model=LibraryListResponse)
@@ -114,6 +121,73 @@ def list_library(
         per_page=result["per_page"],
         items=[_to_item(r, flags_map.get(r.product_code), scene_counts) for r in rows],
     )
+
+
+@router.get("/search", response_model=LibraryListResponse)
+def search_library(
+    q: str = Query("", description="검색어 (키워드 또는 자연어)"),
+    mode: str = Query("auto", pattern="^(auto|keyword|hybrid)$"),
+    page: int = Query(1, ge=1),
+    per_page: int = Query(40, ge=1, le=200),
+    sort: str = Query("updated_at"),
+    order: str = Query("desc", pattern="^(asc|desc)$"),
+    has_folder: Optional[bool] = None,
+    has_metadata: Optional[bool] = None,
+    has_subtitle: Optional[bool] = None,
+    has_mosaic_removed: Optional[bool] = None,
+    genres: str = Query("", description="쉼표 구분 장르"),
+    genre_mode: str = Query("and", pattern="^(and|or)$"),
+):
+    genre_list = [g.strip() for g in genres.split(",") if g.strip()] if genres else None
+    result = _library.search_items(
+        q=q,
+        mode=mode,
+        page=page,
+        per_page=per_page,
+        sort=sort,
+        order=order,
+        has_folder=has_folder,
+        has_metadata=has_metadata,
+        has_subtitle=has_subtitle,
+        has_mosaic_removed=has_mosaic_removed,
+        genres=genre_list,
+        genre_mode=genre_mode,
+    )
+    rows = result["items"]
+    codes = [r.product_code for r in rows]
+    flags_map = _library.load_file_flags_for(codes)
+    scene_counts = _library.scene_counts_for(codes, flags_map)
+    hit_meta = result.get("hit_meta") or {}
+    items = []
+    for r in rows:
+        pc = (r.product_code or "").strip().upper()
+        meta = hit_meta.get(pc) or {}
+        items.append(
+            _to_item(
+                r,
+                flags_map.get(r.product_code),
+                scene_counts,
+                search_score=meta.get("score"),
+                search_source=meta.get("source") or None,
+            )
+        )
+    return LibraryListResponse(
+        total=result["total"],
+        page=result["page"],
+        per_page=result["per_page"],
+        items=items,
+        search_mode=result.get("mode"),
+        embeddings_enabled=result.get("embeddings_enabled"),
+        embedding_channel_used=result.get("embedding_channel_used"),
+        search_message=result.get("search_message"),
+    )
+
+
+@router.post("/embeddings/warmup", response_model=EmbeddingsWarmupResponse)
+def warmup_embeddings(max_batch: int = Query(12, ge=1, le=24)):
+    from javstory.library.embeddings.web_status import start_embeddings_warmup
+
+    return EmbeddingsWarmupResponse(**start_embeddings_warmup(max_batch=max_batch))
 
 
 @router.get("/stats", response_model=LibraryStats)

@@ -19,6 +19,8 @@ from javstory.translation.translation_prompt_config import (
     translation_prompt_settings_snapshot,
 )
 from webapi.schemas import (
+    EmbeddingsSettingsPatch,
+    EmbeddingsSettingsResponse,
     SttEngineOption,
     SttSettingsPatch,
     SttSettingsResponse,
@@ -299,3 +301,33 @@ def patch_translation_prompt_settings(body: TranslationPromptSettingsPatch):
         set_env_runtime_value("JAVSTORY_TRANSLATION_NOTE_GLOBAL", str(data["global_note"] or ""))
 
     return _prompt_to_response(translation_prompt_settings_snapshot())
+
+
+@router.get("/embeddings", response_model=EmbeddingsSettingsResponse)
+def get_embeddings_settings():
+    from javstory.library.embeddings.web_status import embeddings_settings_snapshot
+
+    return EmbeddingsSettingsResponse(**embeddings_settings_snapshot())
+
+
+@router.patch("/embeddings", response_model=EmbeddingsSettingsResponse)
+def patch_embeddings_settings(body: EmbeddingsSettingsPatch):
+    from javstory.config.secrets_manager import set_env_runtime_value
+    from javstory.library.embeddings.web_status import embeddings_settings_snapshot
+
+    data = body.model_dump(exclude_unset=True)
+    if not data:
+        raise HTTPException(400, "수정할 필드가 없습니다")
+
+    if "enabled" in data and data["enabled"] is not None:
+        set_env_runtime_value(
+            "JAVSTORY_EMBEDDINGS_ENABLED",
+            "1" if data["enabled"] else "0",
+        )
+    if "model" in data:
+        model = str(data["model"] or "").strip()
+        if not model:
+            raise HTTPException(400, "model is required")
+        set_env_runtime_value("JAVSTORY_EMBEDDINGS_OLLAMA_MODEL", model)
+
+    return EmbeddingsSettingsResponse(**embeddings_settings_snapshot())

@@ -35,6 +35,8 @@ class LibraryItem(BaseModel):
     has_mosaic_removed: bool = False
     has_preview: bool = False
     preview_media: Optional[str] = None
+    search_score: Optional[float] = None
+    search_source: Optional[str] = None
 
     model_config = {"from_attributes": True}
 
@@ -75,6 +77,30 @@ class LibraryListResponse(BaseModel):
     page: int
     per_page: int
     items: list[LibraryItem]
+    search_mode: Optional[str] = None
+    embeddings_enabled: Optional[bool] = None
+    embedding_channel_used: Optional[bool] = None
+    search_message: Optional[str] = None
+
+
+class EmbeddingsSettingsResponse(BaseModel):
+    enabled: bool
+    model: str
+    embedded_count: int
+    library_total: int
+    missing_count: int
+    coverage_pct: float = 0.0
+
+
+class EmbeddingsSettingsPatch(BaseModel):
+    enabled: Optional[bool] = None
+    model: Optional[str] = None
+
+
+class EmbeddingsWarmupResponse(BaseModel):
+    ok: bool
+    queued: int = 0
+    message: str = ""
 
 
 class LibraryStats(BaseModel):

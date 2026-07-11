@@ -7,6 +7,7 @@ Ollama embeddings helper.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 from typing import Any, Dict, List
 
@@ -14,6 +15,13 @@ import httpx
 
 from javstory.config.app_config import OLLAMA_BASE_URL
 from javstory.utils.cache_manager import cache_manager
+
+
+def _is_connect_error(exc: BaseException) -> bool:
+    name = type(exc).__name__
+    if name in {"ConnectError", "ConnectTimeout"}:
+        return True
+    return "connection" in str(exc).lower()
 
 
 async def ollama_embed_text(
@@ -43,10 +51,23 @@ async def ollama_embed_text(
     url = f"{base_url.rstrip('/')}/api/embeddings"
     payload: Dict[str, Any] = {"model": m, "prompt": t}
 
-    async with httpx.AsyncClient(timeout=httpx.Timeout(timeout_sec, connect=5.0)) as client:
-        r = await client.post(url, json=payload)
-        r.raise_for_status()
-        data = r.json()
+    async def _post() -> Any:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(timeout_sec, connect=5.0)) as client:
+            r = await client.post(url, json=payload)
+            r.raise_for_status()
+            return r.json()
+
+    try:
+        data = await _post()
+    except Exception as e:
+        if not _is_connect_error(e):
+            raise
+        from javstory.llm.ollama_serve import ensure_ollama_serve
+
+        started = await asyncio.to_thread(ensure_ollama_serve, wait_sec=4.0)
+        if not started:
+            raise
+        data = await _post()
 
     emb = data.get("embedding")
     if not isinstance(emb, list) or not emb:
@@ -81,4 +102,3 @@ async def ollama_embed_texts(
             )
         )
     return out
-

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { Save, RotateCcw, HardDrive, Cpu, Globe, Shield, Mic2, Loader2, Languages, FileText } from "lucide-react";
+import { Save, RotateCcw, HardDrive, Cpu, Globe, Shield, Mic2, Loader2, Languages, FileText, Sparkles } from "lucide-react";
 import { GlassCard } from "@/components/ui/GlassCard";
 import { ActionButton } from "@/components/ui/ActionButton";
 import {
@@ -13,10 +13,14 @@ import {
   patchTranslationSettings,
   fetchTranslationPromptSettings,
   patchTranslationPromptSettings,
+  fetchEmbeddingsSettings,
+  patchEmbeddingsSettings,
   type SttSettings,
   type TranslationSettings,
   type TranslationPromptSettings,
+  type EmbeddingsSettings,
 } from "@/api/settings";
+import { warmupLibraryEmbeddings } from "@/api/library";
 import { useToast } from "@/contexts/ToastContext";
 
 const WHISPER_MODEL_OPTIONS = [
@@ -115,6 +119,69 @@ export default function SettingsView() {
     .map(o => ({ label: o.label, value: o.id }));
 
   const selectedEngineHint = stt?.engine_options.find(o => o.id === sttDraft.engine)?.description;
+
+  const [embLoading, setEmbLoading] = useState(true);
+  const [embSaving, setEmbSaving] = useState(false);
+  const [embWarming, setEmbWarming] = useState(false);
+  const [emb, setEmb] = useState<EmbeddingsSettings | null>(null);
+  const [embDraft, setEmbDraft] = useState({ enabled: false, model: "nomic-embed-text" });
+
+  const loadEmb = useCallback(async () => {
+    setEmbLoading(true);
+    try {
+      const snap = await fetchEmbeddingsSettings();
+      setEmb(snap);
+      setEmbDraft({ enabled: snap.enabled, model: snap.model });
+    } catch (e) {
+      showToast(e instanceof Error ? e.message : "임베딩 설정 불러오기 실패", "error");
+    } finally {
+      setEmbLoading(false);
+    }
+  }, [showToast]);
+
+  useEffect(() => {
+    void loadEmb();
+  }, [loadEmb]);
+
+  const handleSaveEmb = async () => {
+    setEmbSaving(true);
+    try {
+      const model = embDraft.model.trim();
+      if (!model) {
+        showToast("임베딩 모델 이름을 입력하세요", "error");
+        return;
+      }
+      const snap = await patchEmbeddingsSettings({
+        enabled: embDraft.enabled,
+        model,
+      });
+      setEmb(snap);
+      setEmbDraft({ enabled: snap.enabled, model: snap.model });
+      showToast("임베딩 설정 저장됨", "success");
+    } catch (e) {
+      showToast(e instanceof Error ? e.message : "임베딩 설정 저장 실패", "error");
+    } finally {
+      setEmbSaving(false);
+    }
+  };
+
+  const handleResetEmb = () => {
+    if (!emb) return;
+    setEmbDraft({ enabled: emb.enabled, model: emb.model });
+  };
+
+  const handleWarmupEmbeddings = async () => {
+    setEmbWarming(true);
+    try {
+      const res = await warmupLibraryEmbeddings(12);
+      showToast(res.message, res.ok ? "success" : "warn");
+      await loadEmb();
+    } catch (e) {
+      showToast(e instanceof Error ? e.message : "임베딩 워밍업 실패", "error");
+    } finally {
+      setEmbWarming(false);
+    }
+  };
 
   const [trLoading, setTrLoading] = useState(true);
   const [trSaving, setTrSaving] = useState(false);
@@ -722,6 +789,69 @@ export default function SettingsView() {
         <SettingsRow label="Ollama 서버 URL" hint="로컬 LLM 번역 엔드포인트">
           <TextInput value={ollamaUrl} onChange={setOllamaUrl} />
         </SettingsRow>
+      </SettingsSection>
+
+      {/* ── 시맨틱 검색 / 임베딩 ── */}
+      <SettingsSection icon={Sparkles} title="시맨틱 검색 (임베딩)">
+        {embLoading && !emb ? (
+          <div className="flex items-center gap-2 text-sm text-muted-foreground py-2">
+            <Loader2 className="w-4 h-4 animate-spin" />
+            불러오는 중…
+          </div>
+        ) : (
+          <>
+            <SettingsRow
+              label="임베딩 사용"
+              hint="Ollama로 작품 벡터를 만들어 자연어 검색·추천에 사용"
+              control="switch"
+            >
+              <Toggle
+                checked={embDraft.enabled}
+                onChange={v => setEmbDraft(d => ({ ...d, enabled: v }))}
+              />
+            </SettingsRow>
+            <SettingsRow label="Ollama 임베딩 모델" hint="예: nomic-embed-text">
+              <TextInput
+                value={embDraft.model}
+                onChange={v => setEmbDraft(d => ({ ...d, model: v }))}
+              />
+            </SettingsRow>
+            {emb && (
+              <p className="text-sm text-muted-foreground px-1">
+                커버리지 {emb.embedded_count.toLocaleString()} / {emb.library_total.toLocaleString()}
+                {" "}({emb.coverage_pct}%) · 미생성 {emb.missing_count.toLocaleString()}건
+              </p>
+            )}
+            <div className="flex flex-wrap gap-2 justify-end pt-1">
+              <ActionButton
+                variant="ghost"
+                size="sm"
+                loading={embWarming}
+                onClick={() => void handleWarmupEmbeddings()}
+              >
+                우선순위 워밍업
+              </ActionButton>
+              <ActionButton
+                variant="ghost"
+                size="sm"
+                icon={<RotateCcw className="w-3.5 h-3.5" />}
+                onClick={handleResetEmb}
+                disabled={!emb}
+              >
+                되돌리기
+              </ActionButton>
+              <ActionButton
+                variant="primary"
+                size="sm"
+                loading={embSaving}
+                icon={<Save className="w-3.5 h-3.5" />}
+                onClick={() => void handleSaveEmb()}
+              >
+                임베딩 설정 저장
+              </ActionButton>
+            </div>
+          </>
+        )}
       </SettingsSection>
 
       {/* ── 처리 설정 ── */}

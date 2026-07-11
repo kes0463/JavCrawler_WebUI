@@ -134,3 +134,24 @@ export const fetchTranslationPromptSettings = (): Promise<TranslationPromptSetti
 export const patchTranslationPromptSettings = (
   body: TranslationPromptSettingsPatch,
 ): Promise<TranslationPromptSettings> => patch("/api/settings/translation-prompt", body);
+
+export interface EmbeddingsSettings {
+  enabled: boolean;
+  model: string;
+  embedded_count: number;
+  library_total: number;
+  missing_count: number;
+  coverage_pct: number;
+}
+
+export type EmbeddingsSettingsPatch = Partial<{
+  enabled: boolean;
+  model: string;
+}>;
+
+export const fetchEmbeddingsSettings = (): Promise<EmbeddingsSettings> =>
+  get("/api/settings/embeddings");
+
+export const patchEmbeddingsSettings = (
+  body: EmbeddingsSettingsPatch,
+): Promise<EmbeddingsSettings> => patch("/api/settings/embeddings", body);

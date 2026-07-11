@@ -37,6 +37,8 @@ export interface LibraryItem {
   has_mosaic_removed?: boolean;
   has_preview?: boolean;
   preview_media?: "mp4" | "webp" | null;
+  search_score?: number | null;
+  search_source?: string | null;
 }
 
 export interface SceneSummary {
@@ -88,6 +90,10 @@ export interface LibraryListResponse {
   page: number;
   per_page: number;
   items: LibraryItem[];
+  search_mode?: string | null;
+  embeddings_enabled?: boolean | null;
+  embedding_channel_used?: boolean | null;
+  search_message?: string | null;
 }
 
 export interface LibraryStats {
@@ -102,6 +108,8 @@ export interface LibraryGenreItem {
   count: number;
 }
 
+export type LibrarySearchMode = "auto" | "keyword" | "hybrid";
+
 export interface LibraryQuery {
   q?: string;
   page?: number;
@@ -115,6 +123,7 @@ export interface LibraryQuery {
   genres?: string[];
   genre_mode?: "and" | "or";
   include_total?: boolean;
+  search_mode?: LibrarySearchMode;
 }
 
 function toQueryString(params: Record<string, unknown>): string {
@@ -133,6 +142,30 @@ function toQueryString(params: Record<string, unknown>): string {
 
 export const fetchLibrary = (q: LibraryQuery): Promise<LibraryListResponse> =>
   get(`/api/library${toQueryString(q as Record<string, unknown>)}`);
+
+export const fetchLibrarySearch = (q: LibraryQuery): Promise<LibraryListResponse> => {
+  const params: Record<string, unknown> = {
+    q: q.q,
+    mode: q.search_mode ?? "auto",
+    page: q.page,
+    per_page: q.per_page,
+    sort: q.sort,
+    order: q.order,
+    has_folder: q.has_folder,
+    has_metadata: q.has_metadata,
+    has_subtitle: q.has_subtitle,
+    has_mosaic_removed: q.has_mosaic_removed,
+    genres: q.genres,
+    genre_mode: q.genre_mode,
+  };
+  return get(`/api/library/search${toQueryString(params)}`, 90_000);
+};
+
+export const warmupLibraryEmbeddings = (maxBatch = 12): Promise<{
+  ok: boolean;
+  queued: number;
+  message: string;
+}> => post(`/api/library/embeddings/warmup?max_batch=${maxBatch}`);
 
 export const fetchLibraryStats = (): Promise<LibraryStats> =>
   get("/api/library/stats");
@@ -437,13 +470,16 @@ async function scanLibraryForGenres(q: LibraryQuery): Promise<LibraryItem[]> {
 /** 장르 필터 포함 목록 — 구 webapi는 클라이언트 스캔 폴백 */
 export async function fetchLibraryListed(q: LibraryQuery): Promise<LibraryListResponse> {
   const genres = q.genres;
+  const hasSearch = !!(q.q || "").trim();
+  const fetchBase = hasSearch ? fetchLibrarySearch : fetchLibrary;
+
   if (!genres?.length) {
-    return fetchLibrary(q);
+    return fetchBase(q);
   }
 
   const serverSupported = await probeLibraryGenreFilterSupport();
   if (serverSupported) {
-    return fetchLibrary(q);
+    return fetchBase(q);
   }
 
   const matched = sortLibraryItems(
@@ -460,6 +496,7 @@ export async function fetchLibraryListed(q: LibraryQuery): Promise<LibraryListRe
     page,
     per_page: perPage,
     items: matched.slice(start, start + perPage),
+    search_mode: "keyword",
   };
 }
 

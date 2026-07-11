@@ -1,8 +1,8 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { Search, SlidersHorizontal, FolderOpen, FolderX, RefreshCw, Subtitles, Layers } from "lucide-react";
 import { cn } from "@/lib/utils";
-import { fetchLibraryListed, fetchLibraryGenresResilient, fetchLibraryStats, coverUrl, previewUrl, openLibraryFolder, hasRealLibraryMetadata, clearLibraryGenreScanCache, probeLibraryGenreFilterSupport, prefetchLibraryClientIndex, isClientLibraryIndexReady } from "@/api/library";
-import type { LibraryItem, LibraryStats, LibraryQuery, LibraryGenreItem } from "@/api/library";
+import { fetchLibraryListed, fetchLibraryGenresResilient, fetchLibraryStats, coverUrl, previewUrl, openLibraryFolder, hasRealLibraryMetadata, clearLibraryGenreScanCache, probeLibraryGenreFilterSupport, prefetchLibraryClientIndex, isClientLibraryIndexReady, warmupLibraryEmbeddings } from "@/api/library";
+import type { LibraryItem, LibraryStats, LibraryQuery, LibraryGenreItem, LibrarySearchMode } from "@/api/library";
 import { GlassCard } from "@/components/ui/GlassCard";
 import { Skeleton } from "@/components/ui/Skeleton";
 import { PosterCard } from "@/components/library/PosterCard";
@@ -105,6 +105,8 @@ export default function LibraryView() {
   const [genresLoading, setGenresLoading] = useState(false);
   const [genreOpen, setGenreOpen] = useState(false);
   const [genreFiltering, setGenreFiltering] = useState(false);
+  const [searchMessage, setSearchMessage] = useState<string | null>(null);
+  const [searchModeUsed, setSearchModeUsed] = useState<string | null>(null);
   const genreApiWarnedRef = useRef(false);
   const skipInitialFetchRef = useRef(boot.fromSession);
   const pendingScrollRef = useRef(boot.scrollTop);
@@ -207,7 +209,12 @@ export default function LibraryView() {
       }
 
       try {
-        const { items: newItems, total: t } = await fetchLibraryListed(apiQuery);
+        const res = await fetchLibraryListed(apiQuery);
+        const { items: newItems, total: t } = res;
+        if (!append) {
+          setSearchMessage(res.search_message ?? null);
+          setSearchModeUsed(res.search_mode ?? null);
+        }
         if (
           !append && !apiWarnedRef.current && newItems.length > 0
           && !("favorite_score" in newItems[0])
@@ -240,6 +247,8 @@ export default function LibraryView() {
         if (!append && !silent) {
           setItems([]);
           setTotal(0);
+          setSearchMessage(null);
+          setSearchModeUsed(null);
         }
         if (!silent) {
           showToast(err instanceof Error ? err.message : "라이브러리 목록을 불러오지 못했습니다.", "error");
@@ -439,7 +448,13 @@ export default function LibraryView() {
           <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
           <input
             type="text"
-            placeholder="품번, 제목, 배우 검색..."
+            placeholder={
+              (query.search_mode ?? "auto") === "hybrid"
+                ? "자연어로 검색… 예: 비 오는 날 실외"
+                : (query.search_mode ?? "auto") === "keyword"
+                  ? "품번, 제목, 배우 검색..."
+                  : "품번·배우 또는 자연어 검색..."
+            }
             value={searchText}
             onChange={e => handleSearch(e.target.value)}
             className={cn(
@@ -450,6 +465,17 @@ export default function LibraryView() {
             )}
           />
         </div>
+
+        <select
+          value={query.search_mode ?? "auto"}
+          onChange={e => updateQueryFilter({ search_mode: e.target.value as LibrarySearchMode })}
+          title="검색 모드"
+          className="h-10 px-3 text-base rounded-xl bg-bg-surface border border-white/[0.08] text-[#c8c8e0] focus:outline-none"
+        >
+          <option value="auto">자동</option>
+          <option value="keyword">키워드</option>
+          <option value="hybrid">자연어</option>
+        </select>
 
         <select
           value={query.sort}
@@ -557,8 +583,28 @@ export default function LibraryView() {
 
         <span className="text-sm text-muted-foreground ml-auto tabular-nums">
           {items.length.toLocaleString()} / {total.toLocaleString()}건
+          {searchModeUsed === "hybrid" && (query.q || "").trim() ? " · 자연어" : null}
         </span>
       </div>
+
+      {searchMessage && (query.q || "").trim() && (
+        <div className="flex flex-wrap items-center gap-2 rounded-xl border border-amber-500/25 bg-amber-500/10 px-3 py-2 text-sm text-amber-100/90">
+          <span className="flex-1 min-w-0">{searchMessage}</span>
+          {searchMessage.includes("워밍업") && (
+            <button
+              type="button"
+              className="shrink-0 h-8 px-3 rounded-lg bg-amber-500/20 hover:bg-amber-500/30 text-amber-100 text-xs"
+              onClick={() => {
+                void warmupLibraryEmbeddings(12)
+                  .then(res => showToast(res.message, res.ok ? "success" : "warn"))
+                  .catch(err => showToast(err instanceof Error ? err.message : "워밍업 실패", "error"));
+              }}
+            >
+              임베딩 워밍업
+            </button>
+          )}
+        </div>
+      )}
 
       {genreOpen && (
         <GenreFilterChipPanel

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import time
 from pathlib import Path
 from typing import Any, Optional
@@ -363,6 +364,185 @@ class LibraryService:
                 "per_page": per_page,
                 "items": rows,
             }
+
+    def search_items(
+        self,
+        *,
+        q: str = "",
+        mode: str = "auto",
+        page: int = 1,
+        per_page: int = 40,
+        sort: str = "updated_at",
+        order: str = "desc",
+        has_folder: Optional[bool] = None,
+        has_metadata: Optional[bool] = None,
+        has_subtitle: Optional[bool] = None,
+        has_mosaic_removed: Optional[bool] = None,
+        genres: Optional[list[str]] = None,
+        genre_mode: str = "and",
+    ) -> dict[str, Any]:
+        """Keyword ILIKE or hybrid (BM25+embedding+RRF) search with LibraryItem hydration."""
+        from javstory.library.embeddings.pipeline import embeddings_enabled_from_env
+        from javstory.search.library_search import HybridLibrarySearch
+
+        term = (q or "").strip()
+        mode_norm = (mode or "auto").strip().lower()
+        if mode_norm not in ("keyword", "hybrid", "auto"):
+            mode_norm = "auto"
+
+        use_hybrid = mode_norm == "hybrid" or (
+            mode_norm == "auto" and self._looks_like_natural_language(term)
+        )
+        embeddings_on = embeddings_enabled_from_env()
+
+        if not term or not use_hybrid:
+            result = self.list_items(
+                q=term,
+                page=page,
+                per_page=per_page,
+                sort=sort,
+                order=order,
+                has_folder=has_folder,
+                has_metadata=has_metadata,
+                has_subtitle=has_subtitle,
+                has_mosaic_removed=has_mosaic_removed,
+                genres=genres,
+                genre_mode=genre_mode,
+                include_total=True,
+            )
+            return {
+                **result,
+                "mode": "keyword",
+                "embeddings_enabled": embeddings_on,
+                "embedding_channel_used": False,
+                "search_message": None,
+                "hit_meta": {},
+            }
+
+        top_k = max(per_page, min(200, max(page * per_page, 40)))
+        searcher = HybridLibrarySearch(top_k=top_k)
+        hits = searcher.search_with_fusion(term)
+        emb_diag = dict(getattr(searcher, "last_embedding_diag", None) or {})
+        hit_meta = {
+            str(h.get("id") or "").strip().upper(): {
+                "score": float(h.get("score") or 0),
+                "source": str(h.get("source") or ""),
+            }
+            for h in hits
+            if str(h.get("id") or "").strip()
+        }
+        ranked_codes = [c for c in hit_meta.keys()]
+        embedding_used = any("embedding" in (m.get("source") or "") for m in hit_meta.values())
+
+        if not ranked_codes:
+            msg = "검색 결과가 없습니다."
+            if not embeddings_on:
+                msg = "임베딩이 꺼져 있어 키워드·메타데이터만 검색했습니다. 결과가 비어 있습니다."
+            return {
+                "total": 0,
+                "page": page,
+                "per_page": per_page,
+                "items": [],
+                "mode": "hybrid",
+                "embeddings_enabled": embeddings_on,
+                "embedding_channel_used": False,
+                "search_message": msg,
+                "hit_meta": {},
+            }
+
+        with get_db_session_ctx() as db:
+            query = db.query(JAVMetadata).filter(JAVMetadata.product_code.in_(ranked_codes))
+
+            if has_subtitle or has_mosaic_removed:
+                query = query.outerjoin(
+                    FileFlagCache,
+                    JAVMetadata.product_code == FileFlagCache.product_code,
+                )
+
+            if has_folder is True:
+                query = query.filter(_has_folder_filter())
+            elif has_folder is False:
+                query = query.filter(_no_folder_filter())
+
+            if has_metadata is True:
+                query = query.filter(_has_real_metadata_filter())
+            elif has_metadata is False:
+                query = query.filter(_without_metadata_filter())
+            else:
+                query = query.filter(_default_list_filter())
+
+            if has_subtitle:
+                query = query.filter(_subtitle_filter())
+            if has_mosaic_removed:
+                query = query.filter(_mosaic_removed_filter())
+
+            query = apply_genre_filters(query, genres, mode=genre_mode)
+            rows = query.all()
+
+        by_code = {
+            str(r.product_code or "").strip().upper(): r
+            for r in rows
+            if str(r.product_code or "").strip()
+        }
+        ordered = [by_code[c] for c in ranked_codes if c in by_code]
+        total = len(ordered)
+        start = max(0, (page - 1) * per_page)
+        page_rows = ordered[start : start + per_page]
+
+        message = None
+        if not embeddings_on:
+            message = "임베딩이 꺼져 있어 BM25·메타데이터만 사용합니다. 설정에서 임베딩을 켜면 시맨틱 검색이 강화됩니다."
+        elif not embedding_used:
+            err = str(emb_diag.get("error") or "")
+            status = str(emb_diag.get("status") or "")
+            if status == "query_failed" and (
+                "ConnectError" in err or "connection" in err.lower() or "ConnectTimeout" in err
+            ):
+                message = (
+                    "Ollama에 연결할 수 없어 시맨틱 검색을 건너뛰었습니다. "
+                    "Ollama 앱을 실행하거나 `ollama serve` 후 다시 검색하세요 "
+                    f"(URL: {(emb_diag.get('url') or 'http://localhost:11434')})."
+                )
+            elif status == "query_failed":
+                message = (
+                    "검색어 임베딩에 실패해 시맨틱 채널을 건너뛰었습니다. "
+                    f"Ollama 모델({emb_diag.get('model') or 'embeddings'})과 로그를 확인하세요."
+                )
+            elif int(emb_diag.get("returned_n") or 0) == 0 and int(emb_diag.get("scored_n") or 0) == 0:
+                message = (
+                    "현재 모델과 맞는 임베딩 캐시가 없어 시맨틱 채널이 비어 있습니다. "
+                    "설정에서 모델명을 맞추거나 임베딩 워밍업을 실행해 보세요."
+                )
+            else:
+                message = (
+                    "시맨틱 채널이 결과에 반영되지 않았습니다. "
+                    "설정에서 임베딩 워밍업을 실행해 보세요."
+                )
+
+        return {
+            "total": total,
+            "page": page,
+            "per_page": per_page,
+            "items": page_rows,
+            "mode": "hybrid",
+            "embeddings_enabled": embeddings_on,
+            "embedding_channel_used": embedding_used,
+            "search_message": message,
+            "hit_meta": hit_meta,
+        }
+
+    @staticmethod
+    def _looks_like_natural_language(text: str) -> bool:
+        t = (text or "").strip()
+        if not t:
+            return False
+        if re.search(r"\s", t):
+            return True
+        if re.match(r"^[A-Za-z]{1,10}-?\d{2,6}[A-Za-z0-9\-]*$", t):
+            return False
+        if re.search(r"[가-힣]{4,}", t):
+            return True
+        return len(t) >= 12 and not re.match(r"^[A-Za-z0-9\-_.]+$", t)
 
     def stats(self) -> dict[str, int]:
         global _STATS_CACHE

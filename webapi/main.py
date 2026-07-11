@@ -62,6 +62,17 @@ async def lifespan(app: FastAPI):
 
     threading.Thread(target=_preview_stale_backfill, daemon=True, name="PreviewStaleBackfill").start()
 
+    def _ensure_ollama_for_embeddings() -> None:
+        try:
+            from javstory.llm.ollama_serve import ensure_ollama_serve, should_auto_start_ollama
+
+            if should_auto_start_ollama():
+                ensure_ollama_serve(wait_sec=2.0)
+        except Exception:
+            pass
+
+    threading.Thread(target=_ensure_ollama_for_embeddings, daemon=True, name="OllamaEnsure").start()
+
     try:
         from javstory.folder_watch.service import get_folder_watch_service
 

@@ -138,8 +138,9 @@ class HybridLibrarySearch:
         fusion_k: int = 60,
     ) -> None:
         self.weights = weights or _weights_from_env()
-        self.top_k = max(1, min(50, int(top_k or 20)))
+        self.top_k = max(1, min(200, int(top_k or 20)))
         self.fusion_k = max(1, int(fusion_k or 60))
+        self.last_embedding_diag: dict[str, Any] = {}
 
     def search_with_fusion(
         self,
@@ -218,18 +219,41 @@ class HybridLibrarySearch:
         ]
 
     def _search_embedding(self, query: str, docs: Sequence[_LibraryDoc], *, top_k: int) -> List[_SearchResult]:
+        self.last_embedding_diag = {}
         if not embeddings_enabled_from_env():
+            self.last_embedding_diag = {"status": "disabled"}
             return []
         model = embeddings_ollama_model_from_env()
         try:
             query_vec = asyncio.run(ollama_embed_text(text=query, model=model, timeout_sec=60.0))
+            embed_err = None
         except RuntimeError:
             loop = asyncio.new_event_loop()
             try:
                 query_vec = loop.run_until_complete(ollama_embed_text(text=query, model=model, timeout_sec=60.0))
+                embed_err = None
+            except Exception as e:
+                query_vec = None
+                embed_err = f"{type(e).__name__}:{e}"
             finally:
                 loop.close()
-        except Exception:
+        except Exception as e:
+            query_vec = None
+            embed_err = f"{type(e).__name__}:{e}"
+
+        if query_vec is None:
+            try:
+                from javstory.llm.ollama_serve import ollama_base_url
+
+                _ollama_url = ollama_base_url()
+            except Exception:
+                _ollama_url = "http://localhost:11434"
+            self.last_embedding_diag = {
+                "status": "query_failed",
+                "model": model,
+                "error": (embed_err or "")[:300],
+                "url": _ollama_url,
+            }
             return []
 
         title_by_code = {doc.product_code: doc.title for doc in docs}
@@ -243,7 +267,14 @@ class HybridLibrarySearch:
             if math.isfinite(score):
                 results.append(_SearchResult(pc, title_by_code.get(pc, pc), "embedding", float(score)))
         results.sort(key=lambda item: item.raw_score, reverse=True)
-        return results[:top_k]
+        out = results[:top_k]
+        self.last_embedding_diag = {
+            "status": "ok",
+            "model": model,
+            "returned_n": len(out),
+            "scored_n": len(results),
+        }
+        return out
 
     def _search_metadata(self, query: str, docs: Sequence[_LibraryDoc], *, top_k: int) -> List[_SearchResult]:
         terms = _tokenize(query)
