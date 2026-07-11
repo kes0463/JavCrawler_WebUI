@@ -34,9 +34,14 @@ export function NavigationProvider({ children }: { children: React.ReactNode }) 
   const [actressListEpoch, setActressListEpoch] = useState(0);
   const [pendingActressCreateName, setPendingActressCreateName] = useState<string | null>(null);
 
+  /** 라이브러리 상세를 유지할 탭 — STT/번역 후 복귀 시 패널 복원 */
+  const PRESERVE_LIBRARY_DETAIL: View[] = ["processing"];
+
   const navigateTo = (view: View) => {
     setCurrentView(view);
-    if (view !== "library") setLibraryDetailSku(null);
+    if (view !== "library" && !PRESERVE_LIBRARY_DETAIL.includes(view)) {
+      setLibraryDetailSku(null);
+    }
     if (view !== "actress") setActressDetailId(null);
     if (view === "actress") {
       setActressDetailId(null);

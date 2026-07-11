@@ -12,8 +12,8 @@ const NAV_ITEMS: { view: View; icon: React.ElementType; label: string; badge?: s
   { view: "dashboard",  icon: LayoutDashboard, label: "Dashboard" },
   { view: "library",    icon: BookOpen,        label: "Library" },
   { view: "actress",    icon: Users,           label: "Actresses" },
-  { view: "harvest",    icon: Search,          label: "Queues" },
-  { view: "processing", icon: Mic2,            label: "Tasks", badge: "Soon" },
+  { view: "harvest",    icon: Search,          label: "Harvest" },
+  { view: "processing", icon: Mic2,            label: "STT · Translation" },
   { view: "insight",    icon: BarChart2,       label: "Insight" },
 ];
 

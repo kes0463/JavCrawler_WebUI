@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { Bell, BookOpen, FolderOpen, FolderX, Heart, ImagePlus, Link2, Pause, Pencil, Play, RefreshCw, Save, Upload, X } from "lucide-react";
+import { Bell, BookOpen, FileAudio, FolderOpen, FolderX, Heart, ImagePlus, Languages, Link2, Loader2, Pause, Pencil, Play, RefreshCw, Save, Upload, X } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { GlassCard } from "@/components/ui/GlassCard";
 import { Skeleton } from "@/components/ui/Skeleton";
@@ -21,6 +21,7 @@ import type { LibraryItemDetail, LibraryItemUpdate } from "@/api/library";
 import { pickFoldersDialog, recrawlProducts } from "@/api/harvest";
 import { pauseFolderMonitoring, resumeFolderMonitoring } from "@/api/folderWatch";
 import { useFolderWatch } from "@/contexts/FolderWatchContext";
+import { useLibraryProcessingActions } from "@/hooks/useLibraryProcessingActions";
 import { ActorCommaAutocompleteField } from "@/components/library/ActorCommaAutocompleteField";
 import { CoverLightbox } from "@/components/library/CoverLightbox";
 import { SnapshotGallery } from "@/components/library/SnapshotGallery";
@@ -280,10 +281,12 @@ export function LibraryDetailPanel({
 }: LibraryDetailPanelProps) {
   const { showToast } = useToast();
   const { openActressByName } = useNavigation();
+  const { enqueueLibraryProducts } = useLibraryProcessingActions();
   const { refreshInbox, openReviewForCode, isBindingPending } = useFolderWatch();
   const [detail, setDetail] = useState<LibraryItemDetail | null>(null);
   const [loading, setLoading] = useState(true);
   const [recrawling, setRecrawling] = useState(false);
+  const [queueAdding, setQueueAdding] = useState<"stt" | "subtitle" | null>(null);
   const [saving, setSaving] = useState(false);
   const [editMode, setEditMode] = useState(false);
   const [editDraft, setEditDraft] = useState<LibraryItemUpdate>({});
@@ -590,6 +593,15 @@ export function LibraryDetailPanel({
     }
   }, [code, onSaved, showToast]);
 
+  const handleAddToProcessing = useCallback(async (kind: "stt" | "subtitle") => {
+    setQueueAdding(kind);
+    try {
+      await enqueueLibraryProducts([code], kind);
+    } finally {
+      setQueueAdding(null);
+    }
+  }, [code, enqueueLibraryProducts]);
+
   const patchDraft = (patch: Partial<LibraryItemUpdate>) => {
     setEditDraft(d => ({ ...d, ...patch }));
   };
@@ -808,6 +820,28 @@ export function LibraryDetailPanel({
                   >
                     <RefreshCw className={cn("w-6 h-6", recrawling && "animate-spin")} />
                     재크롤
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => void handleAddToProcessing("stt")}
+                    disabled={queueAdding !== null}
+                    className="inline-flex items-center gap-2 px-5 py-3 rounded-xl bg-indigo-500/15 border border-indigo-500/35 text-indigo-200 hover:bg-indigo-500/25 transition-colors text-xl font-semibold disabled:opacity-50"
+                  >
+                    {queueAdding === "stt"
+                      ? <Loader2 className="w-6 h-6 animate-spin" />
+                      : <FileAudio className="w-6 h-6" />}
+                    STT 큐에 추가
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => void handleAddToProcessing("subtitle")}
+                    disabled={queueAdding !== null}
+                    className="inline-flex items-center gap-2 px-5 py-3 rounded-xl bg-violet-500/10 border border-violet-500/30 text-violet-200 hover:bg-violet-500/20 transition-colors text-xl font-semibold disabled:opacity-50"
+                  >
+                    {queueAdding === "subtitle"
+                      ? <Loader2 className="w-6 h-6 animate-spin" />
+                      : <Languages className="w-6 h-6" />}
+                    번역 큐에 추가
                   </button>
                 </div>
               )}

@@ -7,7 +7,7 @@ import { ElectronWindowControls } from "@/components/layout/ElectronWindowContro
 const VIEW_TITLES: Record<View, string> = {
   dashboard: "Dashboard",
   harvest: "Harvest",
-  processing: "Processing",
+  processing: "전사 · 자막",
   library: "Library",
   actress: "배우",
   insight: "Insight",

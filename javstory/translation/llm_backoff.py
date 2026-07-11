@@ -37,6 +37,30 @@ def is_free_tier_daily_quota_exceeded(msg: str) -> bool:
     return "GenerateRequestsPerDayPerProjectPerModel-FreeTier" in s or "requests, limit: 20" in s
 
 
+def is_openrouter_credit_exhausted(exc_or_msg: BaseException | str) -> bool:
+    """OpenRouter 402·크레딧 부족 메시지 여부 (재시도·Grok 스킵 판단용)."""
+    if isinstance(exc_or_msg, BaseException):
+        status = getattr(exc_or_msg, "status_code", None)
+        if status == 402:
+            return True
+        body = getattr(exc_or_msg, "body", None)
+        if body is not None and is_openrouter_credit_exhausted(str(body)):
+            return True
+        msg = str(exc_or_msg)
+    else:
+        msg = str(exc_or_msg or "")
+    s = msg.lower()
+    if "insufficient credit" in s:
+        return True
+    if "payment required" in s:
+        return True
+    if "402" in s and ("credit" in s or "payment" in s):
+        return True
+    if "more credits" in s and ("afford" in s or "openrouter" in s or "max_tokens" in s):
+        return True
+    return False
+
+
 def retryable_api_error(e: BaseException) -> bool:
     msg = str(e).lower()
     if "429" in msg or "rate" in msg or "limit" in msg or "timeout" in msg:

@@ -36,14 +36,21 @@ from javstory.translation.correction_chunk import (
     _ollama_chunk_params_by_model,
     collapse_repeated_vocal_sounds,
 )
+from javstory.translation.translation_prompt_config import (
+    build_translation_system_prompt,
+    prompt_mode_from_env,
+    prompt_variant_from_env,
+    uses_html_translation_prompt,
+)
 from javstory.translation.llm_backoff import route_with_backoff
 from javstory.translation.story_context_prompts import resolve_grok_scene_for_chunk
 from javstory.transcription.stt_types import STTCancelled, SimpleSegment
 
 CancelCheck = Optional[Callable[[], bool]]
+ContentLineFn = Optional[Callable[[dict[str, object]], None]]
 OptionalLogger = Optional[Callable[[str], None]]
-_CACHE_SCHEMA_VERSION = 1
-_CACHE_PROMPT_VERSION = "ko_translation_chunk_cache_v1"
+_CACHE_SCHEMA_VERSION = 2
+_CACHE_PROMPT_VERSION = "ko_translation_chunk_cache_v4"
 
 # ── 번역 프롬프트 상수·함수 (구 background_prompts.py에서 인라인) ──
 
@@ -66,6 +73,70 @@ RETRY_TRANSLATION_KO_MIX_APPEND = (
     "\n\n[重要] text値は100%韓国語のみ。"
     "日本語・英語・中国語が混入した場合は自然な韓国語に直してください。"
 )
+RETRY_TRANSLATION_KO_PURE_APPEND = (
+    "\n\n[중요] 번역문은 100% 한글만 사용하세요. "
+    "영어·로마자·일본어 가나·한자(漢字)를 절대 넣지 마세요. "
+    "혼합 표기(예: 바anko, 濡라줘)는 금지입니다."
+)
+_KO_CONTAM_LATIN = re.compile(r"[a-zA-Z]")
+_KO_CONTAM_KANA = re.compile(r"[\u3040-\u30ff\u31f0-\u31ff]")
+_KO_CONTAM_CJK = re.compile(r"[\u4e00-\u9fff\u3400-\u4dbf]")
+_KO_CONTAM_THAI = re.compile(r"[\u0e00-\u0e7f]")
+_HANGUL_SYLLABLE = re.compile(r"[\uac00-\ud7a3]")
+
+
+def has_ko_subtitle_contamination(text: str) -> bool:
+    """한글 자막에 로마자·가나·한자·태국어 등 비한글 혼입 여부."""
+    t = (text or "").strip()
+    if not t:
+        return False
+    if _KO_CONTAM_LATIN.search(t):
+        return True
+    if _KO_CONTAM_KANA.search(t):
+        return True
+    if _KO_CONTAM_CJK.search(t):
+        return True
+    if _KO_CONTAM_THAI.search(t):
+        return True
+    return False
+
+
+def is_acceptable_ko_subtitle_line(text: str) -> bool:
+    """번역 완료로 인정할 한 줄: 비어 있지 않고, 한글이 있으며, 비한글 혼입 없음."""
+    t = (text or "").strip()
+    if not t:
+        return False
+    if not _HANGUL_SYLLABLE.search(t):
+        return False
+    return not has_ko_subtitle_contamination(t)
+
+
+def segments_translation_quality_ok(segs: List[SimpleSegment]) -> bool:
+    return bool(segs) and all(is_acceptable_ko_subtitle_line(s.text or "") for s in segs)
+
+
+def segments_have_ko_contamination(segs: List[SimpleSegment]) -> bool:
+    return any(has_ko_subtitle_contamination(s.text or "") for s in segs)
+
+
+def _restore_ja_texts_from_chunk_json(tgt_segs: List[SimpleSegment], chunk_json: str) -> None:
+    try:
+        data = json.loads(chunk_json)
+    except json.JSONDecodeError:
+        return
+    if not isinstance(data, list):
+        return
+    by_idx: dict[int, str] = {}
+    for item in data:
+        if not isinstance(item, dict):
+            continue
+        try:
+            by_idx[int(item.get("index"))] = str(item.get("text") or "")
+        except (TypeError, ValueError):
+            continue
+    for i, seg in enumerate(tgt_segs):
+        if i in by_idx:
+            seg.text = by_idx[i]
 
 
 def system_prompt_translation_chunk(tier: Dict[str, Any]) -> str:
@@ -181,6 +252,7 @@ def _apply_cached_translation(
     tgt_segs: List[SimpleSegment],
     cache_path: Path | None,
     *,
+    chunk_json: str,
     log: Callable[[str], None],
     chunk_idx: int,
     total_chunks: int,
@@ -196,6 +268,12 @@ def _apply_cached_translation(
             return False
         raw = json.dumps(items, ensure_ascii=False)
         if _apply_json_chunk(tgt_segs, raw, log=log, log_prefix="[KO-TRANSLATE CACHE]"):
+            if not segments_translation_quality_ok(tgt_segs):
+                log(
+                    f"[KO-TRANSLATE] 캐시 품질 불량(일본어·혼입) — 무시: {cache_path.name}"
+                )
+                _restore_ja_texts_from_chunk_json(tgt_segs, chunk_json)
+                return False
             log(
                 f"[KO-TRANSLATE] 현재 {chunk_idx + 1} / {total_chunks} — 캐시 사용 "
                 f"({cache_path.name})"
@@ -383,17 +461,17 @@ def _effective_translation_chunk_durations(tier: Dict[str, Any]) -> tuple[float,
 
 
 def _translation_concurrency(tier: Dict[str, Any]) -> int:
+    prov = str(tier.get("provider") or "").lower()
+    if prov in ("ollama", "llamacpp"):
+        # 로컬 모델은 VRAM·순서 안정을 위해 항상 순차 처리
+        return 1
     raw = os.environ.get("JAVSTORY_TRANSLATION_CONCURRENCY", "").strip()
     if raw:
         try:
             return max(1, min(int(raw), 8))
         except ValueError:
             pass
-    if tier.get("provider") == "ollama":
-        return 1
-    if tier.get("provider") == "llamacpp":
-        return 1
-    if tier.get("provider") == "gemini":
+    if prov == "gemini":
         try:
             from javstory.config.app_config import gemini_default_chunk_params
 
@@ -505,15 +583,15 @@ def _log_translation_start_details(
     else:
         log("[KO-TRANSLATE] ─ 스토리/참조 힌트 — 비어 있음")
 
-    if prov == "gemini":
+    if uses_html_translation_prompt(tier):
         from javstory.translation import gemini_prompts
 
         merged_hints = "\n\n".join(
             [s for s in (extra_hints, combined_user_note) if s and str(s).strip()]
         )
         note = gemini_prompts.build_translation_note(background_json_str, merged_hints)
-        sys_prompt = gemini_prompts.build_system_prompt_jav_subtitle(note)
-        log(f"[KO-TRANSLATE] ─ 시스템 프롬프트 (Gemini, {len(sys_prompt)}자)")
+        sys_prompt = build_translation_system_prompt(note, variant=prompt_variant_from_env())
+        log(f"[KO-TRANSLATE] ─ 시스템 프롬프트 (HTML, {len(sys_prompt)}자)")
         log(sys_prompt)
     else:
         sys_body = system_prompt_translation_chunk(tier)
@@ -562,6 +640,32 @@ def _log_full_glm_prompt(
     log(sep)
 
 
+def _notify_ko_content_lines(
+    all_segments: List[SimpleSegment],
+    chunk_segments: List[SimpleSegment],
+    on_content_line: ContentLineFn,
+) -> None:
+    if not on_content_line:
+        return
+    for seg in chunk_segments:
+        text = (seg.text or "").strip()
+        if not text:
+            continue
+        try:
+            idx = all_segments.index(seg)
+        except ValueError:
+            idx = -1
+        on_content_line(
+            {
+                "lang": "ko",
+                "text": text,
+                "start": float(seg.start),
+                "end": float(seg.end),
+                "index": idx,
+            }
+        )
+
+
 async def translate_ja_segments_to_ko_async(
     segments: List[SimpleSegment],
     *,
@@ -580,6 +684,7 @@ async def translate_ja_segments_to_ko_async(
     should_cancel: CancelCheck = None,
     log_full_translation_prompt: Optional[bool] = None,
     log_translation_start_details: Optional[bool] = None,
+    on_content_line: ContentLineFn = None,
 ) -> List[SimpleSegment]:
     """
     일본어 세그먼트 리스트를 한국어로 번역한다. 세그먼트 객체가 제자리에서 갱신된다.
@@ -679,9 +784,23 @@ async def translate_ja_segments_to_ko_async(
 
     async def _one(idx: int, chunk: dict) -> None:
         async with semaphore:
+            tgt_segs: List[SimpleSegment] = chunk["target"]
+            chunk_json = _chunk_json_for_segments(tgt_segs) if tgt_segs else "[]"
+            try:
+                await _one_chunk(idx, chunk)
+            except STTCancelled:
+                raise
+            except Exception as e:
+                log(
+                    f"[KO-TRANSLATE] 청크 {idx + 1}/{total_chunks} 오류 — {type(e).__name__}: {e}"
+                )
+                if tgt_segs:
+                    _restore_ja_texts_from_chunk_json(tgt_segs, chunk_json)
+
+    async def _one_chunk(idx: int, chunk: dict) -> None:
             if should_cancel and should_cancel():
                 raise STTCancelled()
-            tgt_segs: List[SimpleSegment] = chunk["target"]
+            tgt_segs = chunk["target"]
             if not tgt_segs:
                 return
 
@@ -711,28 +830,31 @@ async def translate_ja_segments_to_ko_async(
                 "scene_id": scene_id,
                 "scene_tone": scene_tone,
                 "compact_hints": compact_hints,
+                "prompt_mode": prompt_mode_from_env(),
+                "prompt_variant": prompt_variant_from_env(),
             }
             cache_path = _translation_chunk_cache_path(product_code, cache_fingerprint)
             if _apply_cached_translation(
                 tgt_segs,
                 cache_path,
+                chunk_json=chunk_json,
                 log=log,
                 chunk_idx=idx,
                 total_chunks=total_chunks,
             ):
+                _notify_ko_content_lines(segments, tgt_segs, on_content_line)
                 return
 
-            # ── Gemini HTML 번역 경로 ─────────────────────────────────
-            if str(tier.get("provider") or "").lower() == "gemini":
+            # ── HTML 번역 경로 (Gemini / llamacpp 등) ─────────────────
+            if uses_html_translation_prompt(tier):
                 from javstory.translation import gemini_prompts
 
                 applied_ok = False
-                # 사용자 작성 노트(전역+배우+작품) → 스토리 힌트와 함께 합쳐 {{note}}로 주입
                 merged_hints = "\n\n".join(
                     [s for s in (extra_hints, combined_user_note) if s and s.strip()]
                 )
                 note = gemini_prompts.build_translation_note(background_json_str, merged_hints)
-                sys_prompt = gemini_prompts.build_system_prompt_jav_subtitle(note)
+                sys_prompt = build_translation_system_prompt(note, variant=prompt_variant_from_env())
                 user_msg = gemini_prompts.segments_to_html_user_message(tgt_segs)
                 messages_g: List[dict[str, str]] = [
                     {"role": "system", "content": sys_prompt},
@@ -744,26 +866,26 @@ async def translate_ja_segments_to_ko_async(
                     )
                 t_req = time.monotonic()
                 log(
-                    f"[KO-TRANSLATE] 청크 {idx + 1}/{total_chunks} Gemini 대기 중… "
+                    f"[KO-TRANSLATE] 청크 {idx + 1}/{total_chunks} HTML LLM 대기 중… "
                     f"~{tgt_segs[0].start:.1f}–{tgt_segs[-1].end:.1f}s"
                 )
                 res = await route_with_backoff(
                     router, messages_g, tier, log=_translation_retry_log(log)
                 )
                 log(
-                    f"[KO-TRANSLATE] 청크 {idx + 1}/{total_chunks} Gemini 응답 수신 "
+                    f"[KO-TRANSLATE] 청크 {idx + 1}/{total_chunks} HTML 응답 수신 "
                     f"({time.monotonic() - t_req:.1f}s)"
                 )
                 if log_full_prompt:
                     pr = res or ""
                     log(
-                        f"[KO-TRANSLATE] 현재 {idx + 1} / {total_chunks} — Gemini 응답:\n"
+                        f"[KO-TRANSLATE] 현재 {idx + 1} / {total_chunks} — HTML 응답:\n"
                         f"{pr[:12000]}{'…' if len(pr) > 12000 else ''}"
                     )
                 applied_ok = gemini_prompts.parse_html_translation_response(res or "", tgt_segs)
                 if not applied_ok:
                     log(
-                        f"[KO-TRANSLATE] 현재 {idx + 1} / {total_chunks} — Gemini HTML 파싱 실패 — 재시도"
+                        f"[KO-TRANSLATE] 현재 {idx + 1} / {total_chunks} — HTML 파싱 실패 — 재시도"
                     )
                     retry_msgs: List[dict[str, str]] = messages_g + [
                         {"role": "assistant", "content": res or ""},
@@ -782,16 +904,49 @@ async def translate_ja_segments_to_ko_async(
                     if not applied_ok:
                         log(
                             f"[KO-TRANSLATE] 현재 {idx + 1} / {total_chunks} "
-                            "— Gemini HTML 최종 실패 — 해당 구간 일본어 유지"
+                            "— HTML 최종 실패 — 해당 구간 일본어 유지"
                         )
-                # 사용자 노트의 [용어/은어 매핑]·[고정 표기/호칭 사전]을 강제 치환
+                if applied_ok and not segments_translation_quality_ok(tgt_segs):
+                    log(
+                        f"[KO-TRANSLATE] 현재 {idx + 1} / {total_chunks} — "
+                        "번역 품질 불량(일본어·혼입·한글 없음) — 순수 한글 재번역"
+                    )
+                    _restore_ja_texts_from_chunk_json(tgt_segs, chunk_json)
+                    pure_user = (
+                        gemini_prompts.segments_to_html_user_message(tgt_segs)
+                        + RETRY_TRANSLATION_KO_PURE_APPEND
+                    )
+                    pure_msgs: List[dict[str, str]] = [
+                        {"role": "system", "content": sys_prompt},
+                        {"role": "user", "content": pure_user},
+                    ]
+                    res3 = await route_with_backoff(
+                        router, pure_msgs, tier, log=_translation_retry_log(log)
+                    )
+                    applied_ok = gemini_prompts.parse_html_translation_response(res3 or "", tgt_segs)
+                    if applied_ok and not segments_translation_quality_ok(tgt_segs):
+                        log(
+                            f"[KO-TRANSLATE] 현재 {idx + 1} / {total_chunks} — "
+                            "품질 재시도 후에도 불량"
+                        )
+                        applied_ok = False
                 if glossary_pairs and apply_glossary_to_text is not None:
                     for s in tgt_segs:
                         try:
                             s.text = apply_glossary_to_text(s.text or "", glossary_pairs)
                         except Exception:
                             pass
+                if not applied_ok:
+                    _restore_ja_texts_from_chunk_json(tgt_segs, chunk_json)
+                elif not segments_translation_quality_ok(tgt_segs):
+                    log(
+                        f"[KO-TRANSLATE] 현재 {idx + 1} / {total_chunks} — "
+                        "최종 품질 불량 — 해당 구간 일본어 유지"
+                    )
+                    _restore_ja_texts_from_chunk_json(tgt_segs, chunk_json)
+                    applied_ok = False
                 if applied_ok:
+                    _notify_ko_content_lines(segments, tgt_segs, on_content_line)
                     _store_translation_chunk_cache(
                         cache_path,
                         product_code=product_code,
@@ -854,6 +1009,33 @@ async def translate_ja_segments_to_ko_async(
                 log_prefix=lp,
                 postprocess_text=collapse_repeated_vocal_sounds,
             )
+            if applied_ok and not segments_translation_quality_ok(tgt_segs):
+                log(
+                    f"[KO-TRANSLATE] 현재 {idx + 1} / {total_chunks} — "
+                    "번역 품질 불량(일본어·혼입·한글 없음) — 순수 한글 재번역"
+                )
+                _restore_ja_texts_from_chunk_json(tgt_segs, chunk_json)
+                pure_msgs = messages + [
+                    {"role": "user", "content": RETRY_TRANSLATION_KO_PURE_APPEND},
+                ]
+                res_pure = await route_with_backoff(
+                    router, pure_msgs, tier, log=_translation_retry_log(log)
+                )
+                processed_pure = re.sub(
+                    r"<think>.*?</think>",
+                    "",
+                    res_pure or "",
+                    flags=re.DOTALL,
+                )
+                applied_ok = _apply_json_chunk(
+                    tgt_segs,
+                    processed_pure,
+                    log=log,
+                    log_prefix=lp,
+                    postprocess_text=collapse_repeated_vocal_sounds,
+                )
+                if applied_ok and not segments_translation_quality_ok(tgt_segs):
+                    applied_ok = False
             if not applied_ok:
                 log(f"[KO-TRANSLATE] 현재 {idx + 1} / {total_chunks} — JSON 적용 실패 — 재시도")
                 use_neutral_ollama_qwen = (
@@ -952,7 +1134,17 @@ async def translate_ja_segments_to_ko_async(
                         s.text = apply_glossary_to_text(s.text or "", glossary_pairs)
                     except Exception:
                         pass
+            if applied_ok and not segments_translation_quality_ok(tgt_segs):
+                log(
+                    f"[KO-TRANSLATE] 현재 {idx + 1} / {total_chunks} — "
+                    "최종 품질 불량 — 해당 구간 일본어 유지"
+                )
+                _restore_ja_texts_from_chunk_json(tgt_segs, chunk_json)
+                applied_ok = False
+            elif not applied_ok:
+                _restore_ja_texts_from_chunk_json(tgt_segs, chunk_json)
             if applied_ok:
+                _notify_ko_content_lines(segments, tgt_segs, on_content_line)
                 _store_translation_chunk_cache(
                     cache_path,
                     product_code=product_code,

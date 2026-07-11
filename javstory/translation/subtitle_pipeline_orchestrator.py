@@ -1,14 +1,12 @@
 """
-자막 교정·번역 파이프라인 오케스트레이터.
+자막 번역 파이프라인 오케스트레이터.
 
 Harvest 시 Grok이 추출한 캐시 JSON을 작품 분석의 유일한 소스로 사용.
-중간 LLM 분석(배경 합성, 스토리 리포트, 레퍼런스 수집)은 모두 제거됨.
 
 흐름:
-  1. Grok 캐시 로드 (data/cache/story_context/) — LLM 호출 없음
+  1. Grok 캐시 로드 (없으면 API 생성 시도; 크레딧 부족 등 실패 시 건너뜀)
   2. DB 메타에서 배경 JSON 직접 생성 — LLM 호출 없음
-  3. JA 교정: Pass1(Grok) → Pass2(GLM) → [선택]Pass3(Claude)
-  4. KO 번역: 배경(DB직접) + Grok힌트 + 씬톤
+  3. KO 번역: STT `.ja.srt` → `.ko.srt` (배경 + Grok힌트 + 번역 노트)
 """
 
 from __future__ import annotations
@@ -26,10 +24,9 @@ if str(_ROOT) not in sys.path:
 
 from javstory.llm.engine import MultiTierRouter
 
-from javstory.translation.correction_chunk import correct_ja_segments_async
 from javstory.translation.ko_translation_chunk import translate_ja_segments_to_ko_async
 from javstory.translation.story_grok_module import (
-    load_cached_grok_json_flexible,
+    ensure_grok_story_cache_for_translation,
     merge_story_context_tier,
 )
 from javstory.translation.story_context_prompts import format_story_context_for_translation
@@ -55,17 +52,6 @@ def _write_simple_segments_srt(segments: list[SimpleSegment], out_path: Path) ->
     subs.save(str(out_path), encoding="utf-8")
 
 
-def _resolve_ja_corrected_output_path(ja_srt: Path, kwargs: dict[str, Any]) -> Path:
-    explicit = kwargs.get("ja_corrected_srt_path")
-    if explicit:
-        return Path(str(explicit)).expanduser().resolve()
-    # 유저 요청: .corrected 없이 원본 .ja.srt를 덮어쓰거나 해당 이름으로 저장
-    work_dir = kwargs.get("work_dir")
-    if work_dir:
-        return Path(str(work_dir)).expanduser().resolve() / ja_srt.name
-    return ja_srt
-
-
 def _resolve_ko_translation_input_path(kwargs: dict[str, Any]) -> Path | None:
     override = kwargs.get("translate_ja_srt_path")
     if override and str(override).strip():
@@ -75,12 +61,7 @@ def _resolve_ko_translation_input_path(kwargs: dict[str, Any]) -> Path | None:
     if raw is None or not str(raw).strip():
         return None
     ja_path = Path(str(raw)).expanduser().resolve()
-    if not ja_path.is_file():
-        return None
-    corrected = _resolve_ja_corrected_output_path(ja_path, kwargs)
-    if corrected.is_file():
-        return corrected
-    return ja_path
+    return ja_path if ja_path.is_file() else None
 
 
 def _resolve_ko_srt_output_path(ja_input: Path, kwargs: dict[str, Any]) -> Path:
@@ -102,21 +83,6 @@ def _resolve_ko_srt_output_path(ja_input: Path, kwargs: dict[str, Any]) -> Path:
     return ja_input.with_name(name)
 
 
-def _correction_forward_kwargs(kwargs: dict[str, Any]) -> dict[str, Any]:
-    keys = (
-        "llm_tier",
-        "pass1_tier",
-        "pass2_tier",
-        "pass3_tier",
-        "claude_polish",
-        "enable_pass3",
-        "speaker_prefix_mode",
-        "logger_func",
-        "should_cancel",
-    )
-    return {k: kwargs[k] for k in keys if k in kwargs}
-
-
 def _translation_forward_kwargs(kwargs: dict[str, Any]) -> dict[str, Any]:
     keys = (
         "translation_provider",
@@ -130,6 +96,7 @@ def _translation_forward_kwargs(kwargs: dict[str, Any]) -> dict[str, Any]:
         "translation_note_actress",
         "translation_note_work",
         "apply_glossary_post",
+        "on_content_line",
     )
     return {k: kwargs[k] for k in keys if k in kwargs}
 
@@ -209,17 +176,38 @@ def _build_background_from_db(product_code: str) -> str:
     return json.dumps(bg, ensure_ascii=False, sort_keys=True)
 
 
-def _load_grok_cache(product_code: str, tier_raw: Any = None) -> tuple[dict | None, str]:
-    """Grok 캐시 JSON 로드 + 번역 힌트 문자열 생성. LLM 호출 없음."""
+def _grok_hints_from_data(data: dict) -> str:
+    hints = format_story_context_for_translation(data)
+    return hints or ""
+
+
+def _resolve_story_context_tier(tier_raw: Any) -> dict[str, Any]:
+    if isinstance(tier_raw, dict) and tier_raw:
+        return merge_story_context_tier(tier_raw)
+    from javstory.config.app_config import library_story_context_batch_tier
+
+    return merge_story_context_tier(library_story_context_batch_tier())
+
+
+async def _load_grok_cache_async(
+    product_code: str,
+    tier_raw: Any,
+    log: Any,
+) -> tuple[dict | None, str]:
+    """Grok 캐시 로드. 없으면 API 생성 시도 — 크레딧 부족 등 실패 시 None으로 번역 계속."""
     pc = (product_code or "").strip()
     if not pc:
         return None, ""
-    tier = merge_story_context_tier(tier_raw if isinstance(tier_raw, dict) else None)
-    data = load_cached_grok_json_flexible(pc, tier)
+    tier = _resolve_story_context_tier(tier_raw)
+    data = await ensure_grok_story_cache_for_translation(
+        product_code=pc,
+        logger_func=log,
+        story_context_tier=tier,
+    )
     if not isinstance(data, dict):
+        log(f"[Orchestrator] Grok 스토리 컨텍스트 없음 — DB 배경만으로 번역 계속: {pc}")
         return None, ""
-    hints = format_story_context_for_translation(data)
-    return data, hints or ""
+    return data, _grok_hints_from_data(data)
 
 
 class SubtitlePipelineOrchestrator:
@@ -227,12 +215,12 @@ class SubtitlePipelineOrchestrator:
         self.router = router
 
     async def run_for_product(self, product_code: str, **kwargs: Any) -> None:
-        """Grok 캐시 + DB 메타 직접 로드 → JA 교정 → KO 번역."""
+        """Grok 캐시 + DB 메타 직접 로드 → KO 번역."""
         merged: dict[str, Any] = {**kwargs, "product_code": product_code}
         log = kwargs.get("logger_func") or print
 
         tier_raw = merged.get("story_context_tier") or merged.get("story_analysis_tier")
-        grok_json, hints_text = _load_grok_cache(product_code, tier_raw)
+        grok_json, hints_text = await _load_grok_cache_async(product_code, tier_raw, log)
         merged["story_context_grok_json"] = grok_json
         merged["story_context_report_text"] = hints_text
         if grok_json:
@@ -240,47 +228,7 @@ class SubtitlePipelineOrchestrator:
 
         merged["background_json_str"] = _build_background_from_db(product_code)
 
-        await self._correct_ja_chunks(**merged)
         await self._translate_ko_chunks(**merged)
-
-    async def _correct_ja_chunks(self, **kwargs: Any) -> None:
-        raw = kwargs.get("ja_srt_path")
-        if raw is None or str(raw).strip() == "":
-            return
-
-        ja_path = Path(str(raw)).expanduser().resolve()
-        log = kwargs.get("logger_func")
-        if not callable(log):
-            log = print  # type: ignore[assignment]
-
-        if not ja_path.is_file():
-            log(f"[Orchestrator] JA 교정 스킵: 파일 없음 — {ja_path}")
-            return
-
-        out_path = _resolve_ja_corrected_output_path(ja_path, kwargs)
-
-        product_code = str(kwargs.get("product_code") or "Unknown")
-        
-        from javstory.config.app_config import correction_skip_enabled
-        if correction_skip_enabled():
-            log(f"[Orchestrator] JA 교정 건너뛰기 (설정됨): {product_code}")
-            # 교정 없이 원본을 출력 경로에 복사/저장하여 번역 단계로 넘김
-            segments = _load_simple_segments_from_srt(ja_path)
-            _write_simple_segments_srt(segments, out_path)
-            return
-
-        segments = _load_simple_segments_from_srt(ja_path)
-        forward = _correction_forward_kwargs(kwargs)
-
-        log(f"[Orchestrator] JA 교정 시작: {ja_path.name} → {out_path.name}")
-        corrected = await correct_ja_segments_async(
-            segments,
-            product_code=product_code,
-            router=self.router,
-            **forward,
-        )
-        _write_simple_segments_srt(corrected, out_path)
-        log(f"[Orchestrator] JA 교정 저장: {out_path}")
 
     async def _translate_ko_chunks(self, **kwargs: Any) -> None:
         log = kwargs.get("logger_func")

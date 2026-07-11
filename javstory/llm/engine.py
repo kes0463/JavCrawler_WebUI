@@ -496,7 +496,12 @@ class MultiTierRouter:
 
                 except Exception as e:
                     last_model = model_name
-                    last_error = type(e).__name__
+                    last_error = str(e) or type(e).__name__
+                    from javstory.translation.llm_backoff import is_openrouter_credit_exhausted
+
+                    if is_openrouter_credit_exhausted(e):
+                        self.logger("    ⚠️ OpenRouter 크레딧 부족 — 재시도하지 않습니다.")
+                        break
                     delay = self.get_backoff_delay(attempt)
                     if tier_override:
                          self.logger(f"    ❌ [Manual Mode] {model_name} 오류: {e} | {delay:.1f}s 후 재시도 ({attempt+1}/4)")

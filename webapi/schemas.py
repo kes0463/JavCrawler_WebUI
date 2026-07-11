@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 from datetime import datetime
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 
 from pydantic import BaseModel, field_validator
 
@@ -219,6 +219,251 @@ class HarvestQueueResponse(BaseModel):
     planned: Optional[int] = None
     warnings: Optional[list[str]] = None
     folder_path: Optional[str] = None
+
+
+class ProcessingQueueItem(BaseModel):
+    id: str
+    target: str
+    product_code: Optional[str] = None
+    status: str = "pending"
+    progress: int = 0
+    message: str = ""
+    file_name: str = ""
+
+
+class ProcessingQueueSection(BaseModel):
+    items: list[ProcessingQueueItem]
+    running: bool = False
+
+
+class ProcessingQueueResponse(BaseModel):
+    stt: ProcessingQueueSection
+    subtitle: ProcessingQueueSection
+    planned: Optional[int] = None
+    warnings: Optional[list[str]] = None
+    folder_path: Optional[str] = None
+
+
+class AddProcessingRequest(BaseModel):
+    kind: Literal["stt", "subtitle"]
+    paths: list[str]
+
+    @field_validator("paths", mode="before")
+    @classmethod
+    def validate_paths(cls, v: object) -> list[str]:
+        if not isinstance(v, list):
+            raise ValueError("paths must be a list")
+        if len(v) > 200:
+            raise ValueError("too many paths (max 200 per request)")
+        out: list[str] = []
+        for raw in v:
+            p = str(raw or "").strip()
+            if p:
+                out.append(p)
+        if not out:
+            raise ValueError("no paths provided")
+        return out
+
+
+class AddProcessingProductsRequest(BaseModel):
+    kind: Literal["stt", "subtitle"]
+    product_codes: list[str]
+
+    @field_validator("product_codes", mode="before")
+    @classmethod
+    def validate_product_codes(cls, v: object) -> list[str]:
+        if not isinstance(v, list):
+            raise ValueError("product_codes must be a list")
+        if len(v) > 50:
+            raise ValueError("too many product codes (max 50 per request)")
+        out: list[str] = []
+        seen: set[str] = set()
+        for raw in v:
+            pc = str(raw or "").strip().upper()
+            if not pc or pc in seen:
+                continue
+            seen.add(pc)
+            out.append(pc)
+        if not out:
+            raise ValueError("no product codes provided")
+        return out
+
+
+class ProcessingFolderRequest(BaseModel):
+    kind: Literal["stt", "subtitle"]
+    folder_path: str
+
+    @field_validator("folder_path")
+    @classmethod
+    def validate_folder_path(cls, v: str) -> str:
+        p = str(v or "").strip()
+        if not p:
+            raise ValueError("folder_path is required")
+        if len(p) > 500:
+            raise ValueError("folder_path too long")
+        return p
+
+
+class ProcessingKindRequest(BaseModel):
+    kind: Literal["stt", "subtitle"]
+
+
+class SttEngineOption(BaseModel):
+    id: str
+    label: str
+    description: str = ""
+    implemented: bool = True
+
+
+class SttSettingsResponse(BaseModel):
+    engine: str
+    whisper_model: str
+    faster_whisper_model: str
+    hf_whisper_model: str
+    vad_threshold: float
+    dialogue_only: bool
+    engine_options: list[SttEngineOption]
+
+
+class SttSettingsPatch(BaseModel):
+    engine: Optional[str] = None
+    whisper_model: Optional[str] = None
+    faster_whisper_model: Optional[str] = None
+    hf_whisper_model: Optional[str] = None
+    vad_threshold: Optional[float] = None
+    dialogue_only: Optional[bool] = None
+
+    @field_validator("vad_threshold")
+    @classmethod
+    def validate_vad(cls, v: float | None) -> float | None:
+        if v is None:
+            return None
+        if v < 0.05 or v > 0.95:
+            raise ValueError("vad_threshold must be between 0.05 and 0.95")
+        return v
+
+
+class TranslationProviderOption(BaseModel):
+    id: str
+    label: str
+
+
+class TranslationModelOption(BaseModel):
+    id: str
+    label: str
+    gguf_env: str = ""
+    gguf_path: str = ""
+
+
+class OpenRouterProfileOption(BaseModel):
+    id: str
+    label: str
+
+
+class LlamaCppSettingsSnapshot(BaseModel):
+    bin: str
+    url: str
+    port: int
+    model: str
+    gguf_path: str
+    gguf_env: str
+    gguf_scan_dir: str = ""
+    ctx: int
+    n_gpu_layers: Optional[int] = None
+    cache_type_k: str
+    cache_type_v: str
+    threads: Optional[int] = None
+    tensorcores: bool
+    flash_attn: bool
+    auto_start: bool
+    fit_vram: bool
+    command_preview: str
+
+
+class TranslationSettingsResponse(BaseModel):
+    provider: str
+    openrouter_profile: str
+    llamacpp: LlamaCppSettingsSnapshot
+    provider_options: list[TranslationProviderOption]
+    model_options: list[TranslationModelOption]
+    openrouter_profile_options: list[OpenRouterProfileOption]
+
+
+class TranslationSettingsPatch(BaseModel):
+    provider: Optional[str] = None
+    openrouter_profile: Optional[str] = None
+    llamacpp_bin: Optional[str] = None
+    llamacpp_url: Optional[str] = None
+    llamacpp_port: Optional[int] = None
+    llamacpp_model: Optional[str] = None
+    llamacpp_gguf_path: Optional[str] = None
+    llamacpp_ctx: Optional[int] = None
+    llamacpp_n_gpu_layers: Optional[int] = None
+    llamacpp_cache_type_k: Optional[str] = None
+    llamacpp_cache_type_v: Optional[str] = None
+    llamacpp_threads: Optional[int] = None
+    llamacpp_tensorcores: Optional[bool] = None
+    llamacpp_flash_attn: Optional[bool] = None
+    llamacpp_auto_start: Optional[bool] = None
+    llamacpp_fit_vram: Optional[bool] = None
+
+    @field_validator("llamacpp_ctx")
+    @classmethod
+    def validate_ctx(cls, v: int | None) -> int | None:
+        if v is None:
+            return None
+        if v < 512 or v > 262144:
+            raise ValueError("llamacpp_ctx must be between 512 and 262144")
+        return v
+
+    @field_validator("llamacpp_port")
+    @classmethod
+    def validate_port(cls, v: int | None) -> int | None:
+        if v is None:
+            return None
+        if v < 1 or v > 65535:
+            raise ValueError("llamacpp_port must be between 1 and 65535")
+        return v
+
+    @field_validator("llamacpp_threads")
+    @classmethod
+    def validate_threads(cls, v: int | None) -> int | None:
+        if v is None:
+            return None
+        if v < 1 or v > 128:
+            raise ValueError("llamacpp_threads must be between 1 and 128")
+        return v
+
+
+class TranslationPromptOption(BaseModel):
+    id: str
+    label: str
+
+
+class TranslationPromptPlaceholders(BaseModel):
+    note: str
+    slot: str
+
+
+class TranslationPromptSettingsResponse(BaseModel):
+    prompt_mode: str
+    prompt_variant: str
+    system_prompt_template: str
+    uses_custom_template: bool
+    global_note: str
+    builtin_templates: dict[str, str]
+    prompt_mode_options: list[TranslationPromptOption]
+    prompt_variant_options: list[TranslationPromptOption]
+    user_message_format: str
+    placeholders: TranslationPromptPlaceholders
+
+
+class TranslationPromptSettingsPatch(BaseModel):
+    prompt_mode: Optional[str] = None
+    prompt_variant: Optional[str] = None
+    system_prompt_template: Optional[str] = None
+    global_note: Optional[str] = None
+    reset_system_prompt: Optional[bool] = None
 
 
 class HarvestSettingsRequest(BaseModel):

@@ -25,7 +25,8 @@
       "Bash(Get-ChildItem -Path \"D:\\\\App\\\\JAVSTORY\\\\javstory\\\\persona\" -Recurse)",
       "Bash(Select-Object FullName)",
       "PowerShell(Get-ChildItem -Path \"D:\\\\App\\\\JAVSTORY\\\\gui\\\\models\" | Where-Object {$_.Name -match 'persona|card|insight'} | Select-Object FullName)",
-      "PowerShell(Get-ChildItem -Path \"D:\\\\App\\\\JAVSTORY\\\\gui\\\\qml\" -Recurse | Where-Object {$_.Name -match 'persona|card|insight'} | Select-Object FullName)"
+      "PowerShell(Get-ChildItem -Path \"D:\\\\App\\\\JAVSTORY\\\\gui\\\\qml\" -Recurse | Where-Object {$_.Name -match 'persona|card|insight'} | Select-Object FullName)",
+      "Bash(sort -t'[' -k2 -n)"
     ]
   }
 }

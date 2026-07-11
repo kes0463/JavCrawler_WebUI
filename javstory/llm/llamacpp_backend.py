@@ -25,13 +25,14 @@ from __future__ import annotations
 
 import atexit
 import os
+import re
 import socket
 import subprocess
 import sys
 import threading
 import time
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 from urllib.parse import urlparse
@@ -170,9 +171,10 @@ def _finalize_server_ready(
     preset: LlamaCppModelPreset,
     base: str,
     *,
+    runtime_id: str | None = None,
     logger_func: LoggerFunc | None = None,
 ) -> None:
-    _track_managed_server(preset.id, base)
+    _track_managed_server(runtime_id or preset.id, base)
     _ensure_idle_monitor_started(logger_func=logger_func)
 
 
@@ -331,6 +333,15 @@ LLAMACPP_MODEL_PRESETS: Dict[str, LlamaCppModelPreset] = {
         extra_args=("--flash-attn", "on"),
         serve_alias="qwen3-14b-uncensored",
     ),
+    "qwen2.5-14b": LlamaCppModelPreset(
+        id="qwen2.5-14b",
+        label="Qwen2.5-14B-Instruct",
+        gguf_env="JAVSTORY_LLAMACPP_QWEN25_14B_GGUF",
+        default_ctx=16384,
+        default_ngl=99,
+        extra_args=("--flash-attn", "on"),
+        serve_alias="qwen2.5-14b",
+    ),
 }
 
 
@@ -353,11 +364,57 @@ def _llamacpp_preset_id_from_translation_profile(profile: str) -> str | None:
         return "qwen3-14b"
     if prof in ("qwen3_14", "qwen3-14", "qwen14", "qwen_14"):
         return "qwen3-14b"
+    if prof in ("qwen25_14", "qwen2.5-14b", "qwen25-14b", "qwen2.5_14b"):
+        return "qwen2.5-14b"
     if prof in ("budget", "gemma", "gemma4", "gemma_4"):
         return "gemma-4-e4b"
     if prof.startswith("llamacpp:"):
         return _llamacpp_preset_id_from_colon_value(prof)
     return None
+
+
+GGUF_OPTION_PREFIX = "gguf:"
+GGUF_SCAN_DIR_ENV = "JAVSTORY_LLAMACPP_GGUF_SCAN_DIR"
+LLAMACPP_GGUF_PATH_ENV = "JAVSTORY_LLAMACPP_GGUF_PATH"
+DEFAULT_GGUF_SCAN_DIR = Path(r"D:\Models")
+
+
+def is_gguf_option_id(model_id: str) -> bool:
+    return (model_id or "").strip().lower().startswith(GGUF_OPTION_PREFIX)
+
+
+def gguf_option_id(path: Path | str) -> str:
+    return GGUF_OPTION_PREFIX + str(Path(path).expanduser().resolve())
+
+
+def parse_gguf_option_id(model_id: str) -> Path | None:
+    s = (model_id or "").strip()
+    if not s.lower().startswith(GGUF_OPTION_PREFIX):
+        return None
+    p = Path(s[len(GGUF_OPTION_PREFIX) :]).expanduser()
+    return p.resolve() if p.is_file() else None
+
+
+def resolve_translation_llamacpp_preset_id() -> str:
+    """번역 설정·실행용 프리셋. 교정 Pass2 / Harvest 모델과 분리."""
+    raw_model = (os.environ.get("JAVSTORY_LLAMACPP_MODEL", "") or "").strip()
+    if raw_model:
+        if is_gguf_option_id(raw_model):
+            return raw_model
+        raw_lower = raw_model.lower()
+        if raw_lower in LLAMACPP_MODEL_PRESETS:
+            return raw_lower
+        try:
+            return resolve_llamacpp_preset(raw_lower).id
+        except Exception:
+            pass
+
+    prof_raw = (os.environ.get("JAVSTORY_TRANSLATION_PROFILE", "") or "").strip()
+    pid = _llamacpp_preset_id_from_translation_profile(prof_raw)
+    if pid and pid in LLAMACPP_MODEL_PRESETS:
+        return pid
+
+    return resolve_llamacpp_preset(None).id
 
 
 def resolve_active_llamacpp_preset_id(
@@ -423,6 +480,8 @@ def resolve_llamacpp_preset(preset_id: str | None = None) -> LlamaCppModelPreset
                 pid = "qwen3-14b-uncensored"
         elif "gemma" in pid:
             pid = "gemma-4-e4b"
+        elif "qwen2.5" in pid or "qwen25" in pid:
+            pid = "qwen2.5-14b"
         elif "qwen" in pid:
             pid = "qwen3-14b"
         else:
@@ -445,6 +504,156 @@ def resolve_gguf_path(preset: LlamaCppModelPreset) -> Path:
     if not p.is_file():
         raise FileNotFoundError(f"GGUF 없음: {p}")
     return p.resolve()
+
+
+def gguf_scan_dir_from_env() -> Path:
+    raw = (os.environ.get(GGUF_SCAN_DIR_ENV, "") or "").strip()
+    return Path(raw or DEFAULT_GGUF_SCAN_DIR).expanduser()
+
+
+def discover_gguf_models(*, scan_dir: Path | None = None) -> List[Dict[str, str]]:
+    """``scan_dir`` 아래 ``*.gguf`` 파일을 재귀 검색."""
+    root = scan_dir or gguf_scan_dir_from_env()
+    if not root.is_dir():
+        return []
+    out: List[Dict[str, str]] = []
+    for p in sorted(root.rglob("*.gguf"), key=lambda x: x.name.lower()):
+        if p.is_file():
+            resolved = p.resolve()
+            out.append(
+                {
+                    "id": gguf_option_id(resolved),
+                    "label": p.name,
+                    "gguf_path": str(resolved),
+                    "gguf_env": "",
+                }
+            )
+    return out
+
+
+def list_translation_gguf_model_options() -> List[Dict[str, str]]:
+    options = discover_gguf_models()
+    current = (os.environ.get(LLAMACPP_GGUF_PATH_ENV, "") or "").strip()
+    if not current:
+        mid = (os.environ.get("JAVSTORY_LLAMACPP_MODEL", "") or "").strip()
+        if is_gguf_option_id(mid):
+            parsed = parse_gguf_option_id(mid)
+            if parsed:
+                current = str(parsed)
+    if current:
+        cp = Path(current).expanduser()
+        if cp.is_file():
+            cid = gguf_option_id(cp)
+            if not any(o["id"] == cid for o in options):
+                options.insert(
+                    0,
+                    {
+                        "id": cid,
+                        "label": f"{cp.name} (현재)",
+                        "gguf_path": str(cp.resolve()),
+                        "gguf_env": "",
+                    },
+                )
+    return options
+
+
+def _infer_preset_from_gguf_path(gguf: Path) -> LlamaCppModelPreset:
+    name = gguf.name.lower()
+    if "qwen2.5" in name or "qwen25" in name or "qwen-2.5" in name:
+        return LLAMACPP_MODEL_PRESETS["qwen2.5-14b"]
+    if "qwen3" in name or ("qwen" in name and "2.5" not in name and "25" not in name):
+        return LLAMACPP_MODEL_PRESETS["qwen3-14b"]
+    if "gemma" in name:
+        return LLAMACPP_MODEL_PRESETS["gemma-4-e4b"]
+    return LLAMACPP_MODEL_PRESETS["qwen2.5-14b"]
+
+
+def _serve_alias_from_gguf(gguf: Path) -> str:
+    alias = re.sub(r"[^\w\-.]", "_", gguf.stem, flags=re.ASCII)
+    return alias[:64] or "gguf-model"
+
+
+def resolve_preset_for_translation(model_id: str | None = None) -> LlamaCppModelPreset:
+    mid = (model_id or resolve_translation_llamacpp_preset_id() or "").strip()
+    if is_gguf_option_id(mid):
+        gguf = parse_gguf_option_id(mid)
+        if gguf:
+            return _infer_preset_from_gguf_path(gguf)
+    return resolve_llamacpp_preset(mid)
+
+
+def resolve_translation_gguf_path(model_cfg: Dict[str, Any] | None = None) -> Path:
+    direct = (os.environ.get(LLAMACPP_GGUF_PATH_ENV, "") or "").strip()
+    if direct:
+        p = Path(direct).expanduser()
+        if p.is_file():
+            return p.resolve()
+
+    model_raw = ""
+    if isinstance(model_cfg, dict):
+        model_raw = str(
+            model_cfg.get("llamacpp_preset") or model_cfg.get("model") or ""
+        ).strip()
+    if not model_raw:
+        model_raw = (os.environ.get("JAVSTORY_LLAMACPP_MODEL", "") or "").strip()
+
+    if is_gguf_option_id(model_raw):
+        parsed = parse_gguf_option_id(model_raw)
+        if parsed:
+            return parsed
+
+    preset_id = resolve_translation_llamacpp_preset_id()
+    if is_gguf_option_id(preset_id):
+        parsed = parse_gguf_option_id(preset_id)
+        if parsed:
+            return parsed
+
+    preset = resolve_llamacpp_preset(preset_id)
+    return resolve_gguf_path(preset)
+
+
+@dataclass(frozen=True)
+class TranslationLlamaCppRuntime:
+    gguf: Path
+    preset: LlamaCppModelPreset
+    serve_alias: str
+    runtime_id: str
+    label: str
+
+
+def resolve_translation_llamacpp_runtime(
+    model_cfg: Dict[str, Any] | None = None,
+) -> TranslationLlamaCppRuntime:
+    mid = ""
+    if isinstance(model_cfg, dict):
+        mid = str(
+            model_cfg.get("llamacpp_preset") or model_cfg.get("model") or ""
+        ).strip()
+    if not mid:
+        mid = resolve_translation_llamacpp_preset_id()
+
+    if not is_gguf_option_id(mid):
+        preset = resolve_llamacpp_preset(mid)
+        gguf = resolve_gguf_path(preset)
+        return TranslationLlamaCppRuntime(
+            gguf=gguf,
+            preset=preset,
+            serve_alias=preset.serve_alias or preset.id,
+            runtime_id=preset.id,
+            label=preset.label,
+        )
+
+    gguf = resolve_translation_gguf_path(model_cfg)
+    base_preset = _infer_preset_from_gguf_path(gguf)
+    alias = _serve_alias_from_gguf(gguf)
+    preset = replace(base_preset, serve_alias=alias, label=gguf.name)
+    return TranslationLlamaCppRuntime(
+        gguf=gguf,
+        preset=preset,
+        serve_alias=alias,
+        runtime_id=gguf_option_id(gguf),
+        label=gguf.name,
+    )
 
 
 @dataclass
@@ -558,7 +767,32 @@ def build_server_argv(
         argv.extend(["-fit", "on"])
     if preset.serve_alias:
         argv.extend(["--alias", preset.serve_alias])
-    argv.extend(list(preset.extra_args))
+    threads_raw = (os.environ.get("JAVSTORY_LLAMACPP_THREADS", "") or "").strip()
+    if threads_raw:
+        try:
+            argv.extend(["-t", str(max(1, int(threads_raw)))])
+        except ValueError:
+            pass
+    tc_raw = (os.environ.get("JAVSTORY_LLAMACPP_TENSORCORES", "") or "").strip().lower()
+    if tc_raw in ("1", "true", "yes", "on"):
+        argv.extend(["--tensorcores", "on"])
+    flash_on = _env_bool("JAVSTORY_LLAMACPP_FLASH_ATTN", True)
+    extra = list(preset.extra_args)
+    if not flash_on:
+        filtered: List[str] = []
+        skip_next = False
+        for a in extra:
+            if skip_next:
+                skip_next = False
+                continue
+            if a in ("--flash-attn", "-fa"):
+                skip_next = True
+                continue
+            filtered.append(a)
+        extra = filtered
+    elif not any("flash" in str(a).lower() or a in ("-fa",) for a in extra):
+        extra.extend(["--flash-attn", "on"])
+    argv.extend(extra)
     argv.extend(cfg.extra_cli)
     return argv
 
@@ -698,11 +932,17 @@ def _server_model_ids(base_url: str, timeout: float = 2.0) -> List[str]:
     return ids
 
 
-def _server_models_match_preset(model_ids: List[str], preset: LlamaCppModelPreset) -> bool:
+def _server_models_match_preset(
+    model_ids: List[str],
+    preset: LlamaCppModelPreset,
+    *,
+    serve_alias: str | None = None,
+) -> bool:
     if not model_ids:
         return True
     joined = " ".join(model_ids).lower()
-    if (preset.serve_alias or preset.id).lower() in joined or preset.id.lower() in joined:
+    alias = (serve_alias or preset.serve_alias or preset.id).lower()
+    if alias in joined or preset.id.lower() in joined:
         return True
     if preset.id.startswith("qwen") and "qwen" in joined:
         return True
@@ -930,22 +1170,21 @@ def _ensure_llamacpp_server_ready_locked(
                 f"llama-server가 응답하지 않습니다 ({base}). "
                 "JAVSTORY_LLAMACPP_AUTO_START=1 이거나 수동으로 서버를 띄우세요."
             )
-        preset = resolve_llamacpp_preset(
-            (model_cfg or {}).get("llamacpp_preset") or (model_cfg or {}).get("model")
-        )
+        runtime = resolve_translation_llamacpp_runtime(model_cfg)
+        preset = runtime.preset
         model_ids = _server_model_ids(base)
-        if not _server_models_match_preset(model_ids, preset):
+        if not _server_models_match_preset(
+            model_ids, preset, serve_alias=runtime.serve_alias
+        ):
             raise RuntimeError(
-                f"실행 중인 llama-server 모델({', '.join(model_ids)})이 선택한 모델({preset.label})과 다릅니다. "
+                f"실행 중인 llama-server 모델({', '.join(model_ids)})이 선택한 모델({runtime.label})과 다릅니다. "
                 "기존 llama-server를 종료하거나 활성 모델을 맞춘 뒤 다시 시도하세요."
             )
-        return preset.serve_alias or preset.id
+        return runtime.serve_alias
 
-    preset_id = None
-    if isinstance(model_cfg, dict):
-        preset_id = model_cfg.get("llamacpp_preset") or model_cfg.get("model")
-    preset = resolve_llamacpp_preset(str(preset_id) if preset_id else None)
-    gguf = resolve_gguf_path(preset)
+    runtime = resolve_translation_llamacpp_runtime(model_cfg)
+    preset = runtime.preset
+    gguf = runtime.gguf
     cfg = LlamaCppServerConfig.from_env(preset)
     base = llamacpp_base_url()
 
@@ -960,7 +1199,7 @@ def _ensure_llamacpp_server_ready_locked(
             _active_preset_id = None
 
         # Only check process state inside the lock — health check (HTTP) must be outside.
-        if _server_proc is not None and _active_preset_id == preset.id:
+        if _server_proc is not None and _active_preset_id == runtime.runtime_id:
             check_proc = _server_proc
         elif _server_proc is not None:
             proc_to_stop = _server_proc
@@ -972,8 +1211,8 @@ def _ensure_llamacpp_server_ready_locked(
     if check_proc is not None:
         check_proc_health_ok = _server_health_ok(base)
         if check_proc_health_ok:
-            _finalize_server_ready(preset, base, logger_func=log)
-            return preset.serve_alias or preset.id
+            _finalize_server_ready(preset, base, runtime_id=runtime.runtime_id, logger_func=log)
+            return runtime.serve_alias
         # Process alive but health check failed — treat as crashed and respawn.
         with _lock:
             if _server_proc is check_proc:
@@ -987,16 +1226,18 @@ def _ensure_llamacpp_server_ready_locked(
     initial_health_ok = _server_health_ok(base)
     if initial_health_ok:
         model_ids = _server_model_ids(base)
-        if not _server_models_match_preset(model_ids, preset):
+        if not _server_models_match_preset(
+            model_ids, preset, serve_alias=runtime.serve_alias
+        ):
             running = ", ".join(model_ids) if model_ids else "unknown"
             raise RuntimeError(
                 f"{base}에 이미 다른 llama-server 모델이 실행 중입니다: {running}. "
-                f"선택한 모델은 {preset.label}입니다. 기존 llama-server를 종료한 뒤 다시 시작하세요."
+                f"선택한 모델은 {runtime.label}입니다. 기존 llama-server를 종료한 뒤 다시 시작하세요."
             )
         touch_llamacpp_activity()
         log(f"[llama.cpp] 기존 llama-server 재사용 — {base}/v1")
-        _finalize_server_ready(preset, base, logger_func=log)
-        return preset.serve_alias or preset.id
+        _finalize_server_ready(preset, base, runtime_id=runtime.runtime_id, logger_func=log)
+        return runtime.serve_alias
 
     if sys.platform == "win32":
         bind_probe = _port_bind_probe(cfg.host, cfg.port)
@@ -1046,7 +1287,7 @@ def _ensure_llamacpp_server_ready_locked(
     with _lock:
         # Register immediately so app shutdown can stop the server even while it is still loading.
         _server_proc = proc
-        _active_preset_id = preset.id
+        _active_preset_id = runtime.runtime_id
         _last_activity_at = time.time()
     deadline = time.time() + max(5.0, wait_sec)
     while time.time() < deadline:
@@ -1064,10 +1305,12 @@ def _ensure_llamacpp_server_ready_locked(
                 post_conflict_health_ok = _server_health_ok(base, timeout=5.0)
                 if post_conflict_health_ok:
                     model_ids = _server_model_ids(base)
-                    if _server_models_match_preset(model_ids, preset):
-                        _finalize_server_ready(preset, base, logger_func=log)
+                    if _server_models_match_preset(
+                        model_ids, preset, serve_alias=runtime.serve_alias
+                    ):
+                        _finalize_server_ready(preset, base, runtime_id=runtime.runtime_id, logger_func=log)
                         log(f"[llama.cpp] 포트 충돌 감지 → 기존 서버 재사용 — {base}/v1")
-                        return preset.serve_alias or preset.id
+                        return runtime.serve_alias
                 # 2) Not healthy: kill port owner (Windows: llama-server only) then retry
                 if sys.platform == "win32":
                     _kill_port_owner_windows(cfg.port, logger_func=log)
@@ -1076,16 +1319,16 @@ def _ensure_llamacpp_server_ready_locked(
                     proc2 = _spawn_server(argv, logger_func=log)
                     with _lock:
                         _server_proc = proc2
-                        _active_preset_id = preset.id
+                        _active_preset_id = runtime.runtime_id
                         _last_activity_at = time.time()
                     retry_dl = time.time() + max(5.0, wait_sec)
                     while time.time() < retry_dl:
                         if proc2.poll() is not None:
                             break
                         if _server_health_ok(base, timeout=2.0):
-                            _finalize_server_ready(preset, base, logger_func=log)
-                            log(f"[llama.cpp] 재시작 성공 — {preset.label} @ {base}/v1")
-                            return preset.serve_alias or preset.id
+                            _finalize_server_ready(preset, base, runtime_id=runtime.runtime_id, logger_func=log)
+                            log(f"[llama.cpp] 재시작 성공 — {runtime.label} @ {base}/v1")
+                            return runtime.serve_alias
                         time.sleep(0.5)
             hint = _server_exit_hint(tail)
             msg = f"llama-server가 조기 종료되었습니다 (code={proc.returncode}). 로그: {_log_path}"
@@ -1097,9 +1340,9 @@ def _ensure_llamacpp_server_ready_locked(
         if _server_health_ok(base, timeout=2.0):
             with _lock:
                 _server_proc = proc
-            _finalize_server_ready(preset, base, logger_func=log)
-            log(f"[llama.cpp] 준비 완료 — {preset.label} @ {base}/v1")
-            return preset.serve_alias or preset.id
+            _finalize_server_ready(preset, base, runtime_id=runtime.runtime_id, logger_func=log)
+            log(f"[llama.cpp] 준비 완료 — {runtime.label} @ {base}/v1")
+            return runtime.serve_alias
         time.sleep(0.5)
 
     stop_llamacpp_server(logger_func=log)
@@ -1125,13 +1368,20 @@ async def llamacpp_ensure_model(
 
 def tier_from_llamacpp_env() -> Dict[str, Any]:
     """``translation_llm_tier`` / harvest용 tier dict."""
-    preset = resolve_llamacpp_preset(resolve_active_llamacpp_preset_id())
+    mid = resolve_translation_llamacpp_preset_id()
+    preset = resolve_preset_for_translation(mid)
     max_tokens = llamacpp_max_tokens_from_env(correction=False)
+    model = preset.serve_alias or preset.id
+    try:
+        runtime = resolve_translation_llamacpp_runtime()
+        model = runtime.serve_alias
+    except FileNotFoundError:
+        pass
     return {
         "rank": 99,
         "name": "translation_llamacpp_local",
-        "model": preset.serve_alias or preset.id,
-        "llamacpp_preset": preset.id,
+        "model": model,
+        "llamacpp_preset": mid,
         "provider": "llamacpp",
         "cost_tier": "free",
         "uncensored": True,

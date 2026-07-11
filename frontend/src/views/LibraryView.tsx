@@ -11,6 +11,8 @@ import { LibraryDetailPanel } from "@/components/library/LibraryDetailPanel";
 import { useToast } from "@/contexts/ToastContext";
 import { usePlayer } from "@/contexts/PlayerContext";
 import { useNavigation } from "@/contexts/NavigationContext";
+import { useLibraryProcessingActions } from "@/hooks/useLibraryProcessingActions";
+import type { ProcessingKind } from "@/api/processing";
 import { getScrollableAncestor, useInfiniteScrollNearEnd } from "@/hooks/useGlobalDragScroll";
 import {
   isLibrarySessionFresh,
@@ -82,7 +84,8 @@ export default function LibraryView() {
   const boot = useRef(bootFromSession()).current;
   const { showToast } = useToast();
   const { openPlayer } = usePlayer();
-  const { libraryDetailSku, closeLibraryDetail, openActressByName, currentView } = useNavigation();
+  const { libraryDetailSku, openLibraryDetail, closeLibraryDetail, openActressByName, currentView } = useNavigation();
+  const { enqueueLibraryProducts } = useLibraryProcessingActions();
 
   const [query, setQuery] = useState<LibraryQuery>(boot.query);
   const [items, setItems] = useState<LibraryItem[]>(boot.items);
@@ -91,8 +94,6 @@ export default function LibraryView() {
   const [loading, setLoading] = useState(!boot.items.length);
   const [statsLoading, setStatsLoading] = useState(!loadStatsSession());
   const [statsRefreshing, setStatsRefreshing] = useState(false);
-  const [selectedCode, setSelectedCode] = useState<string | null>(null);
-
   const searchTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const appendRef = useRef(false);
   const apiWarnedRef = useRef(false);
@@ -169,23 +170,11 @@ export default function LibraryView() {
     return () => { cancelled = true; };
   }, [currentView, showToast]);
 
-  useEffect(() => {
-    if (libraryDetailSku) setSelectedCode(libraryDetailSku);
-  }, [libraryDetailSku]);
-
-  useEffect(() => {
-    if (currentView !== "library") {
-      setSelectedCode(null);
-    }
-  }, [currentView]);
-
   const handleCloseDetail = useCallback(() => {
-    setSelectedCode(null);
     closeLibraryDetail();
   }, [closeLibraryDetail]);
 
   const handleActorClick = useCallback(async (name: string) => {
-    setSelectedCode(null);
     closeLibraryDetail();
     try {
       await openActressByName(name);
@@ -362,6 +351,10 @@ export default function LibraryView() {
   const handlePlay = useCallback((productCode: string) => {
     void openPlayer(productCode);
   }, [openPlayer]);
+
+  const handleAddToProcessing = useCallback((productCode: string, kind: ProcessingKind) => {
+    void enqueueLibraryProducts([productCode], kind);
+  }, [enqueueLibraryProducts]);
 
   const handleDetailSaved = useCallback((updated: LibraryItem) => {
     const pc = updated.product_code.toUpperCase();
@@ -613,9 +606,10 @@ export default function LibraryView() {
             hasHardcodedSubtitle={!!item.has_hardcoded_subtitle}
             hasMosaicRemoved={!!item.has_mosaic_removed}
             delay={delay}
-            onClick={() => setSelectedCode(item.product_code)}
+            onClick={() => openLibraryDetail(item.product_code)}
             onPlay={item.folder_path ? () => handlePlay(item.product_code) : undefined}
             onOpenFolder={() => handleOpenFolder(item.product_code)}
+            onAddToProcessing={kind => handleAddToProcessing(item.product_code, kind)}
             onActorClick={handleActorClick}
           />
           );
@@ -642,11 +636,11 @@ export default function LibraryView() {
         </p>
       )}
 
-      {selectedCode && (
+      {currentView === "library" && libraryDetailSku && (
         <LibraryDetailPanel
-          code={selectedCode}
+          code={libraryDetailSku}
           onClose={handleCloseDetail}
-          onPlay={() => handlePlay(selectedCode)}
+          onPlay={() => handlePlay(libraryDetailSku)}
           onSaved={handleDetailSaved}
           onActorClick={handleActorClick}
         />

@@ -1,5 +1,5 @@
-import { useEffect, useRef } from "react";
 import { cn } from "@/lib/utils";
+import { useStickToBottomScroll } from "@/hooks/useStickToBottomScroll";
 
 export interface LogEntry {
   id: string | number;
@@ -24,14 +24,12 @@ const LEVEL_CONFIG: Record<string, { color: string; prefix: string }> = {
 };
 
 export function LogPanel({ entries, autoScroll = true, maxHeight = "240px", className }: LogPanelProps) {
-  const bottomRef = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    if (autoScroll) bottomRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [entries.length, autoScroll]);
+  const { containerRef, onScroll } = useStickToBottomScroll(entries, autoScroll);
 
   return (
     <div
+      ref={containerRef}
+      onScroll={onScroll}
       className={cn(
         "rounded-xl border border-white/[0.06] bg-bg-base overflow-y-auto no-scrollbar font-mono text-sm",
         className,
@@ -54,7 +52,6 @@ export function LogPanel({ entries, autoScroll = true, maxHeight = "240px", clas
               </div>
             );
           })}
-          <div ref={bottomRef} />
         </div>
       )}
     </div>

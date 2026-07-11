@@ -70,6 +70,39 @@ def test_fetch_recommend_keys(svc: InsightService, monkeypatch: pytest.MonkeyPat
     assert cached is data or cached == data
 
 
+def test_fetch_overview_cache(svc: InsightService, monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = {"n": 0}
+
+    def _fake(*_a, **_k):
+        calls["n"] += 1
+        return {
+            "stats": {"total": calls["n"]},
+            "top_actors": [],
+            "top_genres": [],
+            "top_makers": [],
+            "recent_trend": {},
+            "weekly_digest": {},
+            "pipeline": {},
+            "monthly_genre_trend": [],
+            "monthly_additions": [],
+            "distribution": {},
+        }
+
+    monkeypatch.setattr(
+        "javstory.services.insight_service.InsightService._fetch_core",
+        _fake,
+    )
+    first = svc.fetch_overview()
+    second = svc.fetch_overview()
+    assert calls["n"] == 1
+    assert first["stats"]["total"] == second["stats"]["total"] == 1
+    svc.fetch_overview(force_refresh=True)
+    assert calls["n"] == 2
+    svc.invalidate_recommend_cache()
+    svc.fetch_overview()
+    assert calls["n"] == 3
+
+
 def test_fetch_recommend_force_refresh(svc: InsightService, monkeypatch: pytest.MonkeyPatch) -> None:
     calls = {"n": 0}
 

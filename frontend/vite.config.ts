@@ -8,7 +8,9 @@ export default defineConfig({
     alias: { "@": path.resolve(__dirname, "./src") },
   },
   server: {
-    port: Number(process.env.JAVSTORY_VITE_PORT || 5173),
+    // Prefer 127.0.0.1: Windows Hyper-V/WSL often reserves 5117-5216 (blocks Vite's 5173).
+    host: "127.0.0.1",
+    port: Number(process.env.JAVSTORY_VITE_PORT || 4173),
     strictPort: true,
     proxy: {
       "/api": {

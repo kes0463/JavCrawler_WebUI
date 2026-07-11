@@ -1,7 +1,9 @@
-import { memo, useEffect, useState } from "react";
-import { FolderOpen, Heart, Play } from "lucide-react";
+import { memo, useEffect, useState, useCallback } from "react";
+import { FolderOpen, Heart, MoreVertical, Play } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { PosterHoverPreview } from "@/components/library/PosterHoverPreview";
+import { PosterCardContextMenu } from "@/components/library/PosterCardContextMenu";
+import type { ProcessingKind } from "@/api/processing";
 
 interface PosterCardProps {
   productCode: string;
@@ -24,6 +26,7 @@ interface PosterCardProps {
   onOpenFolder?: () => void;
   onPlay?: () => void;
   onActorClick?: (name: string) => void;
+  onAddToProcessing?: (kind: ProcessingKind) => void;
 }
 
 function parseActorNames(actors: string): string[] {
@@ -51,8 +54,22 @@ export const PosterCard = memo(function PosterCard({
   onOpenFolder,
   onPlay,
   onActorClick,
+  onAddToProcessing,
 }: PosterCardProps) {
   const [imgError, setImgError] = useState(false);
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [menuPos, setMenuPos] = useState({ x: 0, y: 0 });
+
+  const openMenuAt = useCallback((clientX: number, clientY: number) => {
+    setMenuPos({ x: clientX, y: clientY });
+    setMenuOpen(true);
+  }, []);
+
+  const handleContextMenu = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    openMenuAt(e.clientX, e.clientY);
+  }, [openMenuAt]);
   const showImage = coverSrc && !imgError;
 
   useEffect(() => {
@@ -75,6 +92,7 @@ export const PosterCard = memo(function PosterCard({
           onClick?.();
         }
       }}
+      onContextMenu={handleContextMenu}
       style={delay > 0 ? { animationDelay: `${delay}ms` } : undefined}
       className={cn(
         "group flex flex-col rounded-xl border border-white/[0.08] overflow-hidden cursor-pointer",
@@ -126,6 +144,26 @@ export const PosterCard = memo(function PosterCard({
           </div>
         )}
 
+        {onAddToProcessing && (
+          <button
+            type="button"
+            title="메뉴"
+            onClick={e => {
+              e.stopPropagation();
+              const rect = (e.currentTarget as HTMLButtonElement).getBoundingClientRect();
+              openMenuAt(rect.right, rect.bottom + 4);
+            }}
+            className={cn(
+              "absolute w-8 h-8 rounded-full flex items-center justify-center shadow-lg transition-all",
+              "bg-black/50 hover:bg-black/70 text-white/90 hover:text-white",
+              "opacity-0 group-hover:opacity-100",
+              sceneCount > 0 ? "top-12 left-2.5" : "top-2.5 left-2.5",
+            )}
+          >
+            <MoreVertical className="w-4 h-4" />
+          </button>
+        )}
+
         {sceneCount > 0 && (
           <div className="absolute top-2.5 left-2.5 px-2.5 py-1 rounded-lg bg-violet-500/90 text-white text-base font-bold shadow-lg">
             씬 {sceneCount}
@@ -159,6 +197,22 @@ export const PosterCard = memo(function PosterCard({
           </div>
         )}
       </div>
+
+      {onAddToProcessing && (
+        <PosterCardContextMenu
+          open={menuOpen}
+          x={menuPos.x}
+          y={menuPos.y}
+          productCode={productCode}
+          hasFolder={!!hasFolder}
+          onClose={() => setMenuOpen(false)}
+          onAddStt={() => onAddToProcessing("stt")}
+          onAddSubtitle={() => onAddToProcessing("subtitle")}
+          onPlay={onPlay}
+          onOpenFolder={onOpenFolder}
+          onOpenDetail={() => onClick?.()}
+        />
+      )}
 
       {/* 품번 · 메타 */}
       <div className="px-3.5 pt-2 pb-2.5 border-t border-white/[0.06] bg-bg-panel/80">

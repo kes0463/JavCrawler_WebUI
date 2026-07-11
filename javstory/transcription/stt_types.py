@@ -8,6 +8,8 @@ STTStage = str
 
 STT_PRESET_DEFAULT = "stable_ts"
 
+# JAVSTORY_STT_ENGINE values — see javstory.transcription.stt_config
+
 
 @dataclass
 class STTProgressEvent:

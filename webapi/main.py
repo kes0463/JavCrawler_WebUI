@@ -22,8 +22,9 @@ import asyncio
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from webapi.routes import actress, dashboard, folder_watch, harvest, insight, library, playback
+from webapi.routes import actress, dashboard, folder_watch, harvest, insight, library, playback, processing, settings
 from webapi.routes.harvest import bind_harvest_broadcast
+from webapi.routes.processing import bind_processing_broadcast
 
 
 @asynccontextmanager
@@ -40,6 +41,7 @@ async def lifespan(app: FastAPI):
 
     _run_idempotent_column_migrations()
     bind_harvest_broadcast(asyncio.get_running_loop())
+    bind_processing_broadcast(asyncio.get_running_loop())
 
     def _preview_stale_backfill() -> None:
         if (os.environ.get("JAVSTORY_PREVIEW_BACKFILL_ON_START", "1") or "").strip().lower() in {
@@ -82,10 +84,10 @@ _CORS_ORIGINS: list[str] = (
     [o.strip() for o in _cors_env.split(",") if o.strip()]
     if _cors_env
     else [
-        "http://localhost:5173",
-        "http://127.0.0.1:5173",
         "http://localhost:4173",
         "http://127.0.0.1:4173",
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
     ]
 )
 
@@ -105,6 +107,8 @@ app.include_router(harvest.router, prefix="/api/harvest", tags=["harvest"])
 app.include_router(dashboard.router, prefix="/api/dashboard", tags=["dashboard"])
 app.include_router(folder_watch.router, prefix="/api/folder-watch", tags=["folder-watch"])
 app.include_router(insight.router, prefix="/api/insight", tags=["insight"])
+app.include_router(processing.router, prefix="/api/processing", tags=["processing"])
+app.include_router(settings.router, prefix="/api/settings", tags=["settings"])
 
 
 @app.get("/health")

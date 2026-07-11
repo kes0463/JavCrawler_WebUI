@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { Eye, EyeOff } from "lucide-react";
+import { cn } from "@/lib/utils";
 import { GlassCard } from "@/components/ui/GlassCard";
 
 export function SettingsSection({
@@ -24,14 +25,33 @@ export function SettingsSection({
   );
 }
 
-export function SettingsRow({ label, hint, children }: { label: string; hint?: string; children: React.ReactNode }) {
+export function SettingsRow({
+  label,
+  hint,
+  children,
+  control = "default",
+}: {
+  label: string;
+  hint?: string;
+  children: React.ReactNode;
+  /** switch: 토글 등 컴팩트 컨트롤 — 오른쪽 정렬 */
+  control?: "default" | "switch";
+}) {
+  const isSwitch = control === "switch";
   return (
-    <div className="flex items-start justify-between gap-4">
-      <div className="shrink-0 pt-1">
+    <div
+      className={cn(
+        "flex justify-between gap-4",
+        isSwitch ? "items-center" : "items-start",
+      )}
+    >
+      <div className={cn("min-w-0 flex-1", !isSwitch && "pt-1")}>
         <p className="text-base text-[#c8c8e0]">{label}</p>
         {hint && <p className="text-sm text-muted-foreground mt-0.5">{hint}</p>}
       </div>
-      <div className="flex-1 max-w-xs">{children}</div>
+      <div className={cn(isSwitch ? "shrink-0" : "flex-1 max-w-xs w-full")}>
+        {children}
+      </div>
     </div>
   );
 }
@@ -49,6 +69,29 @@ export function TextInput({ value, onChange, placeholder, type = "text" }: {
       onChange={e => onChange(e.target.value)}
       placeholder={placeholder}
       className="w-full h-10 px-3 text-base rounded-xl bg-bg-base border border-white/[0.08] text-white placeholder:text-muted-foreground focus:outline-none focus:border-accent/50 focus:ring-1 focus:ring-accent/30 transition-all"
+    />
+  );
+}
+
+export function TextArea({ value, onChange, placeholder, rows = 6, className }: {
+  value: string;
+  onChange: (v: string) => void;
+  placeholder?: string;
+  rows?: number;
+  className?: string;
+}) {
+  return (
+    <textarea
+      value={value}
+      onChange={e => onChange(e.target.value)}
+      placeholder={placeholder}
+      rows={rows}
+      className={cn(
+        "w-full px-3 py-2 text-sm rounded-xl bg-bg-base border border-white/[0.08]",
+        "text-white placeholder:text-muted-foreground font-mono leading-relaxed",
+        "focus:outline-none focus:border-accent/50 focus:ring-1 focus:ring-accent/30 transition-all resize-y",
+        className,
+      )}
     />
   );
 }
@@ -85,16 +128,41 @@ export function SelectInput({ value, onChange, options }: {
   );
 }
 
-export function Toggle({ checked, onChange }: { checked: boolean; onChange: (v: boolean) => void }) {
+export function Toggle({
+  checked,
+  onChange,
+  disabled = false,
+  className,
+}: {
+  checked: boolean;
+  onChange: (v: boolean) => void;
+  disabled?: boolean;
+  className?: string;
+}) {
   return (
     <button
       type="button"
       role="switch"
       aria-checked={checked}
+      disabled={disabled}
       onClick={() => onChange(!checked)}
-      className={`relative w-10 h-5 rounded-full transition-colors duration-200 ${checked ? "bg-accent" : "bg-white/[0.12]"}`}
+      className={cn(
+        "relative inline-flex shrink-0 rounded-full transition-colors duration-200",
+        "w-11 h-6",
+        "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50 focus-visible:ring-offset-2 focus-visible:ring-offset-bg-panel",
+        checked ? "bg-accent" : "bg-white/[0.14]",
+        disabled && "opacity-45 cursor-not-allowed",
+        className,
+      )}
     >
-      <span className={`absolute top-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform duration-200 ${checked ? "translate-x-5" : "translate-x-0.5"}`} />
+      <span
+        aria-hidden
+        className={cn(
+          "absolute top-0.5 left-0.5 h-5 w-5 rounded-full bg-white shadow-sm",
+          "transition-[left] duration-200 ease-out",
+          checked ? "left-[1.375rem]" : "left-0.5",
+        )}
+      />
     </button>
   );
 }

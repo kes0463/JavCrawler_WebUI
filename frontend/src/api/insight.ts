@@ -1,5 +1,8 @@
 import { get, post } from "./client";
 
+/** 집계·추천 재계산은 라이브러리 규모에 따라 30초 이상 걸릴 수 있음 */
+const INSIGHT_TIMEOUT_MS = 120_000;
+
 export interface InsightStats {
   total: number;
   completed: number;
@@ -121,16 +124,16 @@ export interface InsightCollection {
 }
 
 export const fetchInsightOverview = (force = false): Promise<InsightOverview> =>
-  get(`/api/insight/overview${force ? "?force=true" : ""}`);
+  get(`/api/insight/overview${force ? "?force=true" : ""}`, INSIGHT_TIMEOUT_MS);
 
 export const fetchInsightTrends = (): Promise<InsightTrends> =>
-  get("/api/insight/trends");
+  get("/api/insight/trends", INSIGHT_TIMEOUT_MS);
 
 export const fetchInsightRecommend = (force = false): Promise<InsightRecommend> =>
-  get(`/api/insight/recommend${force ? "?force=true" : ""}`);
+  get(`/api/insight/recommend${force ? "?force=true" : ""}`, INSIGHT_TIMEOUT_MS);
 
 export const fetchInsightCollection = (force = false): Promise<InsightCollection> =>
-  get(`/api/insight/collection${force ? "?force=true" : ""}`);
+  get(`/api/insight/collection${force ? "?force=true" : ""}`, INSIGHT_TIMEOUT_MS);
 
 export const refreshInsight = (): Promise<InsightOverview> =>
-  post("/api/insight/refresh");
+  post("/api/insight/refresh", undefined, INSIGHT_TIMEOUT_MS);

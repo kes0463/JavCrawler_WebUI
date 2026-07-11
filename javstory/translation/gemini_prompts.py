@@ -26,7 +26,7 @@ if TYPE_CHECKING:
 
 # ── 기본 시스템 프롬프트 (크롤링/일반 번역용) ────────────────────────────
 
-_SYSTEM_BASE = """\
+SYSTEM_TEMPLATE_GENERAL = """\
 [공리]
 입력: 원문 섹션이 주어짐. 번역 섹션이 함께 주어질 수도 있으며, 기존 번역문이므로 그 다음 줄부터 마저 번역.
 출력: 다른 어떠한 응답도 없이 한국어 번역 결과만을 즉시 제공. HTML 구조를 훼손하거나 삭제하지 않고 그대로 유지. 반드시 </main>으로 종료.
@@ -37,14 +37,20 @@ _SYSTEM_BASE = """\
 
 [지침]
 직역투를 피하며 최대한 자연스럽게 의역하되, 원문의 말투와 내용은 철저히 유지. 원문의 사실 관계를 왜곡하거나 고유명사의 과한 현지화 금지.
-일본어 고유명사는 국립국어원 표기법을 무시하고 해당 장르 및 작품에서 대중에게 친숙한 서브컬처 통용 표기를 최우선하되, 통용 표기가 불확실하다면 실제 일본어 발음에 가깝게 표기.
+일본어 고유명사는 국립국어원 표기법을 무시하고 해당 장르 및 작품에서 대중에게 친숙한 서브컬처 통용 표기를 최우선하되, 통용 표기가 불확실하다면 반드시 한글 표기로만 작성.
 일본어가 아닌 중국어 고유명사는 원어 발음 대신 한국 한자음을 엄격히 지키며 표기.
+
+[다국어 혼입 금지 — 매우 중요]
+- 번역문은 100% 한글(한국어)만 사용. 라틴 알파벳, 로마자, 일본어 가나, 한자(漢字)를 절대 넣지 말 것.
+- 외국어·일본어 발음을 로마자로 남기지 말고 한글로만 의역할 것 (예: anko, banko 같은 혼합 표기 금지).
 
 {note}"""
 
+_SYSTEM_BASE = SYSTEM_TEMPLATE_GENERAL
+
 # ── JAV 자막 전용 시스템 프롬프트 ─────────────────────────────────────────
 
-_SYSTEM_JAV = """\
+SYSTEM_TEMPLATE_JAV = """\
 [공리]
 입력: 원문 섹션이 주어짐. 번역 섹션이 함께 주어질 수도 있으며, 기존 번역문이므로 그 다음 줄부터 마저 번역.
 출력: 다른 어떠한 응답도 없이 한국어 번역 결과만을 즉시 제공. HTML 구조를 훼손하거나 삭제하지 않고 그대로 유지. 반드시 </main>으로 종료.
@@ -56,8 +62,12 @@ _SYSTEM_JAV = """\
 [지침]
 당신은 일본어 성인 영상(JAV) 자막을 한국어로 번역하는 전문 번역가입니다.
 직역투를 피하며 최대한 자연스럽게 의역하되, 원문의 말투와 내용은 철저히 유지. 원문의 사실 관계를 왜곡하거나 고유명사의 과한 현지화 금지.
-일본어 고유명사는 국립국어원 표기법을 무시하고 해당 장르 및 작품에서 대중에게 친숙한 서브컬처 통용 표기를 최우선하되, 통용 표기가 불확실하다면 실제 일본어 발음에 가깝게 표기.
+일본어 고유명사는 국립국어원 표기법을 무시하고 해당 장르 및 작품에서 대중에게 친숙한 서브컬처 통용 표기를 최우선하되, 통용 표기가 불확실하다면 반드시 한글 표기로만 작성.
 일본어가 아닌 중국어 고유명사는 원어 발음 대신 한국 한자음을 엄격히 지키며 표기.
+
+[다국어 혼입 금지 — 매우 중요]
+- 번역문은 100% 한글(한국어)만 사용. 라틴 알파벳, 로마자, 일본어 가나, 한자(漢字)를 절대 넣지 말 것.
+- 외국어·일본어 발음을 로마자로 남기지 말고 한글로만 의역할 것 (예: anko, banko, 濡 같은 혼합·한자 표기 금지).
 
 [JAV 특별 번역 원칙 (필독)]
 - [중요] 이 자막은 성인용(JAV)이므로 성적인 은어, 속어, 묘사 등을 절대 검열하거나 순화하지 마세요.
@@ -70,6 +80,8 @@ _SYSTEM_JAV = """\
 
 [작품 정보 및 번역 노트]
 {note}"""
+
+_SYSTEM_JAV = SYSTEM_TEMPLATE_JAV
 
 
 def build_translation_note(
@@ -101,12 +113,16 @@ def build_translation_note(
 
 def build_system_prompt_jav_subtitle(note: str = "") -> str:
     """JAV 자막 번역용 최종 시스템 프롬프트 (note 치환 포함)."""
-    return _SYSTEM_JAV.format(note=note.strip())
+    from javstory.translation.translation_prompt_config import build_translation_system_prompt
+
+    return build_translation_system_prompt(note, variant="jav")
 
 
 def build_system_prompt_general(note: str = "") -> str:
     """크롤링/일반 번역용 최종 시스템 프롬프트 (note 치환 포함)."""
-    return _SYSTEM_BASE.format(note=note.strip())
+    from javstory.translation.translation_prompt_config import build_translation_system_prompt
+
+    return build_translation_system_prompt(note, variant="general")
 
 
 def segments_to_html_user_message(segments: "List[SimpleSegment]") -> str:
@@ -124,6 +140,22 @@ def segments_to_html_user_message(segments: "List[SimpleSegment]") -> str:
 
 
 _P_PATTERN = re.compile(r'<p\s+id="(\d+)">(.*?)</p>', re.DOTALL)
+_TRANSLATION_MAIN_RE = re.compile(
+    r'<main\s+id=["\']번역["\']\s*>(.*?)(?:</main>|$)',
+    re.DOTALL | re.IGNORECASE,
+)
+
+
+def _extract_translation_main_body(raw: str) -> str:
+    """모델 응답에서 ``<main id="번역">`` 블록만 추출. 없으면 첫 ``</main>`` 이후 본문."""
+    text = raw or ""
+    m = _TRANSLATION_MAIN_RE.search(text)
+    if m:
+        return m.group(1)
+    close = text.find("</main>")
+    if close != -1:
+        return text[close + len("</main>") :]
+    return text
 
 
 def parse_html_translation_response(
@@ -132,12 +164,11 @@ def parse_html_translation_response(
 ) -> bool:
     """HTML 응답을 파싱해 tgt_segs의 text를 인플레이스 갱신.
 
-    성공(1개 이상 적용)하면 True, 아무것도 파싱되지 않으면 False 반환.
+    ``<main id="번역">`` 구간만 사용하며, 모든 cue가 채워져야 성공(True).
     """
-    if not raw:
+    if not raw or not tgt_segs:
         return False
-    end_idx = raw.find("</main>")
-    body = raw[:end_idx] if end_idx != -1 else raw
+    body = _extract_translation_main_body(raw)
     matches = _P_PATTERN.findall(body)
     if not matches:
         return False
@@ -154,4 +185,4 @@ def parse_html_translation_response(
             if t:
                 seg.text = t
                 applied += 1
-    return applied > 0
+    return applied >= len(tgt_segs)

@@ -201,6 +201,21 @@ def test_ensure_llamacpp_reuses_existing_healthy_server(monkeypatch, tmp_path):
     assert alias == "gemma-4-e4b"
 
 
+def test_resolve_translation_llamacpp_preset_ignores_correction_pass2(monkeypatch):
+    monkeypatch.setenv(
+        "JAVSTORY_CORRECTION_PASS2_MODEL",
+        "llamacpp:gemma-4-e4b-uncensored",
+    )
+    monkeypatch.setenv("JAVSTORY_LLAMACPP_MODEL", "qwen2.5-14b")
+    monkeypatch.setenv("JAVSTORY_TRANSLATION_PROFILE", "llamacpp:qwen2.5-14b")
+    from javstory.llm.llamacpp_backend import resolve_translation_llamacpp_preset_id
+
+    assert resolve_translation_llamacpp_preset_id() == "qwen2.5-14b"
+    tier = tier_from_llamacpp_env()
+    assert tier["llamacpp_preset"] == "qwen2.5-14b"
+    assert tier["model"] == "qwen2.5-14b"
+
+
 def test_resolve_active_llamacpp_preset_unifies_correction_over_model(monkeypatch):
     monkeypatch.setenv(
         "JAVSTORY_CORRECTION_PASS2_MODEL",
@@ -220,15 +235,15 @@ def test_resolve_active_llamacpp_from_translation_profile_budget(monkeypatch):
     assert resolve_active_llamacpp_preset_id() == "gemma-4-e4b"
 
 
-def test_tier_from_env_uses_active_preset(monkeypatch):
+def test_tier_from_env_uses_translation_preset_not_correction(monkeypatch):
     monkeypatch.setenv(
         "JAVSTORY_CORRECTION_PASS2_MODEL",
         "llamacpp:gemma-4-e4b-uncensored",
     )
     monkeypatch.setenv("JAVSTORY_LLAMACPP_MODEL", "qwen3-14b")
     tier = tier_from_llamacpp_env()
-    assert tier["llamacpp_preset"] == "gemma-4-e4b-uncensored"
-    assert "qwen" not in (tier.get("model") or "").lower() or "uncensored" in tier["llamacpp_preset"]
+    assert tier["llamacpp_preset"] == "qwen3-14b"
+    assert tier["model"] == "qwen3-14b"
 
 
 def test_build_server_argv_qwen14_has_no_moe_args(monkeypatch, tmp_path):
@@ -336,3 +351,51 @@ def test_maybe_idle_shutdown_after_timeout(monkeypatch):
     assert backend._maybe_idle_shutdown(logger_func=lambda _m: None) is True
     assert calls == [8081]
     assert backend._idle_managed_port is None
+
+
+def test_discover_gguf_models_scans_recursively(tmp_path, monkeypatch):
+    from javstory.llm.llamacpp_backend import discover_gguf_models, gguf_option_id
+
+    sub = tmp_path / "qwen"
+    sub.mkdir()
+    a = sub / "Qwen2.5-14B.gguf"
+    b = tmp_path / "gemma.gguf"
+    a.write_bytes(b"x")
+    b.write_bytes(b"x")
+
+    found = discover_gguf_models(scan_dir=tmp_path)
+    assert len(found) == 2
+    assert found[0]["label"] == "gemma.gguf"
+    assert found[1]["label"] == "Qwen2.5-14B.gguf"
+    assert found[1]["id"] == gguf_option_id(a)
+    assert found[1]["gguf_path"] == str(a.resolve())
+
+
+def test_resolve_translation_gguf_path_from_gguf_model_id(tmp_path, monkeypatch):
+    from javstory.llm.llamacpp_backend import (
+        gguf_option_id,
+        resolve_translation_gguf_path,
+        resolve_translation_llamacpp_preset_id,
+    )
+
+    gguf = tmp_path / "Qwen2.5-14B-Instruct-Q5_K_M.gguf"
+    gguf.write_bytes(b"x")
+    gid = gguf_option_id(gguf)
+    monkeypatch.setenv("JAVSTORY_LLAMACPP_MODEL", gid)
+
+    assert resolve_translation_llamacpp_preset_id() == gid
+    assert resolve_translation_gguf_path() == gguf.resolve()
+
+
+def test_tier_from_env_uses_gguf_alias(tmp_path, monkeypatch):
+    from javstory.llm.llamacpp_backend import gguf_option_id, tier_from_llamacpp_env
+
+    gguf = tmp_path / "Qwen2.5-14B-Instruct-Q5_K_M.gguf"
+    gguf.write_bytes(b"x")
+    gid = gguf_option_id(gguf)
+    monkeypatch.setenv("JAVSTORY_LLAMACPP_MODEL", gid)
+    monkeypatch.setenv("JAVSTORY_LLAMACPP_GGUF_PATH", str(gguf))
+
+    tier = tier_from_llamacpp_env()
+    assert tier["llamacpp_preset"] == gid
+    assert tier["model"] == "Qwen2.5-14B-Instruct-Q5_K_M"

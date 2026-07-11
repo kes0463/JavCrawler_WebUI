@@ -15,7 +15,8 @@ from pathlib import Path
 from typing import Any, Callable, Optional
 
 from javstory.config.app_config import story_context_llm_tier
-from javstory.llm.engine import MultiTierRouter
+from javstory.llm.engine import AllTiersExhaustedError, MultiTierRouter
+from javstory.translation.llm_backoff import is_openrouter_credit_exhausted
 from .story_context_prompts import (
     SYSTEM_STORY_CONTEXT_GROK,
     render_story_context_user_message,
@@ -228,6 +229,29 @@ def merge_story_context_tier(raw: dict[str, Any] | None) -> dict[str, Any]:
     return base
 
 
+async def ensure_grok_story_cache_for_translation(
+    *,
+    product_code: str,
+    logger_func: Any,
+    story_context_tier: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    """자막 번역용 Grok 캐시: 디스크 우선, 없으면 API 생성. 크레딧 부족 등 실패 시 None(번역 계속)."""
+    pc = (product_code or "").strip().upper()
+    if not pc:
+        return None
+    tier = merge_story_context_tier(story_context_tier)
+    cached = load_cached_grok_json_flexible(pc, tier)
+    if cached:
+        return cached
+    await run_story_grok_after_harvest_async(
+        product_code=pc,
+        logger_func=logger_func,
+        story_context_tier=tier,
+        force_refresh=False,
+    )
+    return load_cached_grok_json_flexible(pc, tier)
+
+
 async def run_story_grok_after_harvest_async(
     *,
     product_code: str,
@@ -286,8 +310,23 @@ async def run_story_grok_after_harvest_async(
         path_primary.write_text(story_context_json_dumps(data), encoding="utf-8")
         log(f"✅ Grok 스토리 캐시 생성 완료: {path_primary.name}")
 
+    except AllTiersExhaustedError as e:
+        detail = str(getattr(e, "last_error", "") or e)
+        if is_openrouter_credit_exhausted(detail) or is_openrouter_credit_exhausted(e):
+            log(
+                f"⚠️ Grok 스토리 컨텍스트 스킵: OpenRouter 크레딧 부족 ({pc}). "
+                "번역은 Grok 없이 계속합니다."
+            )
+        else:
+            log(f"❌ Grok 스토리 분석 실패 (모든 티어 소진): {e}")
     except Exception as e:
-        log(f"❌ Grok 스토리 분석 중 오류 발생: {e}")
+        if is_openrouter_credit_exhausted(e):
+            log(
+                f"⚠️ Grok 스토리 컨텍스트 스킵: OpenRouter 크레딧 부족 ({pc}). "
+                "번역은 Grok 없이 계속합니다."
+            )
+        else:
+            log(f"❌ Grok 스토리 분석 중 오류 발생: {e}")
     finally:
         # AsyncOpenAI/httpx 연결 정리 — 미호출 시 루프 종료 후 aclose 되며 RuntimeError 발생 가능
         if router is not None:
@@ -414,6 +453,7 @@ def load_cached_grok_json_flexible(
 
 __all__ = [
     "merge_story_context_tier",
+    "ensure_grok_story_cache_for_translation",
     "run_story_grok_after_harvest_async",
     "load_cached_grok_json",
     "load_cached_grok_json_flexible",
