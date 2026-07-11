@@ -141,6 +141,8 @@ export interface EmbeddingsSettings {
   embedded_count: number;
   library_total: number;
   missing_count: number;
+  pending_count?: number;
+  backfill_running?: boolean;
   coverage_pct: number;
 }
 

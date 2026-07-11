@@ -5,10 +5,11 @@ import time
 from pathlib import Path
 from typing import Any, Optional
 
-from sqlalchemy import and_, case, func, or_
+from sqlalchemy import and_, case, exists, func, or_
+from sqlalchemy.orm import aliased
 
 from javstory.config.app_config import DATA_ROOT, E_DATA_ROOT, E_MEDIA_ROOT, MEDIA_ROOT
-from javstory.harvest.database import FileFlagCache, JAVMetadata, get_db_session_ctx
+from javstory.harvest.database import FileFlagCache, JAVMetadata, WatchHistory, get_db_session_ctx
 from javstory.library.path_markers import (
     path_contains_mopa_marker,
     path_contains_self_subtitle_marker,
@@ -141,6 +142,24 @@ def _mosaic_removed_filter():
         _path_mosaic_sql(JAVMetadata.folder_path),
         _path_mosaic_sql(FileFlagCache.video_path),
     )
+
+
+def _user_liked_exists():
+    return exists().where(
+        and_(
+            WatchHistory.product_code == JAVMetadata.product_code,
+            WatchHistory.liked.is_(True),
+        )
+    ).correlate(JAVMetadata)
+
+
+def _watch_later_exists():
+    return exists().where(
+        and_(
+            WatchHistory.product_code == JAVMetadata.product_code,
+            WatchHistory.watch_later.is_(True),
+        )
+    ).correlate(JAVMetadata)
 
 
 def is_safe_image_path(p: Path) -> bool:
@@ -307,6 +326,8 @@ class LibraryService:
         has_metadata: Optional[bool] = None,
         has_subtitle: Optional[bool] = None,
         has_mosaic_removed: Optional[bool] = None,
+        user_liked: Optional[bool] = None,
+        watch_later: Optional[bool] = None,
         genres: Optional[list[str]] = None,
         genre_mode: str = "and",
         include_total: bool = True,
@@ -348,14 +369,37 @@ class LibraryService:
                 query = query.filter(_subtitle_filter())
             if has_mosaic_removed:
                 query = query.filter(_mosaic_removed_filter())
+            if user_liked is True:
+                query = query.filter(_user_liked_exists())
+            elif user_liked is False:
+                query = query.filter(~_user_liked_exists())
+            if watch_later is True:
+                query = query.filter(_watch_later_exists())
+            elif watch_later is False:
+                query = query.filter(~_watch_later_exists())
 
             query = apply_genre_filters(query, genres, mode=genre_mode)
 
             total = query.count() if include_total else 0
-            sort_col = _SORT_COLS.get(sort, JAVMetadata.updated_at)
-            query = query.order_by(
-                sort_col.desc() if order == "desc" else sort_col.asc()
-            )
+            if watch_later is True and sort == "updated_at":
+                # EXISTS와 동일 엔티티 JOIN 시 auto-correlation 깨짐 → alias 사용
+                wh_sort = aliased(WatchHistory)
+                query = query.outerjoin(
+                    wh_sort,
+                    and_(
+                        wh_sort.product_code == JAVMetadata.product_code,
+                        wh_sort.watch_later.is_(True),
+                    ),
+                ).order_by(
+                    wh_sort.watch_later_added_at.desc()
+                    if order == "desc"
+                    else wh_sort.watch_later_added_at.asc()
+                )
+            else:
+                sort_col = _SORT_COLS.get(sort, JAVMetadata.updated_at)
+                query = query.order_by(
+                    sort_col.desc() if order == "desc" else sort_col.asc()
+                )
             rows = query.offset((page - 1) * per_page).limit(per_page).all()
 
             return {
@@ -378,6 +422,8 @@ class LibraryService:
         has_metadata: Optional[bool] = None,
         has_subtitle: Optional[bool] = None,
         has_mosaic_removed: Optional[bool] = None,
+        user_liked: Optional[bool] = None,
+        watch_later: Optional[bool] = None,
         genres: Optional[list[str]] = None,
         genre_mode: str = "and",
     ) -> dict[str, Any]:
@@ -406,6 +452,8 @@ class LibraryService:
                 has_metadata=has_metadata,
                 has_subtitle=has_subtitle,
                 has_mosaic_removed=has_mosaic_removed,
+                user_liked=user_liked,
+                watch_later=watch_later,
                 genres=genres,
                 genre_mode=genre_mode,
                 include_total=True,
@@ -475,6 +523,14 @@ class LibraryService:
                 query = query.filter(_subtitle_filter())
             if has_mosaic_removed:
                 query = query.filter(_mosaic_removed_filter())
+            if user_liked is True:
+                query = query.filter(_user_liked_exists())
+            elif user_liked is False:
+                query = query.filter(~_user_liked_exists())
+            if watch_later is True:
+                query = query.filter(_watch_later_exists())
+            elif watch_later is False:
+                query = query.filter(~_watch_later_exists())
 
             query = apply_genre_filters(query, genres, mode=genre_mode)
             rows = query.all()
@@ -612,6 +668,75 @@ class LibraryService:
 
         with get_db_session_ctx() as db:
             return load_flags_for_codes(db, product_codes)
+
+    def load_watch_flags_for(self, product_codes: list[str]) -> dict[str, dict[str, Any]]:
+        codes = [str(c or "").strip().upper() for c in product_codes if str(c or "").strip()]
+        if not codes:
+            return {}
+        out: dict[str, dict[str, Any]] = {
+            pc: {"user_liked": False, "watch_later": False} for pc in codes
+        }
+        with get_db_session_ctx() as db:
+            rows = (
+                db.query(WatchHistory)
+                .filter(WatchHistory.product_code.in_(list(out.keys())))
+                .all()
+            )
+            for h in rows:
+                pc = str(h.product_code or "").strip().upper()
+                if not pc:
+                    continue
+                out[pc] = {
+                    "user_liked": bool(h.liked),
+                    "watch_later": bool(getattr(h, "watch_later", False)),
+                }
+        return out
+
+    def toggle_user_like(self, product_code: str) -> dict[str, Any]:
+        import datetime as _dt
+
+        pc = (product_code or "").strip().upper()
+        if not pc:
+            return {"ok": False, "user_liked": False, "watch_later": False}
+        now = _dt.datetime.now()
+        with get_db_session_ctx() as db:
+            history = db.query(WatchHistory).filter_by(product_code=pc).first()
+            if not history:
+                history = WatchHistory(product_code=pc, created_at=now)
+                db.add(history)
+            new_liked = not bool(history.liked)
+            history.liked = new_liked
+            history.disliked = False
+            history.updated_at = now
+            watch_later = bool(getattr(history, "watch_later", False))
+            db.commit()
+        try:
+            from javstory.analytics.preference_engine import score_preferences
+
+            score_preferences(pc, delta=3 if new_liked else -3)
+        except Exception:
+            pass
+        return {"ok": True, "user_liked": new_liked, "watch_later": watch_later}
+
+    def toggle_watch_later(self, product_code: str) -> dict[str, Any]:
+        import datetime as _dt
+
+        pc = (product_code or "").strip().upper()
+        if not pc:
+            return {"ok": False, "user_liked": False, "watch_later": False}
+        now = _dt.datetime.now()
+        with get_db_session_ctx() as db:
+            history = db.query(WatchHistory).filter_by(product_code=pc).first()
+            if not history:
+                history = WatchHistory(product_code=pc, created_at=now)
+                db.add(history)
+            new_value = not bool(getattr(history, "watch_later", False))
+            history.watch_later = new_value
+            history.watch_later_added_at = now if new_value else None
+            history.updated_at = now
+            liked = bool(history.liked)
+            db.commit()
+        return {"ok": True, "user_liked": liked, "watch_later": new_value}
 
     def media_flags_for(
         self, row: JAVMetadata, cache: dict[str, Any] | None = None

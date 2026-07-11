@@ -4,14 +4,19 @@ import { cn } from "@/lib/utils";
 import { GlowCard } from "@/components/ui/GlowCard";
 import { StatusBadge, type StatusType } from "@/components/ui/StatusBadge";
 import {
+  clearEmbeddingFinished,
   clearPreviewFinished,
+  fetchEmbeddingQueue,
   fetchPreviewQueue,
   formatPreviewSegmentProgress,
   pauseAllPreview,
   pausePreviewJob,
+  removeEmbeddingJob,
   removePreviewJob,
   resumeAllPreview,
   resumePreviewJob,
+  type EmbeddingQueueItem,
+  type EmbeddingQueueStatus,
   type PendingItem,
   type PreviewQueueItem,
   type PreviewQueueStatus,
@@ -21,13 +26,14 @@ import { cancelHarvestItem, clearFinished, removeFromQueue, type HarvestItem } f
 export interface TaskRow {
   id: string;
   name: string;
-  kind: "harvest" | "preview" | "pending";
+  kind: "harvest" | "preview" | "pending" | "embedding";
   status: "pending" | "running" | "done" | "error" | "active" | "analyzing" | "paused";
   progress: number;
   eta: string;
   detail?: string;
   activity?: PreviewQueueItem["activity"];
   previewJobId?: string;
+  embeddingJobId?: string;
   harvestItemId?: string;
   rawPreviewStatus?: string;
 }
@@ -125,10 +131,43 @@ function mapPreviewItem(item: PreviewQueueItem): TaskRow {
   };
 }
 
+function mapEmbeddingItem(item: EmbeddingQueueItem): TaskRow {
+  const status =
+    item.status === "queued"
+      ? "pending"
+      : item.status === "running"
+        ? "running"
+        : item.status === "done"
+          ? "done"
+          : item.status === "error"
+            ? "error"
+            : "pending";
+  let eta = "—";
+  if (status === "running") {
+    eta = item.elapsed_sec > 0
+      ? `${Math.floor(item.elapsed_sec / 60)}분 경과`
+      : "생성 중";
+  } else if (status === "pending") eta = "대기";
+  else if (status === "done") eta = "완료";
+  else if (status === "error") eta = "실패";
+
+  return {
+    id: `embedding-${item.id}`,
+    name: item.product_code,
+    kind: "embedding",
+    status,
+    progress: item.progress,
+    eta,
+    detail: item.message || item.model || undefined,
+    embeddingJobId: item.id,
+  };
+}
+
 const KIND_LABEL: Record<TaskRow["kind"], string> = {
   harvest: "Harvest",
   preview: "Preview",
   pending: "Meta",
+  embedding: "Embedding",
 };
 
 function rowStatusBadge(row: TaskRow, rowPaused: boolean): StatusType {
@@ -153,18 +192,22 @@ interface TaskQueueTableProps {
   harvestItems: HarvestItem[];
   pendingItems: PendingItem[];
   previewQueue: PreviewQueueStatus | null;
+  embeddingQueue?: EmbeddingQueueStatus | null;
   className?: string;
   onQueueChange?: () => void;
   onPreviewQueueUpdate?: (queue: PreviewQueueStatus) => void;
+  onEmbeddingQueueUpdate?: (queue: EmbeddingQueueStatus) => void;
 }
 
 export function TaskQueueTable({
   harvestItems,
   pendingItems,
   previewQueue,
+  embeddingQueue = null,
   className,
   onQueueChange,
   onPreviewQueueUpdate,
+  onEmbeddingQueueUpdate,
 }: TaskQueueTableProps) {
   const [busy, setBusy] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
@@ -187,6 +230,12 @@ export function TaskQueueTable({
     return preview;
   }, [onPreviewQueueUpdate]);
 
+  const syncEmbeddingQueue = useCallback(async () => {
+    const emb = await fetchEmbeddingQueue(40);
+    onEmbeddingQueueUpdate?.(emb);
+    return emb;
+  }, [onEmbeddingQueueUpdate]);
+
   const runAction = useCallback(
     async (fn: () => Promise<unknown>) => {
       if (busyRef.current) return;
@@ -195,7 +244,7 @@ export function TaskQueueTable({
       setActionError(null);
       try {
         await fn();
-        await syncPreviewQueue();
+        await Promise.all([syncPreviewQueue(), syncEmbeddingQueue()]);
         onQueueChange?.();
       } catch (e) {
         setActionError(formatActionError(e));
@@ -204,26 +253,35 @@ export function TaskQueueTable({
         setBusy(false);
       }
     },
-    [onQueueChange, syncPreviewQueue],
+    [onQueueChange, syncEmbeddingQueue, syncPreviewQueue],
   );
 
   const activeHarvest = harvestItems.filter(i => i.status === "running" || i.status === "pending");
   const previewRows = (previewQueue?.items ?? []).map(mapPreviewItem);
+  const embeddingRows = (embeddingQueue?.items ?? []).map(mapEmbeddingItem);
 
   const activePreview = previewRows.filter(
     r => r.status === "running" || r.status === "pending" || r.status === "paused",
   );
   const recentPreviewDone = previewRows.filter(r => r.status === "done" || r.status === "error").slice(0, 5);
+  const activeEmbedding = embeddingRows.filter(
+    r => r.status === "running" || r.status === "pending",
+  );
+  const recentEmbeddingDone = embeddingRows
+    .filter(r => r.status === "done" || r.status === "error")
+    .slice(0, 5);
 
   const rows: TaskRow[] = [
+    ...activeEmbedding,
     ...activePreview,
     ...activeHarvest.map(mapHarvestItem),
+    ...recentEmbeddingDone,
     ...recentPreviewDone,
     ...pendingItems
       .filter(p => !activeHarvest.some(h => (h.product_code || h.target) === p.product_code))
       .slice(0, 6)
       .map(mapPendingItem),
-  ].slice(0, 16);
+  ].slice(0, 20);
 
   const previewPending = previewQueue?.pending_count ?? 0;
   const previewRunning = previewQueue?.running_count ?? 0;
@@ -234,10 +292,13 @@ export function TaskQueueTable({
     ? formatIdleSec(previewQueue.seconds_since_activity)
     : "";
   const harvestPaused = previewQueue?.harvest_paused ?? false;
+  const embPending = embeddingQueue?.pending_count ?? 0;
+  const embRunning = embeddingQueue?.running_count ?? 0;
+  const embDone = embeddingQueue?.completed_total ?? 0;
 
   const handleClearFinished = () =>
     runAction(async () => {
-      await Promise.all([clearPreviewFinished(), clearFinished()]);
+      await Promise.all([clearPreviewFinished(), clearEmbeddingFinished(), clearFinished()]);
     });
 
   const handleTogglePauseAll = async () => {
@@ -367,6 +428,12 @@ export function TaskQueueTable({
             <span className="text-slate-500">활동 {idleLabel}</span>
           </>
         )}
+        {embeddingQueue && (
+          <span className="text-emerald-300/90">
+            Embedding 실행 {embRunning} / 대기 {embPending.toLocaleString()} / 완료{" "}
+            {embDone.toLocaleString()}
+          </span>
+        )}
       </div>
       <div className="overflow-x-auto -mx-1">
         <table className="w-full text-left text-base">
@@ -401,9 +468,11 @@ export function TaskQueueTable({
                         "text-xs font-semibold uppercase tracking-wide px-2 py-0.5 rounded",
                         row.kind === "preview"
                           ? "bg-violet-500/20 text-violet-300"
-                          : row.kind === "harvest"
-                            ? "bg-blue-500/20 text-blue-300"
-                            : "bg-slate-500/20 text-slate-400",
+                          : row.kind === "embedding"
+                            ? "bg-emerald-500/20 text-emerald-300"
+                            : row.kind === "harvest"
+                              ? "bg-blue-500/20 text-blue-300"
+                              : "bg-slate-500/20 text-slate-400",
                       )}
                     >
                       {KIND_LABEL[row.kind]}
@@ -447,14 +516,20 @@ export function TaskQueueTable({
                         <div
                           className={cn(
                             "h-full rounded-full transition-all duration-300",
-                            row.kind === "preview" ? "bg-violet-500" : "bg-blue-500",
+                            row.kind === "preview"
+                              ? "bg-violet-500"
+                              : row.kind === "embedding"
+                                ? "bg-emerald-500"
+                                : "bg-blue-500",
                           )}
                           style={{
                             width: `${row.progress}%`,
                             boxShadow:
                               row.kind === "preview"
                                 ? "0 0 8px rgba(139,92,246,0.5)"
-                                : "0 0 8px rgba(59,130,246,0.5)",
+                                : row.kind === "embedding"
+                                  ? "0 0 8px rgba(16,185,129,0.5)"
+                                  : "0 0 8px rgba(59,130,246,0.5)",
                           }}
                         />
                       </div>
@@ -501,6 +576,19 @@ export function TaskQueueTable({
                             <Trash2 className="w-4 h-4" />
                           </button>
                         </>
+                      )}
+                      {row.kind === "embedding" && row.embeddingJobId && (
+                        <button
+                          type="button"
+                          disabled={busy || row.status === "running"}
+                          title="삭제"
+                          onClick={() =>
+                            runAction(() => removeEmbeddingJob(row.embeddingJobId!))
+                          }
+                          className="p-1.5 rounded-md text-slate-400 hover:text-rose-400 hover:bg-white/[0.06] disabled:opacity-40"
+                        >
+                          <Trash2 className="w-4 h-4" />
+                        </button>
                       )}
                       {row.kind === "harvest" && row.harvestItemId && (
                         <>

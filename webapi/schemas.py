@@ -37,6 +37,8 @@ class LibraryItem(BaseModel):
     preview_media: Optional[str] = None
     search_score: Optional[float] = None
     search_source: Optional[str] = None
+    user_liked: bool = False
+    watch_later: bool = False
 
     model_config = {"from_attributes": True}
 
@@ -70,6 +72,26 @@ class LibraryItemDetail(LibraryItem):
     scenes: list[SceneSummary] = []
     scenes_source: Optional[str] = None
     snapshot_count: int = 0
+    has_grok_story: bool = False
+    grok_story_running: bool = False
+
+
+class GrokStoryStartRequest(BaseModel):
+    product_codes: list[str] = []
+    force: bool = False
+
+
+class GrokStoryStartResponse(BaseModel):
+    ok: bool
+    queued: int = 0
+    skipped: int = 0
+    message: str = ""
+
+
+class WatchFlagsResponse(BaseModel):
+    ok: bool = True
+    user_liked: bool = False
+    watch_later: bool = False
 
 
 class LibraryListResponse(BaseModel):
@@ -89,6 +111,8 @@ class EmbeddingsSettingsResponse(BaseModel):
     embedded_count: int
     library_total: int
     missing_count: int
+    pending_count: int = 0
+    backfill_running: bool = False
     coverage_pct: float = 0.0
 
 
@@ -621,6 +645,29 @@ class PreviewQueueStatus(BaseModel):
     harvest_paused: bool = False
     user_paused: bool = False
     items: list[PreviewQueueItem] = []
+
+
+class EmbeddingQueueItem(BaseModel):
+    id: str
+    product_code: str
+    model: str = ""
+    force: bool = False
+    status: str
+    progress: int = 0
+    message: str = ""
+    elapsed_sec: int = 0
+    created_at_ms: int = 0
+    updated_at_ms: int = 0
+
+
+class EmbeddingQueueStatus(BaseModel):
+    pending_count: int = 0
+    running_count: int = 0
+    completed_total: int = 0
+    failed_total: int = 0
+    worker_count: int = 1
+    seconds_since_activity: int = 0
+    items: list[EmbeddingQueueItem] = []
 
 
 # ── Actress profile ──────────────────────────────────────────────────────────

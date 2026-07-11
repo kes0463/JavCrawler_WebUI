@@ -39,6 +39,8 @@ export interface LibraryItem {
   preview_media?: "mp4" | "webp" | null;
   search_score?: number | null;
   search_source?: string | null;
+  user_liked?: boolean;
+  watch_later?: boolean;
 }
 
 export interface SceneSummary {
@@ -64,6 +66,8 @@ export interface LibraryItemDetail extends LibraryItem {
   scenes?: SceneSummary[];
   scenes_source?: "grok" | "canonical" | null;
   snapshot_count?: number;
+  has_grok_story?: boolean;
+  grok_story_running?: boolean;
 }
 
 export interface LibraryItemUpdate {
@@ -120,6 +124,8 @@ export interface LibraryQuery {
   has_metadata?: boolean;
   has_subtitle?: boolean;
   has_mosaic_removed?: boolean;
+  user_liked?: boolean;
+  watch_later?: boolean;
   genres?: string[];
   genre_mode?: "and" | "or";
   include_total?: boolean;
@@ -155,6 +161,8 @@ export const fetchLibrarySearch = (q: LibraryQuery): Promise<LibraryListResponse
     has_metadata: q.has_metadata,
     has_subtitle: q.has_subtitle,
     has_mosaic_removed: q.has_mosaic_removed,
+    user_liked: q.user_liked,
+    watch_later: q.watch_later,
     genres: q.genres,
     genre_mode: q.genre_mode,
   };
@@ -166,6 +174,34 @@ export const warmupLibraryEmbeddings = (maxBatch = 12): Promise<{
   queued: number;
   message: string;
 }> => post(`/api/library/embeddings/warmup?max_batch=${maxBatch}`);
+
+export const backfillLibraryEmbeddings = (batchSize = 4): Promise<{
+  ok: boolean;
+  queued: number;
+  message: string;
+}> => post(`/api/library/embeddings/backfill?batch_size=${batchSize}`);
+
+export const startGrokStory = (
+  code: string,
+  force = false,
+): Promise<{ ok: boolean; queued: number; skipped: number; message: string }> =>
+  post(`/api/library/${encodeURIComponent(code)}/grok-story?force=${force ? "true" : "false"}`);
+
+export const startGrokStoryBatch = (
+  productCodes: string[],
+  force = false,
+): Promise<{ ok: boolean; queued: number; skipped: number; message: string }> =>
+  post("/api/library/grok-story", { product_codes: productCodes, force });
+
+export const toggleLibraryLike = (
+  code: string,
+): Promise<{ ok: boolean; user_liked: boolean; watch_later: boolean }> =>
+  post(`/api/library/${encodeURIComponent(code)}/like`);
+
+export const toggleLibraryWatchLater = (
+  code: string,
+): Promise<{ ok: boolean; user_liked: boolean; watch_later: boolean }> =>
+  post(`/api/library/${encodeURIComponent(code)}/watch-later`);
 
 export const fetchLibraryStats = (): Promise<LibraryStats> =>
   get("/api/library/stats");
@@ -397,6 +433,8 @@ function hasNonGenreListFilters(q: LibraryQuery): boolean {
     || q.has_metadata !== undefined
     || q.has_subtitle
     || q.has_mosaic_removed
+    || q.user_liked
+    || q.watch_later
   );
 }
 

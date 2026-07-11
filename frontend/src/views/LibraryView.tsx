@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from "react";
-import { Search, SlidersHorizontal, FolderOpen, FolderX, RefreshCw, Subtitles, Layers } from "lucide-react";
+import { Search, SlidersHorizontal, FolderOpen, FolderX, RefreshCw, Subtitles, Layers, Heart, Bookmark, Loader2 } from "lucide-react";
 import { cn } from "@/lib/utils";
-import { fetchLibraryListed, fetchLibraryGenresResilient, fetchLibraryStats, coverUrl, previewUrl, openLibraryFolder, hasRealLibraryMetadata, clearLibraryGenreScanCache, probeLibraryGenreFilterSupport, prefetchLibraryClientIndex, isClientLibraryIndexReady, warmupLibraryEmbeddings } from "@/api/library";
+import { fetchLibraryListed, fetchLibraryGenresResilient, fetchLibraryStats, coverUrl, previewUrl, openLibraryFolder, hasRealLibraryMetadata, clearLibraryGenreScanCache, probeLibraryGenreFilterSupport, prefetchLibraryClientIndex, isClientLibraryIndexReady, backfillLibraryEmbeddings, startGrokStory, toggleLibraryLike, toggleLibraryWatchLater } from "@/api/library";
 import type { LibraryItem, LibraryStats, LibraryQuery, LibraryGenreItem, LibrarySearchMode } from "@/api/library";
 import { GlassCard } from "@/components/ui/GlassCard";
 import { Skeleton } from "@/components/ui/Skeleton";
@@ -25,7 +25,7 @@ const SORT_OPTIONS = [
   { label: "발매일", value: "release_date" },
   { label: "품번", value: "product_code" },
   { label: "제목", value: "title_ko" },
-  { label: "좋아요", value: "favorite_score" },
+  { label: "좋아요(사이트)", value: "favorite_score" },
 ] as const;
 
 const LIBRARY_PAGE_SIZE = 64;
@@ -296,6 +296,13 @@ export default function LibraryView() {
     }, 350);
   };
 
+  const searchMode = query.search_mode ?? "auto";
+  const isSemanticMode = searchMode !== "keyword";
+  const searchQueryActive = !!(searchText.trim() || (query.q || "").trim());
+  const searchDebouncing = searchText.trim() !== (query.q || "").trim();
+  const isSemanticSearching =
+    isSemanticMode && searchQueryActive && (loading || searchDebouncing);
+
   const requestLoadMore = useCallback(() => {
     if (loading || loadingMore || appendRef.current) return;
     if (items.length >= total) return;
@@ -364,6 +371,53 @@ export default function LibraryView() {
   const handleAddToProcessing = useCallback((productCode: string, kind: ProcessingKind) => {
     void enqueueLibraryProducts([productCode], kind);
   }, [enqueueLibraryProducts]);
+
+  const handleGrokStory = useCallback((productCode: string) => {
+    void startGrokStory(productCode, false)
+      .then(res => showToast(res.message, res.ok && res.queued > 0 ? "success" : res.ok ? "info" : "warn"))
+      .catch(err => showToast(err instanceof Error ? err.message : "Grok 스토리 시작 실패", "error"));
+  }, [showToast]);
+
+  const patchWatchFlags = useCallback((productCode: string, flags: { user_liked: boolean; watch_later: boolean }) => {
+    const pc = productCode.toUpperCase();
+    setItems(prev =>
+      prev.map(item =>
+        item.product_code.toUpperCase() === pc
+          ? { ...item, user_liked: flags.user_liked, watch_later: flags.watch_later }
+          : item,
+      ),
+    );
+  }, []);
+
+  const handleToggleLike = useCallback((productCode: string) => {
+    void toggleLibraryLike(productCode)
+      .then(res => {
+        patchWatchFlags(productCode, res);
+        showToast(
+          res.user_liked ? `${productCode}: 좋아요` : `${productCode}: 좋아요 해제`,
+          "success",
+        );
+        if (query.user_liked && !res.user_liked) {
+          setItems(prev => prev.filter(i => i.product_code.toUpperCase() !== productCode.toUpperCase()));
+        }
+      })
+      .catch(err => showToast(err instanceof Error ? err.message : "좋아요 변경 실패", "error"));
+  }, [patchWatchFlags, query.user_liked, showToast]);
+
+  const handleToggleWatchLater = useCallback((productCode: string) => {
+    void toggleLibraryWatchLater(productCode)
+      .then(res => {
+        patchWatchFlags(productCode, res);
+        showToast(
+          res.watch_later ? `${productCode}: 나중에 볼에 추가` : `${productCode}: 나중에 볼 해제`,
+          "success",
+        );
+        if (query.watch_later && !res.watch_later) {
+          setItems(prev => prev.filter(i => i.product_code.toUpperCase() !== productCode.toUpperCase()));
+        }
+      })
+      .catch(err => showToast(err instanceof Error ? err.message : "나중에 볼 변경 실패", "error"));
+  }, [patchWatchFlags, query.watch_later, showToast]);
 
   const handleDetailSaved = useCallback((updated: LibraryItem) => {
     const pc = updated.product_code.toUpperCase();
@@ -449,21 +503,29 @@ export default function LibraryView() {
           <input
             type="text"
             placeholder={
-              (query.search_mode ?? "auto") === "hybrid"
+              searchMode === "hybrid"
                 ? "자연어로 검색… 예: 비 오는 날 실외"
-                : (query.search_mode ?? "auto") === "keyword"
+                : searchMode === "keyword"
                   ? "품번, 제목, 배우 검색..."
                   : "품번·배우 또는 자연어 검색..."
             }
             value={searchText}
             onChange={e => handleSearch(e.target.value)}
+            aria-busy={isSemanticSearching}
             className={cn(
-              "w-full h-10 pl-10 pr-4 text-base rounded-xl",
+              "w-full h-10 pl-10 text-base rounded-xl",
+              isSemanticSearching ? "pr-10" : "pr-4",
               "bg-bg-surface border border-white/[0.08] text-white placeholder:text-muted-foreground",
               "focus:outline-none focus:border-accent/50 focus:ring-1 focus:ring-accent/30",
               "transition-all duration-150",
             )}
           />
+          {isSemanticSearching && (
+            <Loader2
+              className="absolute right-3 top-1/2 -translate-y-1/2 w-4 h-4 text-violet-300 animate-spin"
+              aria-hidden
+            />
+          )}
         </div>
 
         <select
@@ -569,6 +631,38 @@ export default function LibraryView() {
           모자이크 제거
         </button>
 
+        <button
+          onClick={() => updateQueryFilter({
+            user_liked: query.user_liked ? undefined : true,
+            watch_later: undefined,
+          })}
+          className={cn(
+            "h-10 px-3 text-base rounded-xl border transition-colors flex items-center gap-1.5",
+            query.user_liked
+              ? "bg-rose-500/20 border-rose-500/40 text-rose-300"
+              : "bg-bg-surface border-white/[0.08] text-muted-foreground hover:text-white",
+          )}
+        >
+          <Heart className={cn("w-3.5 h-3.5", query.user_liked && "fill-current")} />
+          내 좋아요
+        </button>
+
+        <button
+          onClick={() => updateQueryFilter({
+            watch_later: query.watch_later ? undefined : true,
+            user_liked: undefined,
+          })}
+          className={cn(
+            "h-10 px-3 text-base rounded-xl border transition-colors flex items-center gap-1.5",
+            query.watch_later
+              ? "bg-sky-500/20 border-sky-500/40 text-sky-300"
+              : "bg-bg-surface border-white/[0.08] text-muted-foreground hover:text-white",
+          )}
+        >
+          <Bookmark className={cn("w-3.5 h-3.5", query.watch_later && "fill-current")} />
+          나중에 볼
+        </button>
+
         <GenreFilterBar
           open={genreOpen}
           onOpenChange={setGenreOpen}
@@ -582,12 +676,25 @@ export default function LibraryView() {
         />
 
         <span className="text-sm text-muted-foreground ml-auto tabular-nums">
-          {items.length.toLocaleString()} / {total.toLocaleString()}건
-          {searchModeUsed === "hybrid" && (query.q || "").trim() ? " · 자연어" : null}
+          {isSemanticSearching
+            ? "검색 중…"
+            : (
+              <>
+                {items.length.toLocaleString()} / {total.toLocaleString()}건
+                {searchModeUsed === "hybrid" && (query.q || "").trim() ? " · 자연어" : null}
+              </>
+            )}
         </span>
       </div>
 
-      {searchMessage && (query.q || "").trim() && (
+      {isSemanticSearching && (
+        <p className="text-sm text-violet-300/90 text-center py-1 animate-pulse flex items-center justify-center gap-2">
+          <Loader2 className="w-3.5 h-3.5 animate-spin shrink-0" aria-hidden />
+          자연어 검색 중…
+        </p>
+      )}
+
+      {searchMessage && (query.q || "").trim() && !isSemanticSearching && (
         <div className="flex flex-wrap items-center gap-2 rounded-xl border border-amber-500/25 bg-amber-500/10 px-3 py-2 text-sm text-amber-100/90">
           <span className="flex-1 min-w-0">{searchMessage}</span>
           {searchMessage.includes("워밍업") && (
@@ -595,9 +702,9 @@ export default function LibraryView() {
               type="button"
               className="shrink-0 h-8 px-3 rounded-lg bg-amber-500/20 hover:bg-amber-500/30 text-amber-100 text-xs"
               onClick={() => {
-                void warmupLibraryEmbeddings(12)
+                void backfillLibraryEmbeddings(4)
                   .then(res => showToast(res.message, res.ok ? "success" : "warn"))
-                  .catch(err => showToast(err instanceof Error ? err.message : "워밍업 실패", "error"));
+                  .catch(err => showToast(err instanceof Error ? err.message : "임베딩 생성 실패", "error"));
               }}
             >
               임베딩 워밍업
@@ -651,11 +758,16 @@ export default function LibraryView() {
             hasSubtitle={!!item.has_subtitle}
             hasHardcodedSubtitle={!!item.has_hardcoded_subtitle}
             hasMosaicRemoved={!!item.has_mosaic_removed}
+            userLiked={!!item.user_liked}
+            watchLater={!!item.watch_later}
             delay={delay}
             onClick={() => openLibraryDetail(item.product_code)}
             onPlay={item.folder_path ? () => handlePlay(item.product_code) : undefined}
             onOpenFolder={() => handleOpenFolder(item.product_code)}
             onAddToProcessing={kind => handleAddToProcessing(item.product_code, kind)}
+            onGrokStory={() => handleGrokStory(item.product_code)}
+            onToggleLike={() => handleToggleLike(item.product_code)}
+            onToggleWatchLater={() => handleToggleWatchLater(item.product_code)}
             onActorClick={handleActorClick}
           />
           );

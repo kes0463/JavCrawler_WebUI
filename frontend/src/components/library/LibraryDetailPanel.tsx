@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { Bell, BookOpen, FileAudio, FolderOpen, FolderX, Heart, ImagePlus, Languages, Link2, Loader2, Pause, Pencil, Play, RefreshCw, Save, Upload, X } from "lucide-react";
+import { Bell, BookOpen, Bookmark, FileAudio, FolderOpen, FolderX, Heart, ImagePlus, Languages, Link2, Loader2, Pause, Pencil, Play, RefreshCw, Save, Sparkles, Upload, X } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { GlassCard } from "@/components/ui/GlassCard";
 import { Skeleton } from "@/components/ui/Skeleton";
@@ -14,6 +14,9 @@ import {
   fetchLibraryDetail,
   hasRealLibraryMetadata,
   openLibraryFolder,
+  startGrokStory,
+  toggleLibraryLike,
+  toggleLibraryWatchLater,
   updateLibraryItem,
   uploadLibraryCover,
 } from "@/api/library";
@@ -286,6 +289,7 @@ export function LibraryDetailPanel({
   const [detail, setDetail] = useState<LibraryItemDetail | null>(null);
   const [loading, setLoading] = useState(true);
   const [recrawling, setRecrawling] = useState(false);
+  const [grokStarting, setGrokStarting] = useState(false);
   const [queueAdding, setQueueAdding] = useState<"stt" | "subtitle" | null>(null);
   const [saving, setSaving] = useState(false);
   const [editMode, setEditMode] = useState(false);
@@ -593,6 +597,49 @@ export function LibraryDetailPanel({
     }
   }, [code, onSaved, showToast]);
 
+  const handleGrokStory = useCallback(async () => {
+    const force = Boolean(detail?.has_grok_story);
+    if (force && !window.confirm(`${code} Grok 스토리 컨텍스트를 다시 생성할까요?`)) {
+      return;
+    }
+    setGrokStarting(true);
+    try {
+      const res = await startGrokStory(code, force);
+      showToast(res.message, res.ok && res.queued > 0 ? "success" : res.ok ? "info" : "warn");
+      if (res.queued > 0) {
+        setDetail(d => (d ? { ...d, grok_story_running: true } : d));
+        if (recrawlPollRef.current != null) {
+          window.clearInterval(recrawlPollRef.current);
+        }
+        let attempts = 0;
+        recrawlPollRef.current = window.setInterval(async () => {
+          attempts += 1;
+          if (attempts > 36) {
+            if (recrawlPollRef.current != null) window.clearInterval(recrawlPollRef.current);
+            recrawlPollRef.current = null;
+            return;
+          }
+          try {
+            const refreshed = await fetchLibraryDetail(code);
+            setDetail(refreshed);
+            onSaved?.(refreshed);
+            if (refreshed.has_grok_story && !refreshed.grok_story_running) {
+              if (recrawlPollRef.current != null) window.clearInterval(recrawlPollRef.current);
+              recrawlPollRef.current = null;
+              showToast(`${code} Grok 스토리 준비됨`, "success");
+            }
+          } catch {
+            /* ignore */
+          }
+        }, 4000);
+      }
+    } catch (e) {
+      showToast(e instanceof Error ? e.message : "Grok 스토리 시작 실패", "error");
+    } finally {
+      setGrokStarting(false);
+    }
+  }, [code, detail?.has_grok_story, onSaved, showToast]);
+
   const handleAddToProcessing = useCallback(async (kind: "stt" | "subtitle") => {
     setQueueAdding(kind);
     try {
@@ -601,6 +648,28 @@ export function LibraryDetailPanel({
       setQueueAdding(null);
     }
   }, [code, enqueueLibraryProducts]);
+
+  const handleToggleLike = useCallback(async () => {
+    try {
+      const res = await toggleLibraryLike(code);
+      setDetail(d => (d ? { ...d, user_liked: res.user_liked, watch_later: res.watch_later } : d));
+      showToast(res.user_liked ? "좋아요" : "좋아요 해제", "success");
+      if (detail) onSaved?.({ ...detail, user_liked: res.user_liked, watch_later: res.watch_later });
+    } catch (e) {
+      showToast(e instanceof Error ? e.message : "좋아요 변경 실패", "error");
+    }
+  }, [code, detail, onSaved, showToast]);
+
+  const handleToggleWatchLater = useCallback(async () => {
+    try {
+      const res = await toggleLibraryWatchLater(code);
+      setDetail(d => (d ? { ...d, user_liked: res.user_liked, watch_later: res.watch_later } : d));
+      showToast(res.watch_later ? "나중에 볼에 추가" : "나중에 볼 해제", "success");
+      if (detail) onSaved?.({ ...detail, user_liked: res.user_liked, watch_later: res.watch_later });
+    } catch (e) {
+      showToast(e instanceof Error ? e.message : "나중에 볼 변경 실패", "error");
+    }
+  }, [code, detail, onSaved, showToast]);
 
   const patchDraft = (patch: Partial<LibraryItemUpdate>) => {
     setEditDraft(d => ({ ...d, ...patch }));
@@ -823,6 +892,22 @@ export function LibraryDetailPanel({
                   </button>
                   <button
                     type="button"
+                    onClick={() => void handleGrokStory()}
+                    disabled={grokStarting || Boolean(detail.grok_story_running)}
+                    title={detail.has_grok_story ? "기존 캐시를 덮어씁니다" : "OpenRouter Grok으로 스토리 컨텍스트 생성"}
+                    className="inline-flex items-center gap-2 px-5 py-3 rounded-xl bg-amber-500/15 border border-amber-500/35 text-amber-100 hover:bg-amber-500/25 transition-colors text-xl font-semibold disabled:opacity-50"
+                  >
+                    {grokStarting || detail.grok_story_running
+                      ? <Loader2 className="w-6 h-6 animate-spin" />
+                      : <Sparkles className="w-6 h-6" />}
+                    {detail.grok_story_running
+                      ? "Grok 생성 중…"
+                      : detail.has_grok_story
+                        ? "Grok 재생성"
+                        : "Grok 스토리"}
+                  </button>
+                  <button
+                    type="button"
                     onClick={() => void handleAddToProcessing("stt")}
                     disabled={queueAdding !== null}
                     className="inline-flex items-center gap-2 px-5 py-3 rounded-xl bg-indigo-500/15 border border-indigo-500/35 text-indigo-200 hover:bg-indigo-500/25 transition-colors text-xl font-semibold disabled:opacity-50"
@@ -842,6 +927,32 @@ export function LibraryDetailPanel({
                       ? <Loader2 className="w-6 h-6 animate-spin" />
                       : <Languages className="w-6 h-6" />}
                     번역 큐에 추가
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => void handleToggleLike()}
+                    className={cn(
+                      "inline-flex items-center gap-2 px-5 py-3 rounded-xl border transition-colors text-xl font-semibold",
+                      detail.user_liked
+                        ? "bg-rose-500/25 border-rose-500/45 text-rose-100"
+                        : "bg-rose-500/10 border-rose-500/30 text-rose-200 hover:bg-rose-500/20",
+                    )}
+                  >
+                    <Heart className={cn("w-6 h-6", detail.user_liked && "fill-current")} />
+                    {detail.user_liked ? "좋아요 중" : "좋아요"}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => void handleToggleWatchLater()}
+                    className={cn(
+                      "inline-flex items-center gap-2 px-5 py-3 rounded-xl border transition-colors text-xl font-semibold",
+                      detail.watch_later
+                        ? "bg-sky-500/25 border-sky-500/45 text-sky-100"
+                        : "bg-sky-500/10 border-sky-500/30 text-sky-200 hover:bg-sky-500/20",
+                    )}
+                  >
+                    <Bookmark className={cn("w-6 h-6", detail.watch_later && "fill-current")} />
+                    {detail.watch_later ? "나중에 볼 중" : "나중에 볼"}
                   </button>
                 </div>
               )}

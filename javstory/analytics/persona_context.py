@@ -79,12 +79,16 @@ def _completion_ratio(h: WatchHistory) -> float:
 
 
 def _sample_product_groups(max_products: int) -> Dict[str, List[str]]:
-    """긍정/최근/장기/부정 신호를 분리해 페르소나 근거 샘플을 뽑는다."""
+    """긍정/최근/장기/부정 신호를 분리해 페르소나 근거 샘플을 뽑는다.
+
+    사용자가 하트(liked)한 작품은 positive·codes에 우선 배정한다.
+    """
     groups: Dict[str, List[str]] = {
         "positive": [],
         "recent": [],
         "long_term": [],
         "negative": [],
+        "liked": [],
         "codes": [],
     }
     seen: set[str] = set()
@@ -99,7 +103,21 @@ def _sample_product_groups(max_products: int) -> Dict[str, List[str]]:
             seen.add(pc)
             groups["codes"].append(pc)
 
+    liked_quota = max(4, max_products // 2)
+
     with get_db_session_ctx() as session:
+        # 1) 사용자 좋아요 작품을 최우선으로 확보
+        liked_rows = (
+            session.query(WatchHistory)
+            .filter(WatchHistory.liked == True)  # noqa: E712
+            .order_by(WatchHistory.updated_at.desc())
+            .limit(liked_quota)
+            .all()
+        )
+        for h in liked_rows:
+            add("liked", h.product_code)
+            add("positive", h.product_code)
+
         preferred = (
             session.query(WatchHistory)
             .filter(
@@ -155,7 +173,10 @@ def _sample_product_groups(max_products: int) -> Dict[str, List[str]]:
             if len(groups["negative"]) >= max(2, max_products // 3):
                 break
 
-    groups["codes"] = groups["codes"][: max_products * 2]
+    # liked 작품을 codes 앞쪽으로 재정렬
+    liked_set = set(groups["liked"])
+    rest = [c for c in groups["codes"] if c not in liked_set]
+    groups["codes"] = (groups["liked"] + rest)[: max_products * 2]
     return groups
 
 
@@ -329,7 +350,7 @@ def _filtered_counter(counter: Counter, excluded: set[str], limit: int) -> List[
 
 def _sample_roles_by_code(groups: Dict[str, List[str]]) -> Dict[str, List[str]]:
     roles: Dict[str, List[str]] = {}
-    for group in ("positive", "recent", "long_term", "negative"):
+    for group in ("liked", "positive", "recent", "long_term", "negative"):
         for pc in groups.get(group) or []:
             roles.setdefault(pc, []).append(group)
     return roles
@@ -571,10 +592,10 @@ def build_persona_context(*, max_products: int | None = None) -> Dict[str, Any]:
     ctx["sample_groups"] = {
         key: value
         for key, value in sample_groups.items()
-        if key in ("positive", "recent", "long_term", "negative")
+        if key in ("liked", "positive", "recent", "long_term", "negative")
     }
     positive_seed_codes = []
-    for key in ("positive", "long_term", "recent"):
+    for key in ("liked", "positive", "long_term", "recent"):
         for pc in sample_groups.get(key) or []:
             if pc not in positive_seed_codes and pc not in set(sample_groups.get("negative") or []):
                 positive_seed_codes.append(pc)

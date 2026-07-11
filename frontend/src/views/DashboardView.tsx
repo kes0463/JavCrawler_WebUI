@@ -2,10 +2,12 @@ import { useState, useEffect, useRef, useCallback } from "react";
 import { BookOpen, Tag, Clock } from "lucide-react";
 import {
   fetchDashboardSummary,
+  fetchEmbeddingQueue,
   fetchPendingItems,
   fetchPreviewQueue,
   fetchSystemMetrics,
   type DashboardSummary,
+  type EmbeddingQueueStatus,
   type PendingItem,
   type PreviewQueueStatus,
   type SystemMetrics,
@@ -34,6 +36,7 @@ export default function DashboardView() {
   const [system, setSystem] = useState<SystemMetrics | null>(null);
   const [pending, setPending] = useState<PendingItem[]>([]);
   const [previewQueue, setPreviewQueue] = useState<PreviewQueueStatus | null>(null);
+  const [embeddingQueue, setEmbeddingQueue] = useState<EmbeddingQueueStatus | null>(null);
   const [harvestItems, setHarvestItems] = useState<HarvestItem[]>([]);
   const [summaryLoading, setSummaryLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -47,6 +50,7 @@ export default function DashboardView() {
       fetchPendingItems(50),
       fetchPreviewQueue(40),
       fetchQueue(),
+      fetchEmbeddingQueue(40),
     ]);
 
     if (results[0].status === "fulfilled") {
@@ -60,6 +64,7 @@ export default function DashboardView() {
     if (results[2].status === "fulfilled") setPending(results[2].value);
     if (results[3].status === "fulfilled") setPreviewQueue(results[3].value);
     if (results[4].status === "fulfilled") setHarvestItems(results[4].value.items);
+    if (results[5].status === "fulfilled") setEmbeddingQueue(results[5].value);
 
     setSummaryLoading(false);
   }, []);
@@ -79,11 +84,19 @@ export default function DashboardView() {
 
     let id: ReturnType<typeof setInterval> | undefined;
     let previewId: ReturnType<typeof setInterval> | undefined;
+    let embeddingId: ReturnType<typeof setInterval> | undefined;
 
     const refreshPreview = () => {
       if (document.visibilityState !== "visible") return;
       fetchPreviewQueue(40)
         .then(setPreviewQueue)
+        .catch(() => {});
+    };
+
+    const refreshEmbedding = () => {
+      if (document.visibilityState !== "visible") return;
+      fetchEmbeddingQueue(40)
+        .then(setEmbeddingQueue)
         .catch(() => {});
     };
 
@@ -93,6 +106,7 @@ export default function DashboardView() {
         if (document.visibilityState === "visible") void refresh();
       }, 12000);
       previewId = setInterval(refreshPreview, 4000);
+      embeddingId = setInterval(refreshEmbedding, 3000);
     };
     const stopPolling = () => {
       if (id !== undefined) {
@@ -103,12 +117,17 @@ export default function DashboardView() {
         clearInterval(previewId);
         previewId = undefined;
       }
+      if (embeddingId !== undefined) {
+        clearInterval(embeddingId);
+        embeddingId = undefined;
+      }
     };
 
     const onVisibility = () => {
       if (document.visibilityState === "visible") {
         void refresh();
         refreshPreview();
+        refreshEmbedding();
         startPolling();
       } else {
         stopPolling();
@@ -131,6 +150,7 @@ export default function DashboardView() {
       } else if (event.type === "queue_started" || event.type === "queue_finished") {
         fetchQueue().then(q => setHarvestItems(q.items));
         fetchPreviewQueue(40).then(setPreviewQueue);
+        fetchEmbeddingQueue(40).then(setEmbeddingQueue);
       } else if (event.type === "item_started") {
         setHarvestItems(prev =>
           prev.map(i => (i.id === event.id ? { ...i, status: "running", progress: 0 } : i)),
@@ -251,9 +271,11 @@ export default function DashboardView() {
         harvestItems={harvestItems}
         pendingItems={pending}
         previewQueue={previewQueue}
+        embeddingQueue={embeddingQueue}
         className="w-full"
         onQueueChange={refresh}
         onPreviewQueueUpdate={setPreviewQueue}
+        onEmbeddingQueueUpdate={setEmbeddingQueue}
       />
     </div>
   );

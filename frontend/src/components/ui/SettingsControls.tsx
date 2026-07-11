@@ -1,26 +1,85 @@
 import { useState } from "react";
-import { Eye, EyeOff } from "lucide-react";
+import { ChevronDown, Eye, EyeOff } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { GlassCard } from "@/components/ui/GlassCard";
+
+function readSectionOpen(storageKey: string, fallback: boolean): boolean {
+  try {
+    const v = localStorage.getItem(storageKey);
+    if (v === "0") return false;
+    if (v === "1") return true;
+  } catch {
+    /* ignore */
+  }
+  return fallback;
+}
 
 export function SettingsSection({
   icon: Icon,
   title,
   children,
+  defaultOpen = true,
+  storageKey,
 }: {
   icon: React.ElementType;
   title: string;
   children: React.ReactNode;
+  defaultOpen?: boolean;
+  /** 접힘 상태 저장 키 (미지정 시 title 기반) */
+  storageKey?: string;
 }) {
+  const persistKey = storageKey ?? `javstory.settings.section.${title}`;
+  const [open, setOpen] = useState(() => readSectionOpen(persistKey, defaultOpen));
+
+  const toggle = () => {
+    setOpen(prev => {
+      const next = !prev;
+      try {
+        localStorage.setItem(persistKey, next ? "1" : "0");
+      } catch {
+        /* ignore */
+      }
+      return next;
+    });
+  };
+
   return (
-    <GlassCard className="space-y-4">
-      <div className="flex items-center gap-2 pb-2 border-b border-white/[0.06]">
-        <div className="w-7 h-7 rounded-lg bg-accent/15 flex items-center justify-center">
+    <GlassCard noPadding className="overflow-hidden">
+      <button
+        type="button"
+        onClick={toggle}
+        aria-expanded={open}
+        className={cn(
+          "w-full flex items-center gap-2 px-5 py-4 text-left",
+          "hover:bg-white/[0.025] transition-colors duration-150",
+        )}
+      >
+        <div className="w-7 h-7 rounded-lg bg-accent/15 flex items-center justify-center shrink-0">
           <Icon className="w-3.5 h-3.5 text-accent-light" />
         </div>
-        <h2 className="text-lg font-semibold text-[#d0d0e8]">{title}</h2>
+        <h2 className="flex-1 text-lg font-semibold text-[#d0d0e8]">{title}</h2>
+        <ChevronDown
+          className={cn(
+            "w-4 h-4 text-muted-foreground shrink-0",
+            "transition-transform duration-250 ease-spring",
+            open && "rotate-180",
+          )}
+          aria-hidden
+        />
+      </button>
+
+      <div
+        className={cn(
+          "grid transition-[grid-template-rows,opacity] duration-300 ease-spring",
+          open ? "grid-rows-[1fr] opacity-100" : "grid-rows-[0fr] opacity-0",
+        )}
+      >
+        <div className="overflow-hidden min-h-0">
+          <div className="px-5 pb-5 pt-1 space-y-4 border-t border-white/[0.06]">
+            {children}
+          </div>
+        </div>
       </div>
-      <div className="space-y-4">{children}</div>
     </GlassCard>
   );
 }

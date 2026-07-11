@@ -6,6 +6,7 @@ from javstory.services.dashboard_service import DashboardService
 from webapi.schemas import (
     CancelPendingRequest,
     DashboardSummary,
+    EmbeddingQueueStatus,
     LibraryStats,
     PendingItem,
     PreviewQueueStatus,
@@ -43,6 +44,30 @@ def preview_queue_status(limit: int = Query(40, ge=1, le=100)):
     from javstory.library.highlight.preview_queue import preview_queue_manager
 
     return PreviewQueueStatus(**preview_queue_manager.snapshot(limit=limit))
+
+
+@router.get("/embedding-queue", response_model=EmbeddingQueueStatus)
+def embedding_queue_status(limit: int = Query(40, ge=1, le=100)):
+    from javstory.library.embeddings.embedding_queue import embedding_queue_manager
+
+    return EmbeddingQueueStatus(**embedding_queue_manager.snapshot(limit=limit))
+
+
+@router.delete("/embedding-queue/finished")
+def clear_embedding_finished():
+    from javstory.library.embeddings.embedding_queue import embedding_queue_manager
+
+    removed = embedding_queue_manager.clear_finished()
+    return {"ok": True, "removed": removed}
+
+
+@router.delete("/embedding-queue/{job_id}")
+def remove_embedding_job(job_id: str):
+    from javstory.library.embeddings.embedding_queue import embedding_queue_manager
+
+    if not embedding_queue_manager.remove_job(job_id):
+        raise HTTPException(404, "작업을 찾을 수 없습니다") from None
+    return {"ok": True}
 
 
 @router.post("/pending/cancel")

@@ -1,6 +1,6 @@
 import { useEffect, useRef, type ReactNode } from "react";
 import { createPortal } from "react-dom";
-import { FileAudio, FolderOpen, Languages, Play, ScanEye } from "lucide-react";
+import { Bookmark, FileAudio, FolderOpen, Heart, Languages, Play, ScanEye, Sparkles } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 export interface PosterCardContextMenuProps {
@@ -12,6 +12,11 @@ export interface PosterCardContextMenuProps {
   onClose: () => void;
   onAddStt: () => void;
   onAddSubtitle: () => void;
+  onGrokStory?: () => void;
+  onToggleLike?: () => void;
+  onToggleWatchLater?: () => void;
+  userLiked?: boolean;
+  watchLater?: boolean;
   onPlay?: () => void;
   onOpenFolder?: () => void;
   onOpenDetail: () => void;
@@ -60,6 +65,11 @@ export function PosterCardContextMenu({
   onClose,
   onAddStt,
   onAddSubtitle,
+  onGrokStory,
+  onToggleLike,
+  onToggleWatchLater,
+  userLiked = false,
+  watchLater = false,
   onPlay,
   onOpenFolder,
   onOpenDetail,
@@ -120,6 +130,36 @@ export function PosterCardContextMenu({
           onAddSubtitle();
         }}
       />
+      {onGrokStory && (
+        <MenuItem
+          icon={<Sparkles className="w-4 h-4 text-amber-300 shrink-0" />}
+          label="Grok 스토리 생성"
+          onClick={() => {
+            onClose();
+            onGrokStory();
+          }}
+        />
+      )}
+      {onToggleLike && (
+        <MenuItem
+          icon={<Heart className={cn("w-4 h-4 shrink-0", userLiked ? "text-rose-400 fill-current" : "text-rose-300")} />}
+          label={userLiked ? "좋아요 해제" : "좋아요"}
+          onClick={() => {
+            onClose();
+            onToggleLike();
+          }}
+        />
+      )}
+      {onToggleWatchLater && (
+        <MenuItem
+          icon={<Bookmark className={cn("w-4 h-4 shrink-0", watchLater ? "text-sky-400 fill-current" : "text-sky-300")} />}
+          label={watchLater ? "나중에 볼 해제" : "나중에 볼"}
+          onClick={() => {
+            onClose();
+            onToggleWatchLater();
+          }}
+        />
+      )}
       {(hasFolder && (onPlay || onOpenFolder)) && (
         <>
           <MenuDivider />

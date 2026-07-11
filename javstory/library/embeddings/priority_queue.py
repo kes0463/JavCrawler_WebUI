@@ -140,36 +140,197 @@ def ensure_priority_embeddings_async(
     *,
     max_batch: int = 6,
     logger_func: Any = None,
+    force: bool = False,
 ) -> None:
-    """Fire-and-forget embedding builds for missing/stale priority codes."""
+    """Enqueue missing/stale priority codes onto the shared embedding queue."""
     if not embeddings_enabled_from_env():
         return
     model = embeddings_ollama_model_from_env()
     pending = [
         pc
         for pc in dict.fromkeys(normalize_product_code(c) or "" for c in codes)
-        if pc and _embedding_needs_build(pc, model=model)
-    ][: max(1, min(12, int(max_batch or 6)))]
+        if pc and (force or _embedding_needs_build(pc, model=model))
+    ][: max(1, min(48, int(max_batch or 6)))]
     if not pending:
         return
+    try:
+        from javstory.library.embeddings.embedding_queue import embedding_queue_manager
 
-    def _worker(batch: List[str]) -> None:
-        import asyncio
+        embedding_queue_manager.enqueue_many(pending, model=model, force=force)
+    except Exception:
+        # Fallback: legacy one-shot thread if queue import fails
+        def _worker(batch: List[str]) -> None:
+            import asyncio
 
-        async def _run() -> None:
-            for pc in batch:
+            async def _run() -> None:
+                for pc in batch:
+                    try:
+                        await build_and_store_embeddings_for_product(
+                            pc,
+                            model=model,
+                            force=force,
+                            logger_func=logger_func,
+                        )
+                    except Exception:
+                        continue
+
+            try:
+                asyncio.run(_run())
+            except Exception:
+                pass
+
+        threading.Thread(
+            target=_worker, args=(pending[:12],), daemon=True, name="embedding-priority"
+        ).start()
+
+
+_BACKFILL_LOCK = threading.Lock()
+_BACKFILL_THREAD: threading.Thread | None = None
+
+
+def collect_pending_embedding_codes(*, limit: int | None = None) -> List[str]:
+    """All library product codes missing embeddings or stale vs Grok story cache."""
+    if not embeddings_enabled_from_env():
+        return []
+    model = embeddings_ollama_model_from_env()
+    try:
+        with get_db_session_ctx() as session:
+            rows = session.query(JAVMetadata.product_code).all()
+    except Exception:
+        return []
+
+    pending: List[str] = []
+    seen: set[str] = set()
+    for (raw,) in rows:
+        pc = normalize_product_code(str(raw or ""))
+        if not pc or pc in seen:
+            continue
+        seen.add(pc)
+        if _embedding_needs_build(pc, model=model):
+            pending.append(pc)
+            if limit is not None and len(pending) >= max(1, int(limit)):
+                break
+    return pending
+
+
+def embeddings_backfill_running() -> bool:
+    try:
+        from javstory.library.embeddings.embedding_queue import embedding_queue_manager
+
+        if embedding_queue_manager.is_busy():
+            return True
+    except Exception:
+        pass
+    t = _BACKFILL_THREAD
+    return bool(t is not None and t.is_alive())
+
+
+def start_embeddings_backfill_async(
+    *,
+    batch_size: int = 4,
+    logger_func: Any = None,
+) -> int:
+    """
+    Enqueue all missing/stale embeddings onto the dashboard-visible queue.
+
+    Returns the number of jobs accepted (0 if nothing to do).
+    """
+    global _BACKFILL_THREAD
+    if not embeddings_enabled_from_env():
+        return 0
+
+    pending = collect_pending_embedding_codes()
+    if not pending:
+        return 0
+
+    model = embeddings_ollama_model_from_env()
+    try:
+        from javstory.library.embeddings.embedding_queue import embedding_queue_manager
+
+        return embedding_queue_manager.enqueue_many(pending, model=model, force=False)
+    except Exception:
+        pass
+
+    # Fallback continuous worker if queue unavailable
+    batch = max(1, min(8, int(batch_size or 4)))
+    with _BACKFILL_LOCK:
+        if _BACKFILL_THREAD is not None and _BACKFILL_THREAD.is_alive():
+            return len(pending)
+
+        def _worker() -> None:
+            import asyncio
+            import time
+
+            while True:
+                if not embeddings_enabled_from_env():
+                    break
+                batch_codes = collect_pending_embedding_codes(limit=batch)
+                if not batch_codes:
+                    break
+
+                async def _run(codes: List[str]) -> None:
+                    for pc in codes:
+                        try:
+                            await build_and_store_embeddings_for_product(
+                                pc,
+                                model=model,
+                                logger_func=logger_func,
+                            )
+                        except Exception:
+                            continue
+
                 try:
-                    await build_and_store_embeddings_for_product(
-                        pc,
-                        model=model,
-                        logger_func=logger_func,
-                    )
+                    asyncio.run(_run(batch_codes))
                 except Exception:
-                    continue
+                    pass
+                time.sleep(0.15)
 
-        try:
-            asyncio.run(_run())
-        except Exception:
-            pass
+        _BACKFILL_THREAD = threading.Thread(
+            target=_worker, daemon=True, name="embedding-backfill"
+        )
+        _BACKFILL_THREAD.start()
 
-    threading.Thread(target=_worker, args=(pending,), daemon=True, name="embedding-priority").start()
+    return len(pending)
+
+
+def enqueue_product_embedding(
+    product_code: str,
+    *,
+    force: bool = False,
+    logger_func: Any = None,
+) -> bool:
+    """
+    Queue embedding build for one product after harvest / Grok / new ingest.
+
+    Returns True if a background job was started (or GUI/Web queue accepted it).
+    No-op when embeddings are disabled or cache is already fresh (unless force).
+    """
+    pc = normalize_product_code(product_code)
+    if not pc or not embeddings_enabled_from_env():
+        return False
+
+    # Prefer GUI dashboard queue when the desktop app is running.
+    try:
+        from gui.models.embedding_queue_model import EmbeddingQueueController
+
+        eq = EmbeddingQueueController.instance()
+        if eq is not None:
+            eq.enqueue(pc, force=bool(force))
+            return True
+    except Exception:
+        pass
+
+    try:
+        from javstory.library.embeddings.embedding_queue import embedding_queue_manager
+
+        return embedding_queue_manager.enqueue(pc, force=bool(force)) is not None
+    except Exception:
+        pass
+
+    model = embeddings_ollama_model_from_env()
+    if not force and not _embedding_needs_build(pc, model=model):
+        return False
+    ensure_priority_embeddings_async(
+        [pc], max_batch=1, logger_func=logger_func, force=bool(force)
+    )
+    return True

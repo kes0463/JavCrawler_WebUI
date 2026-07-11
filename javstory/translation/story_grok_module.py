@@ -267,6 +267,15 @@ async def run_story_grok_after_harvest_async(
     if not pc:
         return
 
+    def _enqueue_embedding_after_grok(*, force: bool) -> None:
+        try:
+            from javstory.library.embeddings.priority_queue import enqueue_product_embedding
+
+            if enqueue_product_embedding(pc, force=force, logger_func=log):
+                log(f"♻️ Grok 반영 임베딩 {'재생성' if force else '생성'} 큐: {pc}")
+        except Exception as emb_e:
+            log(f"⚠️ 임베딩 큐 등록 실패 ({pc}): {emb_e}")
+
     tier = merge_story_context_tier(story_context_tier)
     model_name = tier.get("model", "")
     path_primary = story_context_cache_path_grok(pc)
@@ -274,9 +283,11 @@ async def run_story_grok_after_harvest_async(
     if not force_refresh:
         if path_primary.is_file():
             log(f"✅ Grok 스토리 캐시 이미 존재: {path_primary.name}")
+            _enqueue_embedding_after_grok(force=False)
             return
         if _legacy_model_suffix_cache_exists(pc):
             log(f"✅ Grok 스토리 캐시 이미 존재(레거시 __모델 파일): {pc} — 스킵")
+            _enqueue_embedding_after_grok(force=False)
             return
 
     api_key = _resolve_openrouter_api_key()
@@ -309,6 +320,7 @@ async def run_story_grok_after_harvest_async(
         path_primary.parent.mkdir(parents=True, exist_ok=True)
         path_primary.write_text(story_context_json_dumps(data), encoding="utf-8")
         log(f"✅ Grok 스토리 캐시 생성 완료: {path_primary.name}")
+        _enqueue_embedding_after_grok(force=True)
 
     except AllTiersExhaustedError as e:
         detail = str(getattr(e, "last_error", "") or e)

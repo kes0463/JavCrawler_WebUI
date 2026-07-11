@@ -13,6 +13,8 @@ from webapi.schemas import (
     EmbeddingsWarmupResponse,
     FolderBindRequest,
     FolderBindResponse,
+    GrokStoryStartRequest,
+    GrokStoryStartResponse,
     LibraryItem,
     LibraryItemDetail,
     LibraryItemUpdate,
@@ -21,6 +23,7 @@ from webapi.schemas import (
     LibraryStats,
     OpenFolderResponse,
     SceneSummary,
+    WatchFlagsResponse,
 )
 
 router = APIRouter()
@@ -59,12 +62,14 @@ def _to_item(
     *,
     search_score: float | None = None,
     search_source: str | None = None,
+    watch_flags: dict | None = None,
 ) -> LibraryItem:
     base = LibraryItem.model_validate(row)
     fav = int(getattr(row, "favorite_score", 0) or 0)
     pc = (row.product_code or "").strip().upper()
     count = (scene_counts or {}).get(pc, 0)
     media = _library.media_flags_for(row, cache)
+    wf = watch_flags or {}
     update: dict = {
         "scene_count": count,
         "favorite_score": fav,
@@ -73,6 +78,8 @@ def _to_item(
         "has_mosaic_removed": media["has_mosaic_removed"],
         "has_preview": media["has_preview"],
         "preview_media": media["preview_media"],
+        "user_liked": bool(wf.get("user_liked")),
+        "watch_later": bool(wf.get("watch_later")),
     }
     if search_score is not None:
         update["search_score"] = search_score
@@ -92,6 +99,8 @@ def list_library(
     has_metadata: Optional[bool] = None,
     has_subtitle: Optional[bool] = None,
     has_mosaic_removed: Optional[bool] = None,
+    user_liked: Optional[bool] = None,
+    watch_later: Optional[bool] = None,
     genres: str = Query("", description="쉼표 구분 장르 (genre_mode에 따라 AND/OR)"),
     genre_mode: str = Query("and", pattern="^(and|or)$", description="and=모두 포함, or=하나라도 포함"),
     include_total: bool = Query(True, description="false면 total 생략(append용)"),
@@ -107,6 +116,8 @@ def list_library(
         has_metadata=has_metadata,
         has_subtitle=has_subtitle,
         has_mosaic_removed=has_mosaic_removed,
+        user_liked=user_liked,
+        watch_later=watch_later,
         genres=genre_list,
         genre_mode=genre_mode,
         include_total=include_total,
@@ -114,12 +125,21 @@ def list_library(
     rows = result["items"]
     codes = [r.product_code for r in rows]
     flags_map = _library.load_file_flags_for(codes)
+    watch_map = _library.load_watch_flags_for(codes)
     scene_counts = _library.scene_counts_for(codes, flags_map)
     return LibraryListResponse(
         total=result["total"],
         page=result["page"],
         per_page=result["per_page"],
-        items=[_to_item(r, flags_map.get(r.product_code), scene_counts) for r in rows],
+        items=[
+            _to_item(
+                r,
+                flags_map.get(r.product_code),
+                scene_counts,
+                watch_flags=watch_map.get((r.product_code or "").strip().upper()),
+            )
+            for r in rows
+        ],
     )
 
 
@@ -135,6 +155,8 @@ def search_library(
     has_metadata: Optional[bool] = None,
     has_subtitle: Optional[bool] = None,
     has_mosaic_removed: Optional[bool] = None,
+    user_liked: Optional[bool] = None,
+    watch_later: Optional[bool] = None,
     genres: str = Query("", description="쉼표 구분 장르"),
     genre_mode: str = Query("and", pattern="^(and|or)$"),
 ):
@@ -150,12 +172,15 @@ def search_library(
         has_metadata=has_metadata,
         has_subtitle=has_subtitle,
         has_mosaic_removed=has_mosaic_removed,
+        user_liked=user_liked,
+        watch_later=watch_later,
         genres=genre_list,
         genre_mode=genre_mode,
     )
     rows = result["items"]
     codes = [r.product_code for r in rows]
     flags_map = _library.load_file_flags_for(codes)
+    watch_map = _library.load_watch_flags_for(codes)
     scene_counts = _library.scene_counts_for(codes, flags_map)
     hit_meta = result.get("hit_meta") or {}
     items = []
@@ -169,6 +194,7 @@ def search_library(
                 scene_counts,
                 search_score=meta.get("score"),
                 search_source=meta.get("source") or None,
+                watch_flags=watch_map.get(pc),
             )
         )
     return LibraryListResponse(
@@ -188,6 +214,50 @@ def warmup_embeddings(max_batch: int = Query(12, ge=1, le=24)):
     from javstory.library.embeddings.web_status import start_embeddings_warmup
 
     return EmbeddingsWarmupResponse(**start_embeddings_warmup(max_batch=max_batch))
+
+
+@router.post("/embeddings/backfill", response_model=EmbeddingsWarmupResponse)
+def backfill_embeddings(batch_size: int = Query(4, ge=1, le=8)):
+    from javstory.library.embeddings.web_status import start_embeddings_backfill
+
+    return EmbeddingsWarmupResponse(**start_embeddings_backfill(batch_size=batch_size))
+
+
+@router.post("/grok-story", response_model=GrokStoryStartResponse)
+def start_grok_story_batch(body: GrokStoryStartRequest):
+    from javstory.services.grok_story_service import start_grok_story_generation
+
+    return GrokStoryStartResponse(
+        **start_grok_story_generation(body.product_codes, force=bool(body.force))
+    )
+
+
+@router.post("/{code}/like", response_model=WatchFlagsResponse)
+def toggle_library_like(code: str):
+    row = _library.get_by_code(code)
+    if not row:
+        raise HTTPException(404, "작품을 찾을 수 없습니다")
+    return WatchFlagsResponse(**_library.toggle_user_like(code))
+
+
+@router.post("/{code}/watch-later", response_model=WatchFlagsResponse)
+def toggle_library_watch_later(code: str):
+    row = _library.get_by_code(code)
+    if not row:
+        raise HTTPException(404, "작품을 찾을 수 없습니다")
+    return WatchFlagsResponse(**_library.toggle_watch_later(code))
+
+
+@router.post("/{code}/grok-story", response_model=GrokStoryStartResponse)
+def start_grok_story_one(code: str, force: bool = Query(False)):
+    from javstory.services.grok_story_service import start_grok_story_generation
+
+    row = _library.get_by_code(code)
+    if not row:
+        raise HTTPException(404, "작품을 찾을 수 없습니다")
+    return GrokStoryStartResponse(
+        **start_grok_story_generation([code], force=bool(force))
+    )
 
 
 @router.get("/stats", response_model=LibraryStats)
@@ -332,6 +402,10 @@ def _to_detail(row: JAVMetadata, code: str) -> LibraryItemDetail:
     fav = int(getattr(row, "favorite_score", 0) or 0)
     flags_map = _library.load_file_flags_for([row.product_code])
     media = _library.media_flags_for(row, flags_map.get(row.product_code))
+    watch = _library.load_watch_flags_for([code]).get(code.upper()) or {}
+    from javstory.services.grok_story_service import grok_story_status
+
+    grok_st = grok_story_status(code)
     return base.model_copy(
         update={
             "scene_count": len(scenes),
@@ -345,6 +419,10 @@ def _to_detail(row: JAVMetadata, code: str) -> LibraryItemDetail:
             "scenes_source": scenes_source,
             "overall_summary": overall,
             "snapshot_count": _library.snapshot_count_for(code),
+            "has_grok_story": bool(grok_st.get("has_cache")),
+            "grok_story_running": bool(grok_st.get("running")),
+            "user_liked": bool(watch.get("user_liked")),
+            "watch_later": bool(watch.get("watch_later")),
             **_folder_watch_flags(code),
         }
     )

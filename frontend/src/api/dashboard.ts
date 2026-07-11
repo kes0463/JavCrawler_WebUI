@@ -107,6 +107,38 @@ export const fetchSystemMetrics = (): Promise<SystemMetrics> =>
 export const fetchPreviewQueue = (limit = 40): Promise<PreviewQueueStatus> =>
   get(`/api/dashboard/preview-queue?limit=${limit}`, 12_000);
 
+export interface EmbeddingQueueItem {
+  id: string;
+  product_code: string;
+  model: string;
+  force: boolean;
+  status: string;
+  progress: number;
+  message: string;
+  elapsed_sec: number;
+  created_at_ms: number;
+  updated_at_ms: number;
+}
+
+export interface EmbeddingQueueStatus {
+  pending_count: number;
+  running_count: number;
+  completed_total: number;
+  failed_total: number;
+  worker_count: number;
+  seconds_since_activity: number;
+  items: EmbeddingQueueItem[];
+}
+
+export const fetchEmbeddingQueue = (limit = 40): Promise<EmbeddingQueueStatus> =>
+  get(`/api/dashboard/embedding-queue?limit=${limit}`, 12_000);
+
+export const clearEmbeddingFinished = (): Promise<{ ok: boolean; removed: number }> =>
+  del("/api/dashboard/embedding-queue/finished");
+
+export const removeEmbeddingJob = (jobId: string): Promise<{ ok: boolean }> =>
+  del(`/api/dashboard/embedding-queue/${encodeURIComponent(jobId)}`);
+
 export const clearPreviewFinished = (): Promise<{ ok: boolean; removed: number }> =>
   del("/api/dashboard/preview-queue/finished");
 

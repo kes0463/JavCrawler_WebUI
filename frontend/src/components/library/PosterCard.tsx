@@ -1,5 +1,5 @@
 import { memo, useEffect, useState, useCallback } from "react";
-import { FolderOpen, Heart, MoreVertical, Play } from "lucide-react";
+import { Bookmark, FolderOpen, Heart, MoreVertical, Play } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { PosterHoverPreview } from "@/components/library/PosterHoverPreview";
 import { PosterCardContextMenu } from "@/components/library/PosterCardContextMenu";
@@ -22,11 +22,16 @@ interface PosterCardProps {
   hasSubtitle?: boolean;
   hasHardcodedSubtitle?: boolean;
   hasMosaicRemoved?: boolean;
+  userLiked?: boolean;
+  watchLater?: boolean;
   onClick?: () => void;
   onOpenFolder?: () => void;
   onPlay?: () => void;
   onActorClick?: (name: string) => void;
   onAddToProcessing?: (kind: ProcessingKind) => void;
+  onGrokStory?: () => void;
+  onToggleLike?: () => void;
+  onToggleWatchLater?: () => void;
 }
 
 function parseActorNames(actors: string): string[] {
@@ -50,11 +55,16 @@ export const PosterCard = memo(function PosterCard({
   hasSubtitle = false,
   hasHardcodedSubtitle = false,
   hasMosaicRemoved = false,
+  userLiked = false,
+  watchLater = false,
   onClick,
   onOpenFolder,
   onPlay,
   onActorClick,
   onAddToProcessing,
+  onGrokStory,
+  onToggleLike,
+  onToggleWatchLater,
 }: PosterCardProps) {
   const [imgError, setImgError] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
@@ -115,21 +125,21 @@ export const PosterCard = memo(function PosterCard({
           onCoverError={() => setImgError(true)}
         />
 
-        {hasFolder && (
-          <div className="absolute top-2.5 right-2.5 flex flex-col gap-1.5">
-            {onPlay && (
-              <button
-                type="button"
-                title="재생"
-                onClick={e => {
-                  e.stopPropagation();
-                  onPlay();
-                }}
-                className="w-8 h-8 rounded-full bg-emerald-500/90 hover:bg-emerald-400 flex items-center justify-center shadow-lg transition-colors"
-              >
-                <Play className="w-4 h-4 text-white ml-0.5" />
-              </button>
-            )}
+        <div className="absolute top-2.5 right-2.5 flex flex-col gap-1.5 z-10 items-end">
+          {hasFolder && onPlay && (
+            <button
+              type="button"
+              title="재생"
+              onClick={e => {
+                e.stopPropagation();
+                onPlay();
+              }}
+              className="w-8 h-8 rounded-full bg-emerald-500/90 hover:bg-emerald-400 flex items-center justify-center shadow-lg transition-colors"
+            >
+              <Play className="w-4 h-4 text-white ml-0.5" />
+            </button>
+          )}
+          {hasFolder && (
             <button
               type="button"
               title="폴더 열기"
@@ -141,32 +151,46 @@ export const PosterCard = memo(function PosterCard({
             >
               <FolderOpen className="w-4 h-4 text-white" />
             </button>
-          </div>
-        )}
+          )}
+          {onAddToProcessing && (
+            <button
+              type="button"
+              title="메뉴"
+              onClick={e => {
+                e.stopPropagation();
+                const rect = (e.currentTarget as HTMLButtonElement).getBoundingClientRect();
+                openMenuAt(rect.right, rect.bottom + 4);
+              }}
+              className={cn(
+                "w-8 h-8 rounded-full flex items-center justify-center shadow-lg transition-all",
+                "bg-black/50 hover:bg-black/70 text-white/90 hover:text-white",
+                "opacity-0 group-hover:opacity-100",
+              )}
+            >
+              <MoreVertical className="w-4 h-4" />
+            </button>
+          )}
+        </div>
 
-        {onAddToProcessing && (
-          <button
-            type="button"
-            title="메뉴"
-            onClick={e => {
-              e.stopPropagation();
-              const rect = (e.currentTarget as HTMLButtonElement).getBoundingClientRect();
-              openMenuAt(rect.right, rect.bottom + 4);
-            }}
-            className={cn(
-              "absolute w-8 h-8 rounded-full flex items-center justify-center shadow-lg transition-all",
-              "bg-black/50 hover:bg-black/70 text-white/90 hover:text-white",
-              "opacity-0 group-hover:opacity-100",
-              sceneCount > 0 ? "top-12 left-2.5" : "top-2.5 left-2.5",
+        {(sceneCount > 0 || userLiked || watchLater) && (
+          <div className="absolute top-2.5 left-2.5 flex flex-col items-start gap-1.5 max-w-[70%]">
+            {sceneCount > 0 && (
+              <div className="px-2.5 py-1 rounded-lg bg-violet-500/90 text-white text-base font-bold shadow-lg">
+                씬 {sceneCount}
+              </div>
             )}
-          >
-            <MoreVertical className="w-4 h-4" />
-          </button>
-        )}
-
-        {sceneCount > 0 && (
-          <div className="absolute top-2.5 left-2.5 px-2.5 py-1 rounded-lg bg-violet-500/90 text-white text-base font-bold shadow-lg">
-            씬 {sceneCount}
+            {userLiked && (
+              <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-rose-500/95 text-white text-sm font-bold shadow-lg">
+                <Heart className="w-3.5 h-3.5 fill-current" />
+                좋아요
+              </span>
+            )}
+            {watchLater && (
+              <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-sky-500/95 text-white text-sm font-bold shadow-lg">
+                <Bookmark className="w-3.5 h-3.5 fill-current" />
+                나중에
+              </span>
+            )}
           </div>
         )}
 
@@ -208,6 +232,11 @@ export const PosterCard = memo(function PosterCard({
           onClose={() => setMenuOpen(false)}
           onAddStt={() => onAddToProcessing("stt")}
           onAddSubtitle={() => onAddToProcessing("subtitle")}
+          onGrokStory={onGrokStory}
+          onToggleLike={onToggleLike}
+          onToggleWatchLater={onToggleWatchLater}
+          userLiked={userLiked}
+          watchLater={watchLater}
           onPlay={onPlay}
           onOpenFolder={onOpenFolder}
           onOpenDetail={() => onClick?.()}

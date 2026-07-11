@@ -20,7 +20,7 @@ import {
   type TranslationPromptSettings,
   type EmbeddingsSettings,
 } from "@/api/settings";
-import { warmupLibraryEmbeddings } from "@/api/library";
+import { warmupLibraryEmbeddings, backfillLibraryEmbeddings } from "@/api/library";
 import { useToast } from "@/contexts/ToastContext";
 
 const WHISPER_MODEL_OPTIONS = [
@@ -178,6 +178,19 @@ export default function SettingsView() {
       await loadEmb();
     } catch (e) {
       showToast(e instanceof Error ? e.message : "임베딩 워밍업 실패", "error");
+    } finally {
+      setEmbWarming(false);
+    }
+  };
+
+  const handleBackfillEmbeddings = async () => {
+    setEmbWarming(true);
+    try {
+      const res = await backfillLibraryEmbeddings(4);
+      showToast(res.message, res.ok ? "success" : "warn");
+      await loadEmb();
+    } catch (e) {
+      showToast(e instanceof Error ? e.message : "임베딩 백필 실패", "error");
     } finally {
       setEmbWarming(false);
     }
@@ -820,6 +833,10 @@ export default function SettingsView() {
               <p className="text-sm text-muted-foreground px-1">
                 커버리지 {emb.embedded_count.toLocaleString()} / {emb.library_total.toLocaleString()}
                 {" "}({emb.coverage_pct}%) · 미생성 {emb.missing_count.toLocaleString()}건
+                {(emb.pending_count ?? 0) > emb.missing_count
+                  ? ` · Grok 갱신 포함 대기 ${(emb.pending_count ?? 0).toLocaleString()}건`
+                  : ""}
+                {emb.backfill_running ? " · 백필 진행 중" : ""}
               </p>
             )}
             <div className="flex flex-wrap gap-2 justify-end pt-1">
@@ -830,6 +847,14 @@ export default function SettingsView() {
                 onClick={() => void handleWarmupEmbeddings()}
               >
                 우선순위 워밍업
+              </ActionButton>
+              <ActionButton
+                variant="ghost"
+                size="sm"
+                loading={embWarming}
+                onClick={() => void handleBackfillEmbeddings()}
+              >
+                미생성·갱신 전체
               </ActionButton>
               <ActionButton
                 variant="ghost"

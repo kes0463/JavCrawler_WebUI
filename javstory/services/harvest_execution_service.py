@@ -232,6 +232,15 @@ def _enqueue_post_processing(
                 snapshot_queue_manager.push_job(media_video_path, out_dir, product_code=sku)
             except Exception as e:
                 log("warn", f"미디어 큐 등록 실패: {e}")
+
+        if not is_skeleton:
+            try:
+                from javstory.library.embeddings.priority_queue import enqueue_product_embedding
+
+                if enqueue_product_embedding(sku):
+                    log("info", f"[{sku}] 임베딩 생성 큐 등록")
+            except Exception as e:
+                log("warn", f"임베딩 큐 등록 실패: {e}")
     except Exception as e:
         log("warn", f"후처리 큐 등록 실패: {e}")
 

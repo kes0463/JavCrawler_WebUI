@@ -278,6 +278,16 @@ class HarvestWorker(QThread):
                 if media_video_path:
                     snapshot_queue_manager.push_job(media_video_path, out_dir, product_code=sku)
                 self.msleep(50)
+
+                # 5. 임베딩 큐 (시맨틱 검색용 — 설정에서 임베딩 ON일 때만)
+                if not is_skeleton:
+                    try:
+                        from javstory.library.embeddings.priority_queue import enqueue_product_embedding
+
+                        if enqueue_product_embedding(sku):
+                            log(f"[HarvestWorker] [{sku}] 임베딩 생성 큐 등록")
+                    except Exception as emb_e:
+                        log(f"⚠️ [HarvestWorker] [{sku}] 임베딩 큐 등록 실패: {emb_e}")
                 
             except Exception as ph_e:
                 log(f"⚠️ [HarvestWorker] 대시보드 큐 등록 실패: {ph_e}")

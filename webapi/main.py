@@ -73,6 +73,23 @@ async def lifespan(app: FastAPI):
 
     threading.Thread(target=_ensure_ollama_for_embeddings, daemon=True, name="OllamaEnsure").start()
 
+    def _embeddings_backfill_on_start() -> None:
+        if (os.environ.get("JAVSTORY_EMBEDDINGS_BACKFILL_ON_START", "1") or "").strip().lower() in {
+            "0",
+            "false",
+            "off",
+            "no",
+        }:
+            return
+        try:
+            from javstory.library.embeddings.web_status import start_embeddings_backfill
+
+            start_embeddings_backfill(batch_size=4)
+        except Exception:
+            pass
+
+    threading.Thread(target=_embeddings_backfill_on_start, daemon=True, name="EmbeddingsBackfill").start()
+
     try:
         from javstory.folder_watch.service import get_folder_watch_service
 
