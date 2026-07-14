@@ -63,9 +63,17 @@ export interface ActressWork {
   cover_path: string;
   cover_url?: string;
   release_date: string;
+  folder_path?: string;
   favorite_score: number;
   user_rating: number;
   user_liked: boolean;
+  watch_later?: boolean;
+  has_subtitle?: boolean;
+  has_hardcoded_subtitle?: boolean;
+  has_mosaic_removed?: boolean;
+  has_preview?: boolean;
+  preview_media?: "mp4" | "webp" | null;
+  updated_at?: string;
 }
 
 export interface ActressWorksBundle {

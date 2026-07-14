@@ -7,6 +7,30 @@ export interface SttEngineOption {
   implemented: boolean;
 }
 
+export interface SttFwXxlOptions {
+  language: string;
+  vad_filter: boolean;
+  vad_threshold: number;
+  vad_min_speech_duration_ms: number;
+  vad_max_speech_duration_s: number;
+  condition_on_previous_text: boolean;
+  no_speech_threshold: number;
+  beam_size: number;
+  best_of: number;
+  temperature: number;
+  temperature_increment_on_fallback: number;
+  hallucination_silence_threshold: number;
+  compute_type: string;
+  batch_size: number;
+  word_timestamps: boolean;
+  repetition_penalty: number;
+}
+
+export interface FasterWhisperModelOption {
+  id: string;
+  label: string;
+}
+
 export interface SttSettings {
   engine: string;
   whisper_model: string;
@@ -14,7 +38,9 @@ export interface SttSettings {
   hf_whisper_model: string;
   vad_threshold: number;
   dialogue_only: boolean;
+  fw_xxl: SttFwXxlOptions;
   engine_options: SttEngineOption[];
+  faster_whisper_model_options?: FasterWhisperModelOption[];
 }
 
 export type SttSettingsPatch = Partial<
@@ -26,6 +52,7 @@ export type SttSettingsPatch = Partial<
     | "hf_whisper_model"
     | "vad_threshold"
     | "dialogue_only"
+    | "fw_xxl"
   >
 >;
 

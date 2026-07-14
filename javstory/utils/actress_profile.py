@@ -709,11 +709,19 @@ def _metadata_row_to_work_item(row) -> dict:
         "cover_path": row.cover_image_local_path or row.cover_image_url or "",
         "coverPath": row.cover_image_local_path or row.cover_image_url or "",
         "release_date": row.release_date or "",
+        "folder_path": (getattr(row, "folder_path", None) or "").strip() or "",
         "scene_count": 0,
         "user_rating": 0,
         "userRating": 0,
         "user_liked": False,
+        "watch_later": False,
         "favorite_score": int(getattr(row, "favorite_score", 0) or 0),
+        "has_subtitle": False,
+        "has_hardcoded_subtitle": bool(getattr(row, "is_hardcoded", False)),
+        "has_mosaic_removed": bool(getattr(row, "is_mopa", False)),
+        "has_preview": False,
+        "preview_media": None,
+        "updated_at": str(getattr(row, "updated_at", None) or ""),
     }
 
 
@@ -1123,11 +1131,19 @@ def _fetch_actress_library_works_legacy(session, actress, max_items: int = 500) 
             "cover_path": row.cover_image_local_path or row.cover_image_url or "",
             "coverPath": row.cover_image_local_path or row.cover_image_url or "",
             "release_date": row.release_date or "",
+            "folder_path": (getattr(row, "folder_path", None) or "").strip() or "",
             "scene_count": 0,
             "user_rating": 0,
             "userRating": 0,
             "user_liked": False,
+            "watch_later": False,
             "favorite_score": int(getattr(row, "favorite_score", 0) or 0),
+            "has_subtitle": False,
+            "has_hardcoded_subtitle": bool(getattr(row, "is_hardcoded", False)),
+            "has_mosaic_removed": bool(getattr(row, "is_mopa", False)),
+            "has_preview": False,
+            "preview_media": None,
+            "updated_at": str(getattr(row, "updated_at", None) or ""),
         })
         if len(items) >= max_items:
             break

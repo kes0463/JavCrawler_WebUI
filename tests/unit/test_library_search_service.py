@@ -34,16 +34,18 @@ def test_search_items_hybrid_hydrates_order(monkeypatch):
     from types import SimpleNamespace
 
     svc = LibraryService()
-    monkeypatch.setenv("JAVSTORY_EMBEDDINGS_ENABLED", "0")
+    monkeypatch.setenv("JAVSTORY_EMBEDDINGS_ENABLED", "1")
 
     class FakeSearch:
+        last_embedding_diag = {"status": "ok", "scored_n": 2, "returned_n": 2}
+
         def __init__(self, *a, **k):
             pass
 
-        def search_with_fusion(self, query):
+        def search_by_embedding(self, query):
             return [
-                {"id": "BBB-002", "title": "B", "score": 0.9, "source": "bm25"},
-                {"id": "AAA-001", "title": "A", "score": 0.8, "source": "bm25+metadata"},
+                {"id": "BBB-002", "title": "B", "score": 0.9, "source": "embedding"},
+                {"id": "AAA-001", "title": "A", "score": 0.8, "source": "embedding"},
             ]
 
     monkeypatch.setattr(
@@ -57,18 +59,33 @@ def test_search_items_hybrid_hydrates_order(monkeypatch):
     ]
 
     class FakeQuery:
+        def __init__(self, *, codes_only=False):
+            self._codes_only = codes_only
+
         def filter(self, *a, **k):
             return self
 
         def outerjoin(self, *a, **k):
             return self
 
+        def order_by(self, *a, **k):
+            return self
+
         def all(self):
+            if self._codes_only:
+                return [(r.product_code,) for r in rows]
             return rows
 
     class FakeSession:
-        def query(self, *a, **k):
-            return FakeQuery()
+        def query(self, *entities, **k):
+            codes_only = len(entities) == 1 and entities[0] is not None
+            # product_code only vs full entity
+            try:
+                from javstory.harvest.database import JAVMetadata
+                codes_only = entities == (JAVMetadata.product_code,)
+            except Exception:
+                codes_only = False
+            return FakeQuery(codes_only=codes_only)
 
         def __enter__(self):
             return self
@@ -89,7 +106,9 @@ def test_search_items_hybrid_hydrates_order(monkeypatch):
         lambda: True,
     )
 
-    out = svc.search_items(q="비 오는 날", mode="hybrid", page=1, per_page=40)
+    out = svc.search_items(q="비 오는 날", mode="hybrid", page=1, per_page=40, sort="similarity")
     assert out["mode"] == "hybrid"
+    assert out["embedding_channel_used"] is True
     assert [r.product_code for r in out["items"]] == ["BBB-002", "AAA-001"]
     assert out["hit_meta"]["BBB-002"]["score"] == 0.9
+    assert out["hit_meta"]["BBB-002"]["source"] == "embedding"

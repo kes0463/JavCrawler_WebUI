@@ -24,6 +24,7 @@ interface ActressDetailPanelProps {
   onRefresh: () => void;
   onListRefresh: () => void;
   onWorkClick: (productCode: string) => void;
+  onWorksChange?: (works: ActressWork[]) => void;
   onMergeClick: () => void;
   onError: (message: string) => void;
   onSuccess: (message: string) => void;
@@ -84,6 +85,7 @@ export function ActressDetailPanel({
   onRefresh,
   onListRefresh,
   onWorkClick,
+  onWorksChange,
   onMergeClick,
   onError,
   onSuccess,
@@ -355,6 +357,7 @@ export function ActressDetailPanel({
           works={works}
           genres={workGenres}
           onWorkClick={onWorkClick}
+          onWorksChange={onWorksChange}
         />
       </div>
     </div>

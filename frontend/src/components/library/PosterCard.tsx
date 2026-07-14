@@ -1,9 +1,12 @@
-import { memo, useEffect, useState, useCallback } from "react";
-import { Bookmark, FolderOpen, Heart, MoreVertical, Play } from "lucide-react";
+import { memo, useEffect, useRef, useState, useCallback } from "react";
+import { Bookmark, Check, FolderOpen, Heart, MoreVertical, Play } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { PosterHoverPreview } from "@/components/library/PosterHoverPreview";
 import { PosterCardContextMenu } from "@/components/library/PosterCardContextMenu";
 import type { ProcessingKind } from "@/api/processing";
+
+/** 길게 눌러 선택 모드 진입 (ms) */
+export const POSTER_LONG_PRESS_MS = 2000;
 
 interface PosterCardProps {
   productCode: string;
@@ -24,14 +27,25 @@ interface PosterCardProps {
   hasMosaicRemoved?: boolean;
   userLiked?: boolean;
   watchLater?: boolean;
+  selected?: boolean;
+  selectionMode?: boolean;
+  /** 2초 길게 누르기 → 선택 모드 진입 */
+  onLongPressSelect?: () => void;
+  /** 선택 모드에서 클릭 시 토글 */
+  onToggleSelect?: () => void;
+  /**
+   * 우클릭/메뉴 시 대상 품번 목록.
+   * 선택 모드에서 이 카드가 선택된 경우 전체 선택 목록을 반환하면 됨.
+   */
+  resolveContextMenuProductCodes?: (clickedCode: string) => string[];
   onClick?: () => void;
   onOpenFolder?: () => void;
   onPlay?: () => void;
   onActorClick?: (name: string) => void;
-  onAddToProcessing?: (kind: ProcessingKind) => void;
-  onGrokStory?: () => void;
-  onToggleLike?: () => void;
-  onToggleWatchLater?: () => void;
+  onAddToProcessing?: (kind: ProcessingKind, codes: string[]) => void;
+  onGrokStory?: (codes: string[]) => void;
+  onToggleLike?: (codes: string[]) => void;
+  onToggleWatchLater?: (codes: string[]) => void;
 }
 
 function parseActorNames(actors: string): string[] {
@@ -57,6 +71,11 @@ export const PosterCard = memo(function PosterCard({
   hasMosaicRemoved = false,
   userLiked = false,
   watchLater = false,
+  selected = false,
+  selectionMode = false,
+  onLongPressSelect,
+  onToggleSelect,
+  resolveContextMenuProductCodes,
   onClick,
   onOpenFolder,
   onPlay,
@@ -69,22 +88,76 @@ export const PosterCard = memo(function PosterCard({
   const [imgError, setImgError] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
   const [menuPos, setMenuPos] = useState({ x: 0, y: 0 });
+  const [menuCodes, setMenuCodes] = useState<string[]>([productCode]);
+  const longPressTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const longPressFired = useRef(false);
+  const pointerStart = useRef<{ x: number; y: number } | null>(null);
+
+  const clearLongPress = useCallback(() => {
+    if (longPressTimer.current != null) {
+      clearTimeout(longPressTimer.current);
+      longPressTimer.current = null;
+    }
+    pointerStart.current = null;
+  }, []);
 
   const openMenuAt = useCallback((clientX: number, clientY: number) => {
+    const codes =
+      resolveContextMenuProductCodes?.(productCode) ?? [productCode];
+    setMenuCodes(codes.length > 0 ? codes : [productCode]);
     setMenuPos({ x: clientX, y: clientY });
     setMenuOpen(true);
-  }, []);
+  }, [productCode, resolveContextMenuProductCodes]);
 
   const handleContextMenu = useCallback((e: React.MouseEvent) => {
     e.preventDefault();
     e.stopPropagation();
+    clearLongPress();
     openMenuAt(e.clientX, e.clientY);
-  }, [openMenuAt]);
+  }, [clearLongPress, openMenuAt]);
+
+  const handlePointerDown = useCallback((e: React.PointerEvent) => {
+    if (e.button !== 0 || !onLongPressSelect) return;
+    longPressFired.current = false;
+    pointerStart.current = { x: e.clientX, y: e.clientY };
+    clearLongPress();
+    longPressTimer.current = setTimeout(() => {
+      longPressFired.current = true;
+      longPressTimer.current = null;
+      onLongPressSelect();
+    }, POSTER_LONG_PRESS_MS);
+  }, [clearLongPress, onLongPressSelect]);
+
+  const handlePointerMove = useCallback((e: React.PointerEvent) => {
+    if (!pointerStart.current || longPressTimer.current == null) return;
+    const dx = Math.abs(e.clientX - pointerStart.current.x);
+    const dy = Math.abs(e.clientY - pointerStart.current.y);
+    if (dx > 12 || dy > 12) clearLongPress();
+  }, [clearLongPress]);
+
+  const handlePointerUpOrCancel = useCallback(() => {
+    clearLongPress();
+  }, [clearLongPress]);
+
+  useEffect(() => () => clearLongPress(), [clearLongPress]);
+
   const showImage = coverSrc && !imgError;
 
   useEffect(() => {
     setImgError(false);
   }, [coverSrc]);
+
+  const handleActivate = useCallback(() => {
+    if (longPressFired.current) {
+      longPressFired.current = false;
+      return;
+    }
+    if (selectionMode) {
+      onToggleSelect?.();
+      return;
+    }
+    onClick?.();
+  }, [selectionMode, onToggleSelect, onClick]);
 
   return (
     <div
@@ -92,27 +165,35 @@ export const PosterCard = memo(function PosterCard({
       tabIndex={0}
       data-poster-card
       data-no-drag-scroll
+      aria-pressed={selectionMode ? selected : undefined}
       onClick={e => {
         e.stopPropagation();
-        onClick?.();
+        handleActivate();
       }}
       onKeyDown={e => {
         if (e.key === "Enter" || e.key === " ") {
           e.preventDefault();
-          onClick?.();
+          handleActivate();
         }
       }}
+      onPointerDown={handlePointerDown}
+      onPointerMove={handlePointerMove}
+      onPointerUp={handlePointerUpOrCancel}
+      onPointerCancel={handlePointerUpOrCancel}
+      onPointerLeave={handlePointerUpOrCancel}
       onContextMenu={handleContextMenu}
       style={delay > 0 ? { animationDelay: `${delay}ms` } : undefined}
       className={cn(
-        "group flex flex-col rounded-xl border border-white/[0.08] overflow-hidden cursor-pointer",
-        "bg-bg-card hover:border-white/[0.16] hover:shadow-hover",
+        "group flex flex-col rounded-xl border overflow-hidden cursor-pointer",
+        "bg-bg-card hover:shadow-hover",
         "transition-all duration-200 text-left",
         delay > 0 && "animate-scale-in",
         "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400/50",
+        selected
+          ? "border-indigo-400/70 ring-2 ring-indigo-400/40 shadow-[0_0_0_1px_rgba(129,140,248,0.35)]"
+          : "border-white/[0.08] hover:border-white/[0.16]",
       )}
     >
-      {/* 표지 — 높이는 이미지에 맞춤 (contain 여백으로 텍스트와 벌어지지 않게) */}
       <div className="relative w-full bg-[#0a0a12]">
         <PosterHoverPreview
           productCode={productCode}
@@ -124,6 +205,12 @@ export const PosterCard = memo(function PosterCard({
           showCover={!!showImage}
           onCoverError={() => setImgError(true)}
         />
+
+        {selected && (
+          <div className="absolute top-2.5 left-2.5 z-20 w-7 h-7 rounded-full bg-indigo-500 flex items-center justify-center shadow-lg">
+            <Check className="w-4 h-4 text-white" strokeWidth={3} />
+          </div>
+        )}
 
         <div className="absolute top-2.5 right-2.5 flex flex-col gap-1.5 z-10 items-end">
           {hasFolder && onPlay && (
@@ -165,6 +252,7 @@ export const PosterCard = memo(function PosterCard({
                 "w-8 h-8 rounded-full flex items-center justify-center shadow-lg transition-all",
                 "bg-black/50 hover:bg-black/70 text-white/90 hover:text-white",
                 "opacity-0 group-hover:opacity-100",
+                selectionMode && "opacity-100",
               )}
             >
               <MoreVertical className="w-4 h-4" />
@@ -173,7 +261,10 @@ export const PosterCard = memo(function PosterCard({
         </div>
 
         {(sceneCount > 0 || userLiked || watchLater) && (
-          <div className="absolute top-2.5 left-2.5 flex flex-col items-start gap-1.5 max-w-[70%]">
+          <div className={cn(
+            "absolute flex flex-col items-start gap-1.5 max-w-[70%]",
+            selected ? "top-11 left-2.5" : "top-2.5 left-2.5",
+          )}>
             {sceneCount > 0 && (
               <div className="px-2.5 py-1 rounded-lg bg-violet-500/90 text-white text-base font-bold shadow-lg">
                 씬 {sceneCount}
@@ -227,23 +318,22 @@ export const PosterCard = memo(function PosterCard({
           open={menuOpen}
           x={menuPos.x}
           y={menuPos.y}
-          productCode={productCode}
-          hasFolder={!!hasFolder}
+          productCodes={menuCodes}
+          hasFolder={!!hasFolder && menuCodes.length === 1}
           onClose={() => setMenuOpen(false)}
-          onAddStt={() => onAddToProcessing("stt")}
-          onAddSubtitle={() => onAddToProcessing("subtitle")}
-          onGrokStory={onGrokStory}
-          onToggleLike={onToggleLike}
-          onToggleWatchLater={onToggleWatchLater}
+          onAddStt={() => onAddToProcessing("stt", menuCodes)}
+          onAddSubtitle={() => onAddToProcessing("subtitle", menuCodes)}
+          onGrokStory={onGrokStory ? () => onGrokStory(menuCodes) : undefined}
+          onToggleLike={onToggleLike ? () => onToggleLike(menuCodes) : undefined}
+          onToggleWatchLater={onToggleWatchLater ? () => onToggleWatchLater(menuCodes) : undefined}
           userLiked={userLiked}
           watchLater={watchLater}
-          onPlay={onPlay}
-          onOpenFolder={onOpenFolder}
-          onOpenDetail={() => onClick?.()}
+          onPlay={menuCodes.length === 1 ? onPlay : undefined}
+          onOpenFolder={menuCodes.length === 1 ? onOpenFolder : undefined}
+          onOpenDetail={menuCodes.length === 1 ? () => onClick?.() : undefined}
         />
       )}
 
-      {/* 품번 · 메타 */}
       <div className="px-3.5 pt-2 pb-2.5 border-t border-white/[0.06] bg-bg-panel/80">
         <p className="text-2xl font-mono font-bold text-indigo-300 leading-tight break-all">
           {productCode}

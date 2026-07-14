@@ -119,13 +119,45 @@ export function VideoPlayer({ session, onClose }: VideoPlayerProps) {
     window.setTimeout(() => setOsd(null), 1200);
   }, []);
 
-  const bumpControls = useCallback(() => {
-    setShowControls(true);
-    if (hideTimer.current) clearTimeout(hideTimer.current);
+  /** 제목/컨트롤 영역 위에 포인터가 있는지 */
+  const CONTROLS_IDLE_MS = 2800;
+
+  const clearHideTimer = useCallback(() => {
+    if (hideTimer.current) {
+      clearTimeout(hideTimer.current);
+      hideTimer.current = null;
+    }
+  }, []);
+
+  const scheduleHideChrome = useCallback(() => {
+    clearHideTimer();
     hideTimer.current = setTimeout(() => {
-      if (playing) setShowControls(false);
-    }, 3000);
-  }, [playing]);
+      const v = videoRef.current;
+      // 일시정지 중에는 컨트롤·제목 유지
+      if (v?.paused) return;
+      setShowControls(false);
+    }, CONTROLS_IDLE_MS);
+  }, [clearHideTimer]);
+
+  /** 제목·컨트롤 영역 호버 또는 키보드 조작 시 표시 + 유휴 타이머 재시작 */
+  const revealChrome = useCallback(() => {
+    setShowControls(true);
+    scheduleHideChrome();
+  }, [scheduleHideChrome]);
+
+  const onChromeEnter = useCallback(() => {
+    setShowControls(true);
+    scheduleHideChrome();
+  }, [scheduleHideChrome]);
+
+  const onChromeMove = useCallback(() => {
+    setShowControls(true);
+    scheduleHideChrome();
+  }, [scheduleHideChrome]);
+
+  const onChromeLeave = useCallback(() => {
+    scheduleHideChrome();
+  }, [scheduleHideChrome]);
 
   const toggleFullscreen = useCallback(async () => {
     const el = containerRef.current;
@@ -147,8 +179,8 @@ export function VideoPlayer({ session, onClose }: VideoPlayerProps) {
     const next = Math.max(0, Math.min(v.duration || 0, v.currentTime + deltaSec));
     v.currentTime = next;
     showOsd(label);
-    bumpControls();
-  }, [showOsd, bumpControls]);
+    revealChrome();
+  }, [showOsd, revealChrome]);
 
   const handleKeyDown = useCallback((e: ReactKeyboardEvent | KeyboardEvent) => {
     const v = videoRef.current;
@@ -169,7 +201,7 @@ export function VideoPlayer({ session, onClose }: VideoPlayerProps) {
         prevent();
         if (v.paused) { void v.play(); showOsd("▶ 재생"); }
         else { v.pause(); showOsd("⏸ 일시정지"); }
-        bumpControls();
+        revealChrome();
         break;
       case "Escape":
       case "Backspace":
@@ -210,7 +242,7 @@ export function VideoPlayer({ session, onClose }: VideoPlayerProps) {
           showOsd(`🔊 ${Math.round(next * 100)}%`);
           return next;
         });
-        bumpControls();
+        revealChrome();
         break;
       case "ArrowDown":
         prevent();
@@ -219,7 +251,7 @@ export function VideoPlayer({ session, onClose }: VideoPlayerProps) {
           showOsd(`🔊 ${Math.round(next * 100)}%`);
           return next;
         });
-        bumpControls();
+        revealChrome();
         break;
       case "m":
       case "M":
@@ -228,13 +260,13 @@ export function VideoPlayer({ session, onClose }: VideoPlayerProps) {
           showOsd(m ? "🔊 음소거 해제" : "🔇 음소거");
           return !m;
         });
-        bumpControls();
+        revealChrome();
         break;
       case "Home":
         prevent();
         v.currentTime = 0;
         showOsd("⏮ 처음으로");
-        bumpControls();
+        revealChrome();
         break;
       default:
         if (/^[1-9]$/.test(key) && v.duration > 0) {
@@ -242,16 +274,22 @@ export function VideoPlayer({ session, onClose }: VideoPlayerProps) {
           const pct = parseInt(key, 10) / 10;
           v.currentTime = v.duration * pct;
           showOsd(`▶ ${parseInt(key, 10) * 10}%`);
-          bumpControls();
+          revealChrome();
         }
         break;
     }
-  }, [onClose, toggleFullscreen, seekBy, showOsd, bumpControls]);
+  }, [onClose, toggleFullscreen, seekBy, showOsd, revealChrome]);
 
   useEffect(() => {
     const onFs = () => setIsFullscreen(!!document.fullscreenElement);
     document.addEventListener("fullscreenchange", onFs);
     return () => document.removeEventListener("fullscreenchange", onFs);
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      if (hideTimer.current) clearTimeout(hideTimer.current);
+    };
   }, []);
 
   useEffect(() => {
@@ -420,17 +458,17 @@ export function VideoPlayer({ session, onClose }: VideoPlayerProps) {
   return (
     <div
       ref={containerRef}
-      className="fixed inset-0 z-[120] bg-black flex flex-col"
-      onMouseMove={bumpControls}
-      onClick={bumpControls}
+      className="fixed inset-0 z-[120] bg-black isolate electron-no-drag"
+      data-no-drag-scroll
     >
-      <div className="relative flex-1 flex items-center justify-center min-h-0 bg-black">
+      {/* 영상 레이어 — 하드웨어 합성 레이어가 오버레이를 덮지 않도록 z-0 */}
+      <div className="absolute inset-0 z-0 flex items-center justify-center bg-black">
         {streamReady && streamSrc ? (
         <video
           ref={videoRef}
           key={`${streamSrc}-${streamEpoch}`}
           src={streamSrc}
-          className="max-w-full max-h-full w-full h-full object-contain"
+          className="relative z-0 max-w-full max-h-full w-full h-full object-contain"
           playsInline
           autoPlay
           preload="auto"
@@ -453,8 +491,15 @@ export function VideoPlayer({ session, onClose }: VideoPlayerProps) {
             void attemptAutoPlay();
           }}
           onTimeUpdate={() => setCurrentTime(videoRef.current?.currentTime ?? 0)}
-          onPlay={() => setPlaying(true)}
-          onPause={() => setPlaying(false)}
+          onPlay={() => {
+            setPlaying(true);
+            scheduleHideChrome();
+          }}
+          onPause={() => {
+            setPlaying(false);
+            clearHideTimer();
+            setShowControls(true);
+          }}
           onEnded={goNextPart}
           onError={() => {
             const err = videoRef.current?.error;
@@ -483,35 +528,39 @@ export function VideoPlayer({ session, onClose }: VideoPlayerProps) {
             <p className="text-slate-400 text-xs max-w-sm break-all">{part.filename}</p>
           </div>
         ) : null}
+      </div>
 
+      {/* 자막·OSD — 영상 위, 컨트롤 아래 */}
+      <div className="absolute inset-0 z-10 pointer-events-none">
         <SubtitleOverlay
           cue={trackIndex >= 0 ? activeCue : null}
           videoWidth={videoSize.w}
           videoHeight={videoSize.h}
           display={subtitleOptions}
         />
-
         {osd && (
-          <div className="absolute top-1/4 left-1/2 -translate-x-1/2 px-5 py-2.5 rounded-xl bg-black/70 text-white text-sm font-medium pointer-events-none">
+          <div className="absolute top-1/4 left-1/2 -translate-x-1/2 px-5 py-2.5 rounded-xl bg-black/70 text-white text-sm font-medium">
             {osd}
           </div>
         )}
-
         {loadError && (
-          <div className="absolute inset-x-0 bottom-24 flex justify-center px-6">
+          <div className="absolute inset-x-0 bottom-24 flex justify-center px-6 pointer-events-none">
             <p className="text-amber-300 text-sm bg-black/80 px-4 py-2 rounded-lg">{loadError}</p>
           </div>
         )}
       </div>
 
-      {/* 상단 바 */}
+      {/* 상단 바 — 숨겨져 있어도 히트 가능(호버로 재표시) */}
       <div
         className={cn(
-          "absolute top-0 inset-x-0 flex items-center gap-3 px-4 py-3 bg-gradient-to-b from-black/80 to-transparent transition-opacity",
-          showControls ? "opacity-100" : "opacity-0 pointer-events-none",
+          "absolute top-0 inset-x-0 z-30 flex items-center gap-3 px-4 py-3 min-h-[4.5rem] bg-gradient-to-b from-black/80 to-transparent transition-opacity",
+          showControls ? "opacity-100" : "opacity-0",
         )}
+        onMouseEnter={onChromeEnter}
+        onMouseMove={onChromeMove}
+        onMouseLeave={onChromeLeave}
       >
-        <div className="min-w-0 flex-1">
+        <div className={cn("min-w-0 flex-1", !showControls && "pointer-events-none")}>
           <p className="text-2xl font-mono font-bold text-indigo-300 leading-tight truncate">{code}</p>
           <p className="text-lg text-[#d0d0e8] truncate leading-snug mt-0.5">
             {session.title || part.filename}
@@ -525,20 +574,28 @@ export function VideoPlayer({ session, onClose }: VideoPlayerProps) {
         <button
           type="button"
           onClick={onClose}
-          className="w-9 h-9 rounded-lg bg-white/10 hover:bg-white/20 flex items-center justify-center"
+          className={cn(
+            "w-9 h-9 rounded-lg bg-white/10 hover:bg-white/20 flex items-center justify-center shrink-0",
+            !showControls && "pointer-events-none",
+          )}
           title="닫기 (Esc)"
+          tabIndex={showControls ? 0 : -1}
         >
           <X className="w-5 h-5" />
         </button>
       </div>
 
-      {/* 하단 컨트롤 */}
+      {/* 하단 컨트롤 — 숨겨져 있어도 히트 가능 */}
       <div
         className={cn(
-          "absolute bottom-0 inset-x-0 px-4 pb-4 pt-8 bg-gradient-to-t from-black/90 to-transparent transition-opacity",
-          showControls ? "opacity-100" : "opacity-0 pointer-events-none",
+          "absolute bottom-0 inset-x-0 z-30 px-4 pb-4 pt-8 min-h-[6.5rem] bg-gradient-to-t from-black/90 to-transparent transition-opacity",
+          showControls ? "opacity-100" : "opacity-0",
         )}
+        onMouseEnter={onChromeEnter}
+        onMouseMove={onChromeMove}
+        onMouseLeave={onChromeLeave}
       >
+        <div className={cn(!showControls && "pointer-events-none")}>
         <input
           type="range"
           min={0}
@@ -549,6 +606,7 @@ export function VideoPlayer({ session, onClose }: VideoPlayerProps) {
             const v = videoRef.current;
             if (!v) return;
             v.currentTime = parseFloat(e.target.value);
+            revealChrome();
           }}
           className="w-full h-1 accent-indigo-500 cursor-pointer mb-3"
         />
@@ -692,6 +750,7 @@ export function VideoPlayer({ session, onClose }: VideoPlayerProps) {
         <p className="text-[10px] text-slate-500 mt-2 hidden sm:block">
           Space 재생 · ←→ 탐색(Shift 30초/Ctrl 1분/Alt 5분) · ↑↓ 볼륨 · M 음소거 · F 전체화면 · 1-9 %이동 · Esc 닫기
         </p>
+        </div>
       </div>
     </div>
   );

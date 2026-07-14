@@ -28,8 +28,8 @@ const VIEW_MAP: { id: View; component: React.ComponentType }[] = [
   { id: "settings",   component: SettingsView },
 ];
 
-/** 탭 전환 시 언마운트하지 않고 목록·스크롤 상태를 유지할 화면 */
-const PERSIST_VIEWS: ReadonlySet<View> = new Set(["actress", "library"]);
+/** 탭 전환 시 언마운트하지 않고 목록·스크롤·로그 상태를 유지할 화면 */
+const PERSIST_VIEWS: ReadonlySet<View> = new Set(["actress", "library", "processing"]);
 
 function ViewStack() {
   const { currentView } = useNavigation();

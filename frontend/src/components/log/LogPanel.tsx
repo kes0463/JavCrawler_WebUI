@@ -1,3 +1,4 @@
+import { memo } from "react";
 import { cn } from "@/lib/utils";
 import { useStickToBottomScroll } from "@/hooks/useStickToBottomScroll";
 
@@ -23,7 +24,12 @@ const LEVEL_CONFIG: Record<string, { color: string; prefix: string }> = {
   success: { color: "text-emerald-400",  prefix: "[ OK ]" },
 };
 
-export function LogPanel({ entries, autoScroll = true, maxHeight = "240px", className }: LogPanelProps) {
+export const LogPanel = memo(function LogPanel({
+  entries,
+  autoScroll = true,
+  maxHeight = "240px",
+  className,
+}: LogPanelProps) {
   const { containerRef, onScroll } = useStickToBottomScroll(entries, autoScroll);
 
   return (
@@ -56,4 +62,4 @@ export function LogPanel({ entries, autoScroll = true, maxHeight = "240px", clas
       )}
     </div>
   );
-}
+});

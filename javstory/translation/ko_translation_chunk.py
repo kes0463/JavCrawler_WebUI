@@ -9,8 +9,9 @@
 
 환경: `JAVSTORY_TRANSLATION_PROFILE`(default|keeper|deepseek_chat|budget|qwen35|qwen3_14|gemma3_12|jkv_12b), `JAVSTORY_TRANSLATION_OPENROUTER_MODEL`,
 `JAVSTORY_TRANSLATION_PROVIDER`, `JAVSTORY_TRANSLATION_OLLAMA_MODEL`,
-`JAVSTORY_TRANSLATION_CHUNK_TARGET_SEC` / `_OVERLAP_SEC` (미설정 시 `JAVSTORY_CORRECTION_CHUNK_*` → 티어 기본: DeepSeek V3.2 18s/5s, DeepSeek Chat 16s/4s, GLM-5.1 14s/4s, Ollama는 `correction_chunk._ollama_chunk_params_by_model` 과 동일 — Qwen3:14B 18/5, Qwen3.5:9B 16/4.5, Qwen3:8B 15/4, Qwen2.5:14B 17/4.5, Gemma3:12B 16/4.5, Gemma4 16/4, 기타 Ollama 300s/20s, 그 외 OpenRouter 50s/10s),
-`JAVSTORY_TRANSLATION_QWEN_MAX_TOKENS`(Qwen만, `JAVSTORY_TRANSLATION_OLLAMA_MAX_TOKENS` 미설정 시 기본 2048),
+`JAVSTORY_TRANSLATION_CHUNK_TARGET_SEC` / `_OVERLAP_SEC` (미설정 시 `JAVSTORY_CORRECTION_CHUNK_*` → 티어 기본: DeepSeek V3.2 18s/5s, DeepSeek Chat 16s/4s, GLM-5.1 14s/4s, Ollama는 `correction_chunk._ollama_chunk_params_by_model` 과 동일 — Qwen3:14B 18/5, Qwen3.5:9B 16/4.5, Qwen3:8B 15/4, Qwen2.5:14B 17/4.5, Gemma3:12B 16/4.5, Gemma4 16/4, llama.cpp Qwen ~10s/3s · Gemma ~12s/3.5s(짧은 n_ctx·fit 대비), 기타 Ollama 300s/20s, 그 외 OpenRouter 50s/10s),
+`JAVSTORY_TRANSLATION_QWEN_MAX_TOKENS`(Qwen만, `JAVSTORY_TRANSLATION_OLLAMA_MAX_TOKENS` 미설정 시 Ollama 기본 2048 / llama.cpp 기본 768),
+`JAVSTORY_TRANSLATION_LOCAL_HINT_MAX_CHARS`(로컬 스토리 힌트 상한, 기본 900),
 `JAVSTORY_TRANSLATION_CONCURRENCY`, `JAVSTORY_LOG_FULL_TRANSLATION_PROMPT`(1/true 시 청크마다 system+user 전체 로그),
 `JAVSTORY_LOG_TRANSLATION_START_DETAILS`(1/true 시 번역 시작 직후 시스템 프롬프트·번역 노트(전역/배우/작품/결합)·스토리 힌트 요약 로그),
 `JAVSTORY_SUBTITLE_COLLAPSE_VOCAL_REPEAT`(0/false 시 번역 직후 동일 한글 반복 압축 비활성; 기본 1),
@@ -32,7 +33,6 @@ from typing import Any, Callable, Dict, List, Optional
 
 from javstory.translation.correction_chunk import (
     _apply_json_chunk,
-    _chunk_json_for_segments,
     _ollama_chunk_params_by_model,
     collapse_repeated_vocal_sounds,
 )
@@ -43,14 +43,14 @@ from javstory.translation.translation_prompt_config import (
     uses_html_translation_prompt,
 )
 from javstory.translation.llm_backoff import route_with_backoff
-from javstory.translation.story_context_prompts import resolve_grok_scene_for_chunk
 from javstory.transcription.stt_types import STTCancelled, SimpleSegment
+from javstory.translation.story_context_prompts import resolve_grok_scene_for_chunk
 
 CancelCheck = Optional[Callable[[], bool]]
 ContentLineFn = Optional[Callable[[dict[str, object]], None]]
 OptionalLogger = Optional[Callable[[str], None]]
 _CACHE_SCHEMA_VERSION = 2
-_CACHE_PROMPT_VERSION = "ko_translation_chunk_cache_v4"
+_CACHE_PROMPT_VERSION = "ko_translation_chunk_cache_v5"
 
 # ── 번역 프롬프트 상수·함수 (구 background_prompts.py에서 인라인) ──
 
@@ -65,24 +65,47 @@ RETRY_TRANSLATION_PROMPT_STRICT = (
     "2) 各要素は `{\"index\": 数字, \"text\": \"韓国語テキスト\"}` のみ\n"
     "3) JSON以外(説明・前置き・注釈)は一切含めないこと"
 )
+RETRY_TRANSLATION_PROMPT_EN = (
+    "Previous reply was not valid JSON. Output ONLY "
+    '[{\"index\":0,\"text\":\"...\"}, ...] with every index present. '
+    "No markdown, no explanation, no thinking."
+)
+RETRY_TRANSLATION_PROMPT_STRICT_EN = (
+    "JSON parse failed again. Strict rules:\n"
+    "1) Start with [ and end with ]\n"
+    "2) Each item is {\"index\": number, \"text\": \"Korean Hangul only\"}\n"
+    "3) Include EVERY index from the source JSON — incomplete arrays fail\n"
+    "4) Do not copy Japanese kana/kanji into text\n"
+    "5) No prose outside the JSON array"
+)
 RETRY_TRANSLATION_GEMMA_APPEND = (
-    "\n\n[Gemma追加指示] 出力はJSONのみ。挨拶・説明・マークダウン不要。"
-    " `[{\"index\":0,\"text\":\"...\"},...]` だけ出力。"
+    "\n\n[Gemma] JSON array only. No greeting/explanation/markdown. "
+    "Translate into Korean Hangul; never echo Japanese source text."
 )
 RETRY_TRANSLATION_KO_MIX_APPEND = (
     "\n\n[重要] text値は100%韓国語のみ。"
     "日本語・英語・中国語が混入した場合は自然な韓国語に直してください。"
+)
+RETRY_TRANSLATION_KO_MIX_APPEND_EN = (
+    "\n\n[IMPORTANT] Every text value must be 100% Korean Hangul. "
+    "Rewrite any Japanese/English/Chinese leakage into natural Korean."
 )
 RETRY_TRANSLATION_KO_PURE_APPEND = (
     "\n\n[중요] 번역문은 100% 한글만 사용하세요. "
     "영어·로마자·일본어 가나·한자(漢字)를 절대 넣지 마세요. "
     "혼합 표기(예: 바anko, 濡라줘)는 금지입니다."
 )
+RETRY_TRANSLATION_KO_PURE_APPEND_EN = (
+    "\n\n[CRITICAL] Previous texts still contain Japanese or non-Hangul. "
+    "Re-output the full JSON array with 100% Korean Hangul only. "
+    "No Latin letters, no kana, no kanji, no mixed spellings."
+)
 _KO_CONTAM_LATIN = re.compile(r"[a-zA-Z]")
 _KO_CONTAM_KANA = re.compile(r"[\u3040-\u30ff\u31f0-\u31ff]")
 _KO_CONTAM_CJK = re.compile(r"[\u4e00-\u9fff\u3400-\u4dbf]")
 _KO_CONTAM_THAI = re.compile(r"[\u0e00-\u0e7f]")
 _HANGUL_SYLLABLE = re.compile(r"[\uac00-\ud7a3]")
+_NON_LEXICAL_LINE = re.compile(r"^[\s.。．…・~～\-—–!！?？♪♡♥❤\*＊]+$")
 
 
 def has_ko_subtitle_contamination(text: str) -> bool:
@@ -101,22 +124,81 @@ def has_ko_subtitle_contamination(text: str) -> bool:
     return False
 
 
-def is_acceptable_ko_subtitle_line(text: str) -> bool:
-    """번역 완료로 인정할 한 줄: 비어 있지 않고, 한글이 있으며, 비한글 혼입 없음."""
+def scrub_ja_residue_from_ko_line(text: str) -> str:
+    """한글이 있는 줄에서 남은 가나·한자만 제거(Gemma 혼합 출력 보정).
+
+    한글이 전혀 없으면 원문을 유지해 품질 검사가 실패하도록 둔다.
+    """
+    t = (text or "").strip()
+    if not t or not _HANGUL_SYLLABLE.search(t):
+        return t
+    if not (_KO_CONTAM_KANA.search(t) or _KO_CONTAM_CJK.search(t)):
+        return t
+    cleaned = _KO_CONTAM_KANA.sub("", t)
+    cleaned = _KO_CONTAM_CJK.sub("", cleaned)
+    cleaned = re.sub(r"[ \t]{2,}", " ", cleaned).strip(" ,，、")
+    return cleaned if cleaned and _HANGUL_SYLLABLE.search(cleaned) else t
+
+
+def postprocess_ko_translation_text(text: str) -> str:
+    """번역 text 후처리: 반복 신음 압축 + 일본어 잔여 문자 제거."""
+    t = collapse_repeated_vocal_sounds(text)
+    return scrub_ja_residue_from_ko_line(t)
+
+
+def is_acceptable_ko_subtitle_line(text: str, *, source_ja: str | None = None) -> bool:
+    """번역 완료로 인정할 한 줄: 비어 있지 않고, 한글이 있으며, 비한글 혼입 없음.
+
+    원문이 기호·점만인 줄은 번역도 동일하게 비어있지 않은 기호 줄이면 허용한다.
+    """
     t = (text or "").strip()
     if not t:
         return False
+    if source_ja is not None:
+        src = (source_ja or "").strip()
+        if src and _NON_LEXICAL_LINE.match(src) and _NON_LEXICAL_LINE.match(t):
+            return True
     if not _HANGUL_SYLLABLE.search(t):
         return False
     return not has_ko_subtitle_contamination(t)
 
 
-def segments_translation_quality_ok(segs: List[SimpleSegment]) -> bool:
-    return bool(segs) and all(is_acceptable_ko_subtitle_line(s.text or "") for s in segs)
+def segments_translation_quality_ok(
+    segs: List[SimpleSegment],
+    *,
+    source_texts: List[str] | None = None,
+) -> bool:
+    if not segs:
+        return False
+    for i, s in enumerate(segs):
+        src = source_texts[i] if source_texts is not None and i < len(source_texts) else None
+        if not is_acceptable_ko_subtitle_line(s.text or "", source_ja=src):
+            return False
+    return True
 
 
 def segments_have_ko_contamination(segs: List[SimpleSegment]) -> bool:
     return any(has_ko_subtitle_contamination(s.text or "") for s in segs)
+
+
+def _source_texts_from_chunk_json(chunk_json: str, n: int) -> List[str]:
+    out = [""] * n
+    try:
+        data = json.loads(chunk_json)
+    except json.JSONDecodeError:
+        return out
+    if not isinstance(data, list):
+        return out
+    for item in data:
+        if not isinstance(item, dict):
+            continue
+        try:
+            idx = int(item.get("index"))
+        except (TypeError, ValueError):
+            continue
+        if 0 <= idx < n:
+            out[idx] = str(item.get("text") or "")
+    return out
 
 
 def _restore_ja_texts_from_chunk_json(tgt_segs: List[SimpleSegment], chunk_json: str) -> None:
@@ -139,9 +221,15 @@ def _restore_ja_texts_from_chunk_json(tgt_segs: List[SimpleSegment], chunk_json:
             seg.text = by_idx[i]
 
 
-def system_prompt_translation_chunk(tier: Dict[str, Any]) -> str:
+def _is_local_gemma_tier(tier: Dict[str, Any]) -> bool:
     prov = str(tier.get("provider") or "").lower()
     model = str(tier.get("model") or "").lower()
+    return prov in ("ollama", "llamacpp") and "gemma" in model
+
+
+def system_prompt_translation_chunk(tier: Dict[str, Any]) -> str:
+    if _is_local_gemma_tier(tier):
+        return system_prompt_translation_local_gemma()
     base = (
         "あなたは日本語→韓国語の字幕翻訳の専門家です。\n"
         "入力はJSON配列 `[{\"index\":N, \"text\":\"日本語セリフ\"}, ...]` です。\n"
@@ -155,12 +243,35 @@ def system_prompt_translation_chunk(tier: Dict[str, Any]) -> str:
         "長い場合は「…」1つにまとめる(例: 아…)。同一文字を何十回も繰り返して画面幅を埋めないこと\n"
         "- text値は100%韓国語のみ(日本語・英語混入禁止)\n"
     )
-    if prov == "ollama" and "gemma" in model:
-        base += (
-            "\n[Gemma専用] 出力はJSONのみ。挨拶・説明・マークダウン不要。"
-            " `[{\"index\":0,\"text\":\"...\"},...]` だけ出力。\n"
-        )
     return base
+
+
+def system_prompt_translation_local_gemma() -> str:
+    """Gemma(E4B 등)는 일본어 system보다 짧은 영문 JSON-only 지시가 형식 준수율이 높다."""
+    return (
+        "You are a Japanese→Korean subtitle translator.\n"
+        "Input: JSON array [{\"index\":N,\"text\":\"Japanese line\"}, ...]\n"
+        "Output: ONLY the same JSON array with each text translated to natural colloquial Korean.\n"
+        "Hard rules:\n"
+        "- Start with [ and end with ]. No markdown fences, no explanation, no thinking.\n"
+        "- Keep index values unchanged. Do not add start/end fields.\n"
+        "- Include EVERY index from the input. Partial arrays are invalid.\n"
+        "- text must be 100% Korean Hangul (no Japanese kana/kanji, no English letters).\n"
+        "- Never copy the Japanese source into text.\n"
+        "- Moans/gasps: at most 2 repeated Hangul syllables, or one syllable + “…”.\n"
+    )
+
+
+def system_prompt_translation_local_gemma_retry() -> str:
+    """1차 Gemma system과 구분 — 일본어 에코·부분 JSON을 강하게 금지."""
+    return (
+        "CRITICAL RETRY — previous output failed validation.\n"
+        "Return ONLY a complete JSON array. Translate every line into Korean Hangul.\n"
+        "Rules:\n"
+        "- [{\"index\":N,\"text\":\"한국어\"}, ...] covering ALL source indices\n"
+        "- Do NOT copy Japanese. Do NOT omit indices. Do NOT wrap in markdown.\n"
+        "- text = Hangul only (no Latin/kana/kanji)\n"
+    )
 
 
 def system_prompt_translation_ollama_qwen_neutral() -> str:
@@ -171,11 +282,18 @@ def system_prompt_translation_ollama_qwen_neutral() -> str:
         "Rules:\n"
         "- Output ONLY the JSON array, nothing else\n"
         "- Keep index values unchanged\n"
+        "- Include every index from the input\n"
         "- Translate all text to 100% Korean (no Japanese/English)\n"
         "- Use colloquial Korean suitable for subtitles\n"
         "- Moans, gasps, non-lexical sounds: at most 2 repeated syllables, or one syllable + “…”; "
         "never fill the line with the same character dozens of times\n"
     )
+
+
+def _chunk_json_for_translation(segs: List[SimpleSegment]) -> str:
+    """번역 입력은 index+text만 — start/end를 넣으면 소형 로컬 모델이 형식을 자주 깨뜨린다."""
+    arr = [{"index": i, "text": s.text} for i, s in enumerate(segs)]
+    return json.dumps(arr, ensure_ascii=False)
 
 
 def render_glm_translation_chunk_user(
@@ -187,8 +305,26 @@ def render_glm_translation_chunk_user(
     extra_hints: str,
     *,
     compact_translation_hints: bool = False,
+    english_local: bool = False,
 ) -> str:
     parts: List[str] = []
+    if english_local:
+        parts.append(f"[Background]\n{background_json_str}")
+        if scene_id:
+            parts.append(f"[Scene] id={scene_id} tone={scene_tone}")
+        if extra_hints and extra_hints.strip():
+            if compact_translation_hints:
+                parts.append("[TranslationHints]\n(same as chunk 0 — omitted)")
+            else:
+                parts.append(f"[TranslationHints]\n{extra_hints.strip()}")
+        parts.append("[Output language] Korean Hangul only (100%)")
+        parts.append(
+            "[Output format] JSON array only. "
+            'Each item: {"index":N,"text":"한국어"}. No start/end. No markdown/explanation.'
+        )
+        parts.append(f"[Source JSON]\n{chunk_json}")
+        return "\n\n".join(parts)
+
     parts.append(f"[作品背景]\n{background_json_str}")
     if scene_id:
         parts.append(f"[シーン] id={scene_id} tone={scene_tone}")
@@ -198,6 +334,10 @@ def render_glm_translation_chunk_user(
         else:
             parts.append(f"[TranslationHints]\n{extra_hints.strip()}")
     parts.append(f"[出力 言語] 韓国語のみ (100% Korean)")
+    parts.append(
+        "[出力形式] JSON配列のみ。"
+        ' 各要素は {"index":N,"text":"한국어"} 。start/end 禁止。説明・マークダウン禁止。'
+    )
     parts.append(f"[翻訳対象 JSON]\n{chunk_json}")
     return "\n\n".join(parts)
 
@@ -267,8 +407,16 @@ def _apply_cached_translation(
         if not isinstance(items, list) or not items:
             return False
         raw = json.dumps(items, ensure_ascii=False)
-        if _apply_json_chunk(tgt_segs, raw, log=log, log_prefix="[KO-TRANSLATE CACHE]"):
-            if not segments_translation_quality_ok(tgt_segs):
+        if _apply_json_chunk(
+            tgt_segs,
+            raw,
+            log=log,
+            log_prefix="[KO-TRANSLATE CACHE]",
+            require_start_end=False,
+            require_complete=True,
+        ):
+            src_texts = _source_texts_from_chunk_json(chunk_json, len(tgt_segs))
+            if not segments_translation_quality_ok(tgt_segs, source_texts=src_texts):
                 log(
                     f"[KO-TRANSLATE] 캐시 품질 불량(일본어·혼입) — 무시: {cache_path.name}"
                 )
@@ -395,16 +543,99 @@ def _use_compact_translation_hints(chunk_idx: int) -> bool:
     return True
 
 
+def _local_translation_provider(tier: Dict[str, Any]) -> bool:
+    return str(tier.get("provider") or "").lower() in ("ollama", "llamacpp")
+
+
+def _local_hint_max_chars() -> int:
+    raw = (os.environ.get("JAVSTORY_TRANSLATION_LOCAL_HINT_MAX_CHARS", "") or "").strip()
+    if raw:
+        try:
+            return max(200, int(raw))
+        except ValueError:
+            pass
+    return 900
+
+
+def _clip_text(text: str, max_chars: int) -> str:
+    t = text or ""
+    if max_chars <= 0 or len(t) <= max_chars:
+        return t
+    return t[: max(0, max_chars - 1)].rstrip() + "…"
+
+
+def _compact_background_json_for_local(background_json_str: str) -> str:
+    """로컬 n_ctx가 짧을 때 배경 JSON 필드 축약."""
+    raw = (background_json_str or "").strip()
+    if not raw:
+        return raw
+    try:
+        obj = json.loads(raw)
+    except Exception:
+        return _clip_text(raw, 600)
+    if not isinstance(obj, dict):
+        return _clip_text(raw, 600)
+    out: Dict[str, Any] = {}
+    for key in (
+        "product_code",
+        "title_ko",
+        "title_ja",
+        "actors",
+        "maker",
+        "release_date",
+        "genres",
+        "synopsis_short",
+    ):
+        val = obj.get(key)
+        if val is None or val == "":
+            continue
+        s = str(val).strip()
+        if not s:
+            continue
+        if key == "synopsis_short":
+            s = _clip_text(s, 180)
+        elif key == "genres":
+            s = _clip_text(s, 120)
+        elif key.startswith("title"):
+            s = _clip_text(s, 100)
+        out[key] = s
+    return json.dumps(out, ensure_ascii=False, sort_keys=True)
+
+
+def _story_hints_for_tier(
+    tier: Dict[str, Any],
+    story_context_hints: Optional[str],
+    story_context_grok_json: Optional[Dict[str, Any]],
+) -> str:
+    """로컬 모델은 Grok 씬 본문을 생략한 compact 힌트로 컨텍스트 초과를 막는다."""
+    if not _local_translation_provider(tier):
+        return _merge_translation_hints(story_context_hints, "")
+    hints_body = ""
+    if isinstance(story_context_grok_json, dict) and story_context_grok_json:
+        from javstory.translation.story_context_prompts import format_story_context_for_translation
+
+        hints_body = format_story_context_for_translation(
+            story_context_grok_json,
+            compact=True,
+            max_chars=_local_hint_max_chars(),
+        )
+    elif story_context_hints and str(story_context_hints).strip():
+        hints_body = _clip_text(str(story_context_hints).strip(), _local_hint_max_chars())
+    return _merge_translation_hints(hints_body or None, "")
+
+
 def _default_chunk_durations(tier: Dict[str, Any]) -> tuple[float, float]:
     model_l = (tier.get("model") or "").lower()
     if tier.get("provider") == "ollama":
         return _ollama_chunk_params_by_model(model_l)
     if tier.get("provider") == "llamacpp":
-        if "gemma" in model_l:
-            return 16.0, 4.0
+        # Qwen 14B: fit으로 n_ctx가 줄어들 수 있어 청크를 짧게.
+        # Gemma E4B: 상대적으로 가벼워 청크를 키워 왕복·파싱 실패 횟수를 줄인다.
         if "qwen" in model_l:
-            return 16.0, 4.5
-        return 16.0, 4.0
+            return 10.0, 3.0
+        if "gemma" in model_l:
+            return 12.0, 3.5
+        return 14.0, 3.5
     if tier.get("provider") == "gemini":
         try:
             from javstory.config.app_config import gemini_default_chunk_params
@@ -510,16 +741,15 @@ def _translation_retry_log(logger: Callable[[str], None]) -> Callable[[str], Non
 
 
 def _retry_translation_user_content(tier: Dict[str, Any], *, attempt: int) -> str:
-    """attempt 1=첫 재시도, 2=2차 재시도. Gemma는 JSON 강조, 전 티어에 한국어 단일 출력 재확인."""
-    prov = str(tier.get("provider") or "").lower()
-    model = str(tier.get("model") or "").lower()
-    gemma_extra = prov in ("ollama", "llamacpp") and "gemma" in model
+    """attempt 1=첫 재시도, 2=2차 재시도. Gemma는 영문 JSON 강조(일본어 재시도 문구가 에코를 유발함)."""
+    gemma = _is_local_gemma_tier(tier)
+    if gemma:
+        base = RETRY_TRANSLATION_PROMPT_EN if attempt == 1 else RETRY_TRANSLATION_PROMPT_STRICT_EN
+        return base + RETRY_TRANSLATION_GEMMA_APPEND + RETRY_TRANSLATION_KO_MIX_APPEND_EN
     tail = RETRY_TRANSLATION_KO_MIX_APPEND
     if attempt == 1:
-        base = RETRY_TRANSLATION_PROMPT
-        return base + (RETRY_TRANSLATION_GEMMA_APPEND if gemma_extra else "") + tail
-    base = RETRY_TRANSLATION_PROMPT_STRICT
-    return base + (RETRY_TRANSLATION_GEMMA_APPEND if gemma_extra else "") + tail
+        return RETRY_TRANSLATION_PROMPT + tail
+    return RETRY_TRANSLATION_PROMPT_STRICT + tail
 
 
 def _want_full_translation_prompt_log(explicit: Optional[bool]) -> bool:
@@ -712,15 +942,35 @@ async def translate_ja_segments_to_ko_async(
         except ValueError:
             tier = {**tier, "temperature": 0.22}
         if not (os.environ.get("JAVSTORY_TRANSLATION_OLLAMA_MAX_TOKENS", "") or "").strip():
-            qmt = (os.environ.get("JAVSTORY_TRANSLATION_QWEN_MAX_TOKENS", "") or "").strip() or "2048"
-            try:
-                tier = {**tier, "max_tokens": max(512, int(qmt))}
-            except ValueError:
-                tier = {**tier, "max_tokens": 2048}
+            if prov_l == "llamacpp":
+                from javstory.llm.llamacpp_backend import llamacpp_max_tokens_from_env
 
-    extra_hints = _merge_translation_hints(story_context_hints, "")
+                # fit으로 n_ctx가 ~2k로 줄 때 생성 여유를 남기기 위해 기본 768
+                qmt = (os.environ.get("JAVSTORY_TRANSLATION_QWEN_MAX_TOKENS", "") or "").strip()
+                if qmt:
+                    try:
+                        tier = {**tier, "max_tokens": max(512, int(qmt))}
+                    except ValueError:
+                        tier = {**tier, "max_tokens": llamacpp_max_tokens_from_env(default=768)}
+                else:
+                    tier = {**tier, "max_tokens": llamacpp_max_tokens_from_env(default=768)}
+            else:
+                qmt = (os.environ.get("JAVSTORY_TRANSLATION_QWEN_MAX_TOKENS", "") or "").strip() or "2048"
+                try:
+                    tier = {**tier, "max_tokens": max(512, int(qmt))}
+                except ValueError:
+                    tier = {**tier, "max_tokens": 2048}
 
-    # 전역+배우+작품 노트 결합(Gemini {{note}}용). 결합 결과는 build_translation_note로 합쳐짐.
+    extra_hints = _story_hints_for_tier(tier, story_context_hints, story_context_grok_json)
+    if _local_translation_provider(tier):
+        background_json_str = _compact_background_json_for_local(background_json_str)
+        if extra_hints.strip():
+            log(
+                f"[KO-TRANSLATE] 로컬 컨텍스트 절약 — 힌트 {len(extra_hints)}자 / "
+                f"배경 {len(background_json_str)}자 (Grok 씬 본문 생략)"
+            )
+
+    # 전역+배우+작품 노트 결합 — Gemini {{note}} + JSON [TranslationHints] + 글로서리
     try:
         from javstory.translation.translation_notes import (
             combine_translation_notes,
@@ -736,6 +986,17 @@ async def translate_ja_segments_to_ko_async(
         combined_user_note = ""
         extract_glossary = None  # type: ignore[assignment]
         apply_glossary_to_text = None  # type: ignore[assignment]
+
+    # JSON/로컬 경로에도 번역 노트를 힌트로 주입 (로컬은 길이 제한)
+    if combined_user_note.strip():
+        note_for_hints = combined_user_note
+        if _local_translation_provider(tier):
+            note_for_hints = _clip_text(combined_user_note, 1400)
+        note_block = f"[번역 노트]\n{note_for_hints}"
+        extra_hints = "\n\n".join(
+            p for p in (extra_hints.strip(), note_block) if p
+        )
+        log(f"[KO-TRANSLATE] 번역 노트 힌트 주입 ({len(note_for_hints)}자)")
 
     # 후처리 글로서리 — LLM이 놓친 토큰을 강제 치환.
     glossary_pairs: list[tuple[str, str]] = []
@@ -779,13 +1040,27 @@ async def translate_ja_segments_to_ko_async(
             "[KO-TRANSLATE] 로컬 Qwen(llama.cpp/Ollama)은 GPU·모델 크기에 따라 청크당 매우 느릴 수 있습니다. "
             "실사용 속도가 필요하면 OpenRouter 프로필(default/keeper 등) 권장. "
             "로컬 유지 시: VRAM 여유면 JAVSTORY_TRANSLATION_CONCURRENCY=2, "
-            "여전히 느리면 JAVSTORY_TRANSLATION_QWEN_MAX_TOKENS=1536 등으로 추가 하향."
+            "컨텍스트 초과 시 JAVSTORY_LLAMACPP_CTX 상향 또는 JAVSTORY_LLAMACPP_FIT=off, "
+            "여전히 느리면 JAVSTORY_TRANSLATION_QWEN_MAX_TOKENS=512 등으로 추가 하향."
+        )
+
+    async def _route(messages: List[dict[str, str]], tier_use: Dict[str, Any] = tier) -> str:
+        return await route_with_backoff(
+            router,
+            messages,
+            tier_use,
+            log=_translation_retry_log(log),
+            should_cancel=should_cancel,
         )
 
     async def _one(idx: int, chunk: dict) -> None:
+        if should_cancel and should_cancel():
+            raise STTCancelled()
         async with semaphore:
+            if should_cancel and should_cancel():
+                raise STTCancelled()
             tgt_segs: List[SimpleSegment] = chunk["target"]
-            chunk_json = _chunk_json_for_segments(tgt_segs) if tgt_segs else "[]"
+            chunk_json = _chunk_json_for_translation(tgt_segs) if tgt_segs else "[]"
             try:
                 await _one_chunk(idx, chunk)
             except STTCancelled:
@@ -804,7 +1079,7 @@ async def translate_ja_segments_to_ko_async(
             if not tgt_segs:
                 return
 
-            chunk_json = _chunk_json_for_segments(tgt_segs)
+            chunk_json = _chunk_json_for_translation(tgt_segs)
             anchor_sec = (tgt_segs[0].start + tgt_segs[-1].end) / 2.0 if tgt_segs else 0.0
             scene_id, scene_tone = resolve_grok_scene_for_chunk(
                 anchor_sec,
@@ -869,9 +1144,7 @@ async def translate_ja_segments_to_ko_async(
                     f"[KO-TRANSLATE] 청크 {idx + 1}/{total_chunks} HTML LLM 대기 중… "
                     f"~{tgt_segs[0].start:.1f}–{tgt_segs[-1].end:.1f}s"
                 )
-                res = await route_with_backoff(
-                    router, messages_g, tier, log=_translation_retry_log(log)
-                )
+                res = await _route(messages_g)
                 log(
                     f"[KO-TRANSLATE] 청크 {idx + 1}/{total_chunks} HTML 응답 수신 "
                     f"({time.monotonic() - t_req:.1f}s)"
@@ -897,9 +1170,7 @@ async def translate_ja_segments_to_ko_async(
                             ),
                         },
                     ]
-                    res2 = await route_with_backoff(
-                        router, retry_msgs, tier, log=_translation_retry_log(log)
-                    )
+                    res2 = await _route(retry_msgs)
                     applied_ok = gemini_prompts.parse_html_translation_response(res2 or "", tgt_segs)
                     if not applied_ok:
                         log(
@@ -920,9 +1191,7 @@ async def translate_ja_segments_to_ko_async(
                         {"role": "system", "content": sys_prompt},
                         {"role": "user", "content": pure_user},
                     ]
-                    res3 = await route_with_backoff(
-                        router, pure_msgs, tier, log=_translation_retry_log(log)
-                    )
+                    res3 = await _route(pure_msgs)
                     applied_ok = gemini_prompts.parse_html_translation_response(res3 or "", tgt_segs)
                     if applied_ok and not segments_translation_quality_ok(tgt_segs):
                         log(
@@ -960,6 +1229,24 @@ async def translate_ja_segments_to_ko_async(
                 log(f"[KO-TRANSLATE] 현재 {idx + 1} / {total_chunks} — 완료")
                 return
             # ── 기존 JSON 번역 경로 ───────────────────────────────────
+            use_en_local = _is_local_gemma_tier(tier)
+            src_texts = _source_texts_from_chunk_json(chunk_json, len(tgt_segs))
+            lp = "[KO-TRANSLATE]"
+
+            def _apply_ko_json(raw: str) -> bool:
+                return _apply_json_chunk(
+                    tgt_segs,
+                    raw,
+                    log=log,
+                    log_prefix=lp,
+                    postprocess_text=postprocess_ko_translation_text,
+                    require_start_end=False,
+                    require_complete=True,
+                )
+
+            def _quality_ok() -> bool:
+                return segments_translation_quality_ok(tgt_segs, source_texts=src_texts)
+
             user_p = render_glm_translation_chunk_user(
                 background_json_str,
                 chunk_json,
@@ -968,6 +1255,7 @@ async def translate_ja_segments_to_ko_async(
                 scene_tone,
                 extra_hints,
                 compact_translation_hints=compact_hints,
+                english_local=use_en_local,
             )
             messages: List[dict[str, str]] = [
                 {"role": "system", "content": system_prompt_translation_chunk(tier)},
@@ -980,9 +1268,41 @@ async def translate_ja_segments_to_ko_async(
                 f"[KO-TRANSLATE] 청크 {idx + 1}/{total_chunks} LLM 대기 중… "
                 f"~{tgt_segs[0].start:.1f}–{tgt_segs[-1].end:.1f}s"
             )
-            res = await route_with_backoff(
-                router, messages, tier, log=_translation_retry_log(log)
-            )
+            from javstory.translation.llm_backoff import is_context_size_exceeded
+
+            try:
+                res = await _route(messages)
+            except Exception as e:
+                if not is_context_size_exceeded(e):
+                    raise
+                log(
+                    f"[KO-TRANSLATE] 청크 {idx + 1}/{total_chunks} 컨텍스트 초과 — "
+                    "힌트·배경 제거 후 1회 재시도"
+                )
+                lean_bg = json.dumps(
+                    {"product_code": product_code},
+                    ensure_ascii=False,
+                )
+                lean_user = render_glm_translation_chunk_user(
+                    lean_bg,
+                    chunk_json,
+                    idx,
+                    scene_id,
+                    scene_tone,
+                    "",
+                    compact_translation_hints=True,
+                    english_local=use_en_local,
+                )
+                lean_tier = {
+                    **tier,
+                    "max_tokens": min(int(tier.get("max_tokens") or 768), 512),
+                }
+                messages = [
+                    {"role": "system", "content": system_prompt_translation_chunk(tier)},
+                    {"role": "user", "content": lean_user},
+                ]
+                user_p = lean_user
+                res = await _route(messages, lean_tier)
             log(
                 f"[KO-TRANSLATE] 청크 {idx + 1}/{total_chunks} 응답 수신 "
                 f"({time.monotonic() - t_req:.1f}s)"
@@ -1001,65 +1321,75 @@ async def translate_ja_segments_to_ko_async(
                         f"... [{plen - cap}자 생략] ...\n"
                         f"[KO-TRANSLATE] 현재 {idx + 1} / {total_chunks} — 응답 뒤 {cap//2}자:\n{pr[-(cap // 2) :]}"
                     )
-            lp = "[KO-TRANSLATE]"
-            applied_ok = _apply_json_chunk(
-                tgt_segs,
-                processed,
-                log=log,
-                log_prefix=lp,
-                postprocess_text=collapse_repeated_vocal_sounds,
-            )
-            if applied_ok and not segments_translation_quality_ok(tgt_segs):
+            json_ok = _apply_ko_json(processed)
+            quality_failed = False
+            if json_ok and not _quality_ok():
+                quality_failed = True
                 log(
                     f"[KO-TRANSLATE] 현재 {idx + 1} / {total_chunks} — "
                     "번역 품질 불량(일본어·혼입·한글 없음) — 순수 한글 재번역"
                 )
                 _restore_ja_texts_from_chunk_json(tgt_segs, chunk_json)
-                pure_msgs = messages + [
-                    {"role": "user", "content": RETRY_TRANSLATION_KO_PURE_APPEND},
-                ]
-                res_pure = await route_with_backoff(
-                    router, pure_msgs, tier, log=_translation_retry_log(log)
+                pure_append = (
+                    RETRY_TRANSLATION_KO_PURE_APPEND_EN
+                    if use_en_local
+                    else RETRY_TRANSLATION_KO_PURE_APPEND
                 )
+                pure_msgs: List[dict[str, str]] = [
+                    {"role": "system", "content": system_prompt_translation_chunk(tier)},
+                    {"role": "user", "content": user_p},
+                    {"role": "assistant", "content": processed or ""},
+                    {"role": "user", "content": pure_append},
+                ]
+                res_pure = await _route(pure_msgs)
                 processed_pure = re.sub(
                     r"<think>.*?</think>",
                     "",
                     res_pure or "",
                     flags=re.DOTALL,
                 )
-                applied_ok = _apply_json_chunk(
-                    tgt_segs,
+                processed_pure = re.sub(
+                    r"<redacted_thinking>.*?</redacted_thinking>",
+                    "",
                     processed_pure,
-                    log=log,
-                    log_prefix=lp,
-                    postprocess_text=collapse_repeated_vocal_sounds,
+                    flags=re.DOTALL,
                 )
-                if applied_ok and not segments_translation_quality_ok(tgt_segs):
-                    applied_ok = False
-            if not applied_ok:
-                log(f"[KO-TRANSLATE] 현재 {idx + 1} / {total_chunks} — JSON 적용 실패 — 재시도")
-                use_neutral_ollama_qwen = (
-                    str(tier.get("provider") or "").lower() in ("ollama", "llamacpp")
-                    and "qwen" in (tier.get("model") or "").lower()
+                json_ok = _apply_ko_json(processed_pure)
+                if json_ok and not _quality_ok():
+                    json_ok = False
+                    quality_failed = True
+                    _restore_ja_texts_from_chunk_json(tgt_segs, chunk_json)
+            if not json_ok:
+                reason = "품질 재시도 실패" if quality_failed else "JSON 적용 실패"
+                log(f"[KO-TRANSLATE] 현재 {idx + 1} / {total_chunks} — {reason} — 재시도")
+                model_l = (tier.get("model") or "").lower()
+                prov_l_chunk = str(tier.get("provider") or "").lower()
+                use_neutral_local = (
+                    prov_l_chunk in ("ollama", "llamacpp")
+                    and ("qwen" in model_l or "gemma" in model_l)
                     and not _env_truthy("JAVSTORY_TRANSLATION_OLLAMA_NO_NEUTRAL_FALLBACK")
                 )
-                if use_neutral_ollama_qwen:
+                if use_neutral_local:
+                    label = "Gemma" if "gemma" in model_l else "Qwen"
                     log(
-                        "[KO-TRANSLATE] 로컬 Qwen: JSON 실패 — 완화 system(JSON 전용)으로 재시도"
+                        f"[KO-TRANSLATE] 로컬 {label}: {reason} — 강화 system으로 재시도"
                         + (" (거절 문구 감지)" if _looks_like_model_refusal(processed) else "")
                     )
+                    neutral_sys = (
+                        system_prompt_translation_local_gemma_retry()
+                        if "gemma" in model_l
+                        else system_prompt_translation_ollama_qwen_neutral()
+                    )
                     base_for_retry: List[dict[str, str]] = [
-                        {
-                            "role": "system",
-                            "content": system_prompt_translation_ollama_qwen_neutral(),
-                        },
+                        {"role": "system", "content": neutral_sys},
                         {"role": "user", "content": user_p},
                     ]
                 else:
                     base_for_retry = messages
 
                 retry_messages = base_for_retry + [
-                    {"role": "user", "content": _retry_translation_user_content(tier, attempt=1)}
+                    {"role": "assistant", "content": processed or ""},
+                    {"role": "user", "content": _retry_translation_user_content(tier, attempt=1)},
                 ]
                 if log_full_prompt:
                     _log_full_glm_prompt(
@@ -1069,9 +1399,7 @@ async def translate_ja_segments_to_ko_async(
                         messages=retry_messages,
                         label="(재시도)",
                     )
-                res2 = await route_with_backoff(
-                    router, retry_messages, tier, log=_translation_retry_log(log)
-                )
+                res2 = await _route(retry_messages)
                 processed2 = re.sub(
                     r"<redacted_thinking>.*?</redacted_thinking>",
                     "",
@@ -1085,22 +1413,21 @@ async def translate_ja_segments_to_ko_async(
                         f"[KO-TRANSLATE] 현재 {idx + 1} / {total_chunks} — 재시도 응답 본문:\n"
                         f"{p2[:12000]}{'…' if len(p2) > 12000 else ''}"
                     )
-                applied_ok = _apply_json_chunk(
-                    tgt_segs,
-                    processed2,
-                    log=log,
-                    log_prefix=lp,
-                    postprocess_text=collapse_repeated_vocal_sounds,
-                )
-                if not applied_ok:
-                    log(f"[KO-TRANSLATE] 현재 {idx + 1} / {total_chunks} — JSON 적용 실패 — 2차 재시도")
+                json_ok = _apply_ko_json(processed2)
+                if json_ok and not _quality_ok():
+                    json_ok = False
+                    quality_failed = True
+                    _restore_ja_texts_from_chunk_json(tgt_segs, chunk_json)
+                if not json_ok:
+                    log(
+                        f"[KO-TRANSLATE] 현재 {idx + 1} / {total_chunks} — "
+                        f"{'품질' if quality_failed else 'JSON'} 적용 실패 — 2차 재시도"
+                    )
                     retry2 = base_for_retry + [
-                        {"role": "user", "content": _retry_translation_user_content(tier, attempt=1)},
+                        {"role": "assistant", "content": processed2 or processed or ""},
                         {"role": "user", "content": _retry_translation_user_content(tier, attempt=2)},
                     ]
-                    res3 = await route_with_backoff(
-                        router, retry2, tier, log=_translation_retry_log(log)
-                    )
+                    res3 = await _route(retry2)
                     processed3 = re.sub(
                         r"<redacted_thinking>.*?</redacted_thinking>",
                         "",
@@ -1116,17 +1443,15 @@ async def translate_ja_segments_to_ko_async(
                             f"[KO-TRANSLATE] 현재 {idx + 1} / {total_chunks} — 2차 재시도 응답 본문:\n"
                             f"{p3[:12000]}{'…' if len(p3) > 12000 else ''}"
                         )
-                    applied_ok = _apply_json_chunk(
-                        tgt_segs,
-                        processed3,
-                        log=log,
-                        log_prefix=lp,
-                        postprocess_text=collapse_repeated_vocal_sounds,
-                    )
-                    if not applied_ok:
+                    json_ok = _apply_ko_json(processed3)
+                    if json_ok and not _quality_ok():
+                        json_ok = False
+                        quality_failed = True
+                    if not json_ok:
                         log(
                             f"[KO-TRANSLATE] 현재 {idx + 1} / {total_chunks} — 최종 실패 — 해당 구간 일본어 유지"
                         )
+            applied_ok = bool(json_ok)
             # OpenRouter/Ollama 경로에도 동일하게 사용자 노트 글로서리 강제 치환
             if glossary_pairs and apply_glossary_to_text is not None:
                 for s in tgt_segs:
@@ -1134,7 +1459,7 @@ async def translate_ja_segments_to_ko_async(
                         s.text = apply_glossary_to_text(s.text or "", glossary_pairs)
                     except Exception:
                         pass
-            if applied_ok and not segments_translation_quality_ok(tgt_segs):
+            if applied_ok and not _quality_ok():
                 log(
                     f"[KO-TRANSLATE] 현재 {idx + 1} / {total_chunks} — "
                     "최종 품질 불량 — 해당 구간 일본어 유지"
@@ -1157,8 +1482,15 @@ async def translate_ja_segments_to_ko_async(
                 )
             log(f"[KO-TRANSLATE] 현재 {idx + 1} / {total_chunks} — 완료")
 
+    tasks = [asyncio.create_task(_one(i, c)) for i, c in enumerate(chunks_data)]
     try:
-        await asyncio.gather(*[_one(i, c) for i, c in enumerate(chunks_data)])
+        await asyncio.gather(*tasks)
+    except Exception:
+        for t in tasks:
+            if not t.done():
+                t.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        raise
     finally:
         if tier.get("provider") == "ollama":
             await after_ko_translate_work(tier["model"], logger_func=log)

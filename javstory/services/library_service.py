@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import re
 import time
 from pathlib import Path
@@ -135,6 +136,67 @@ def _subtitle_filter():
     )
 
 
+def _no_ko_or_hardcoded_subtitle():
+    """KO/일반 SRT·자체자막이 없는 조건 (JA 유무는 별도)."""
+    folder = func.coalesce(JAVMetadata.folder_path, "")
+    video = func.coalesce(FileFlagCache.video_path, "")
+    return and_(
+        or_(JAVMetadata.is_hardcoded.is_(False), JAVMetadata.is_hardcoded.is_(None)),
+        or_(FileFlagCache.lamp_sub.is_(None), FileFlagCache.lamp_sub != 1),
+        ~folder.like("%자체자막%"),
+        ~folder.like("%자체%자막%"),
+        ~video.like("%자체자막%"),
+        ~video.like("%자체%자막%"),
+    )
+
+
+def _no_subtitle_filter():
+    """자막·자체자막·일본어 자막이 모두 없는 작품."""
+    return and_(
+        _no_ko_or_hardcoded_subtitle(),
+        or_(FileFlagCache.lamp_stt.is_(None), FileFlagCache.lamp_stt != 1),
+    )
+
+
+def _ja_only_subtitle_filter():
+    """일본어 자막(.ja.srt)만 있고 KO/자체자막은 없음."""
+    return and_(
+        FileFlagCache.lamp_stt == 1,
+        _no_ko_or_hardcoded_subtitle(),
+    )
+
+
+def _normalize_subtitle_filter(
+    subtitle_filter: Optional[str] = None,
+    has_subtitle: Optional[bool] = None,
+) -> Optional[str]:
+    """'has' | 'none' | 'ja_only' | None(전체). 레거시 has_subtitle bool 호환."""
+    raw = (subtitle_filter or "").strip().lower()
+    if raw in ("has", "none", "ja_only"):
+        return raw
+    if raw in ("", "all"):
+        if has_subtitle is True:
+            return "has"
+        if has_subtitle is False:
+            return "none"
+        return None
+    if has_subtitle is True:
+        return "has"
+    if has_subtitle is False:
+        return "none"
+    return None
+
+
+def _apply_subtitle_filter(query, mode: Optional[str]):
+    if mode == "has":
+        return query.filter(_subtitle_filter())
+    if mode == "none":
+        return query.filter(_no_subtitle_filter())
+    if mode == "ja_only":
+        return query.filter(_ja_only_subtitle_filter())
+    return query
+
+
 def _mosaic_removed_filter():
     """모자이크 제거(모파) 작품."""
     return or_(
@@ -204,9 +266,10 @@ def _folder_has_subtitle_srt(folder_path: str, product_code: str, video_path: Pa
 
 
 def _preview_media_for(cache: dict[str, Any] | None) -> str | None:
+    """목록용 미디어 종류. 캐시는 .webp 경로를 넣어도 실제 파일은 mp4일 수 있음."""
     if not cache:
         return None
-    raw = cache.get("preview_path")
+    raw = (cache.get("preview_path") or "").strip()
     if not raw:
         return None
     try:
@@ -214,24 +277,15 @@ def _preview_media_for(cache: dict[str, Any] | None) -> str | None:
 
         return resolve_preview_media_type(Path(raw))
     except OSError:
-        pass
-    return None
+        return None
 
 
 def _preview_available(cache: dict[str, Any] | None) -> bool:
-    if not cache:
-        return False
-    raw = cache.get("preview_path")
-    if not raw:
-        return False
-    try:
-        p = Path(raw)
-        if p.is_file() and p.stat().st_size > 0:
-            return True
-        mp4 = p.with_suffix(".mp4")
-        return mp4.is_file() and mp4.stat().st_size > 0
-    except OSError:
-        return False
+    """목록용 — preview_path 가 있고 실제 미디어가 해석되면 True.
+
+    경로 문자열만 믿으면 stale 캐시로 호버만 되고 재생 실패한다.
+    """
+    return _preview_media_for(cache) is not None
 
 
 class LibraryService:
@@ -325,6 +379,7 @@ class LibraryService:
         has_folder: Optional[bool] = None,
         has_metadata: Optional[bool] = None,
         has_subtitle: Optional[bool] = None,
+        subtitle_filter: Optional[str] = None,
         has_mosaic_removed: Optional[bool] = None,
         user_liked: Optional[bool] = None,
         watch_later: Optional[bool] = None,
@@ -332,10 +387,23 @@ class LibraryService:
         genre_mode: str = "and",
         include_total: bool = True,
     ) -> dict[str, Any]:
+        sub_mode = _normalize_subtitle_filter(subtitle_filter, has_subtitle)
+        if sub_mode is not None:
+            try:
+                from javstory.library.file_flag_scanner import schedule_lamp_flag_repair
+
+                # 목록 응답을 막지 않음 — 캐시 수리는 백그라운드
+                schedule_lamp_flag_repair(
+                    need_sub=sub_mode in ("has", "none", "ja_only"),
+                    need_stt=sub_mode in ("none", "ja_only"),
+                )
+            except Exception:
+                pass
+
         with get_db_session_ctx() as db:
             query = db.query(JAVMetadata)
 
-            if has_subtitle or has_mosaic_removed:
+            if sub_mode is not None or has_mosaic_removed:
                 query = query.outerjoin(
                     FileFlagCache,
                     JAVMetadata.product_code == FileFlagCache.product_code,
@@ -365,8 +433,7 @@ class LibraryService:
             else:
                 query = query.filter(_default_list_filter())
 
-            if has_subtitle:
-                query = query.filter(_subtitle_filter())
+            query = _apply_subtitle_filter(query, sub_mode)
             if has_mosaic_removed:
                 query = query.filter(_mosaic_removed_filter())
             if user_liked is True:
@@ -396,7 +463,8 @@ class LibraryService:
                     else wh_sort.watch_later_added_at.asc()
                 )
             else:
-                sort_col = _SORT_COLS.get(sort, JAVMetadata.updated_at)
+                sort_key = sort if sort in _SORT_COLS else "updated_at"
+                sort_col = _SORT_COLS[sort_key]
                 query = query.order_by(
                     sort_col.desc() if order == "desc" else sort_col.asc()
                 )
@@ -421,6 +489,7 @@ class LibraryService:
         has_folder: Optional[bool] = None,
         has_metadata: Optional[bool] = None,
         has_subtitle: Optional[bool] = None,
+        subtitle_filter: Optional[str] = None,
         has_mosaic_removed: Optional[bool] = None,
         user_liked: Optional[bool] = None,
         watch_later: Optional[bool] = None,
@@ -451,6 +520,7 @@ class LibraryService:
                 has_folder=has_folder,
                 has_metadata=has_metadata,
                 has_subtitle=has_subtitle,
+                subtitle_filter=subtitle_filter,
                 has_mosaic_removed=has_mosaic_removed,
                 user_liked=user_liked,
                 watch_later=watch_later,
@@ -467,25 +537,51 @@ class LibraryService:
                 "hit_meta": {},
             }
 
-        top_k = max(per_page, min(200, max(page * per_page, 40)))
-        searcher = HybridLibrarySearch(top_k=top_k)
-        hits = searcher.search_with_fusion(term)
+        # 자연어/하이브리드 UI 경로는 임베딩 히트만 사용 (BM25·메타 혼합·건수 고정 없음).
+        searcher = HybridLibrarySearch()
+        hits = searcher.search_by_embedding(term)
         emb_diag = dict(getattr(searcher, "last_embedding_diag", None) or {})
         hit_meta = {
             str(h.get("id") or "").strip().upper(): {
                 "score": float(h.get("score") or 0),
-                "source": str(h.get("source") or ""),
+                "source": "embedding",
             }
             for h in hits
             if str(h.get("id") or "").strip()
         }
         ranked_codes = [c for c in hit_meta.keys()]
-        embedding_used = any("embedding" in (m.get("source") or "") for m in hit_meta.values())
+        embedding_used = bool(ranked_codes) and str(emb_diag.get("status") or "") == "ok"
 
         if not ranked_codes:
             msg = "검색 결과가 없습니다."
             if not embeddings_on:
-                msg = "임베딩이 꺼져 있어 키워드·메타데이터만 검색했습니다. 결과가 비어 있습니다."
+                msg = "임베딩이 꺼져 있어 시맨틱 검색을 할 수 없습니다. 설정에서 임베딩을 켜 주세요."
+            else:
+                err = str(emb_diag.get("error") or "")
+                status = str(emb_diag.get("status") or "")
+                if status == "query_failed" and (
+                    "ConnectError" in err or "connection" in err.lower() or "ConnectTimeout" in err
+                ):
+                    msg = (
+                        "Ollama에 연결할 수 없어 시맨틱 검색을 할 수 없습니다. "
+                        "Ollama 앱을 실행하거나 `ollama serve` 후 다시 검색하세요 "
+                        f"(URL: {(emb_diag.get('url') or 'http://localhost:11434')})."
+                    )
+                elif status == "query_failed":
+                    msg = (
+                        "검색어 임베딩에 실패했습니다. "
+                        f"Ollama 모델({emb_diag.get('model') or 'embeddings'})과 로그를 확인하세요."
+                    )
+                elif int(emb_diag.get("scored_n") or 0) == 0:
+                    msg = (
+                        "임베딩 캐시가 없어 시맨틱 검색 결과가 없습니다. "
+                        "설정에서 임베딩 워밍업을 실행해 보세요."
+                    )
+                elif int(emb_diag.get("scored_n") or 0) > 0:
+                    msg = (
+                        "유사도가 충분히 높은 작품이 없습니다. "
+                        "검색어를 바꾸거나 임베딩 워밍업·모델 설정을 확인해 보세요."
+                    )
             return {
                 "total": 0,
                 "page": page,
@@ -499,9 +595,23 @@ class LibraryService:
             }
 
         with get_db_session_ctx() as db:
-            query = db.query(JAVMetadata).filter(JAVMetadata.product_code.in_(ranked_codes))
+            # 전체 행 로드 대신 코드만 필터 → 페이지 분량만 hydrate (다음 페이지 체감 개선)
+            query = db.query(JAVMetadata.product_code).filter(
+                JAVMetadata.product_code.in_(ranked_codes)
+            )
 
-            if has_subtitle or has_mosaic_removed:
+            sub_mode = _normalize_subtitle_filter(subtitle_filter, has_subtitle)
+            if sub_mode is not None:
+                try:
+                    from javstory.library.file_flag_scanner import schedule_lamp_flag_repair
+
+                    schedule_lamp_flag_repair(
+                        need_sub=sub_mode in ("has", "none", "ja_only"),
+                        need_stt=sub_mode in ("none", "ja_only"),
+                    )
+                except Exception:
+                    pass
+            if sub_mode is not None or has_mosaic_removed:
                 query = query.outerjoin(
                     FileFlagCache,
                     JAVMetadata.product_code == FileFlagCache.product_code,
@@ -519,8 +629,7 @@ class LibraryService:
             else:
                 query = query.filter(_default_list_filter())
 
-            if has_subtitle:
-                query = query.filter(_subtitle_filter())
+            query = _apply_subtitle_filter(query, sub_mode)
             if has_mosaic_removed:
                 query = query.filter(_mosaic_removed_filter())
             if user_liked is True:
@@ -533,47 +642,53 @@ class LibraryService:
                 query = query.filter(~_watch_later_exists())
 
             query = apply_genre_filters(query, genres, mode=genre_mode)
-            rows = query.all()
-
-        by_code = {
-            str(r.product_code or "").strip().upper(): r
-            for r in rows
-            if str(r.product_code or "").strip()
-        }
-        ordered = [by_code[c] for c in ranked_codes if c in by_code]
-        total = len(ordered)
-        start = max(0, (page - 1) * per_page)
-        page_rows = ordered[start : start + per_page]
+            filtered_codes = {
+                str(pc or "").strip().upper()
+                for (pc,) in query.all()
+                if str(pc or "").strip()
+            }
+            sort_norm = (sort or "updated_at").strip().lower()
+            if sort_norm in ("similarity", "relevance", "score", "embedding"):
+                ordered_codes = [c for c in ranked_codes if c in filtered_codes]
+                if order == "asc":
+                    ordered_codes = list(reversed(ordered_codes))
+            else:
+                sort_col = _SORT_COLS.get(sort_norm, JAVMetadata.updated_at)
+                ranked_rows = (
+                    db.query(JAVMetadata.product_code)
+                    .filter(JAVMetadata.product_code.in_(list(filtered_codes)))
+                    .order_by(sort_col.desc() if order == "desc" else sort_col.asc())
+                    .all()
+                )
+                ordered_codes = [
+                    str(pc or "").strip().upper()
+                    for (pc,) in ranked_rows
+                    if str(pc or "").strip()
+                ]
+            total = len(ordered_codes)
+            start = max(0, (page - 1) * per_page)
+            page_codes = ordered_codes[start : start + per_page]
+            if not page_codes:
+                page_rows = []
+            else:
+                rows = (
+                    db.query(JAVMetadata)
+                    .filter(JAVMetadata.product_code.in_(page_codes))
+                    .all()
+                )
+                by_code = {
+                    str(r.product_code or "").strip().upper(): r
+                    for r in rows
+                    if str(r.product_code or "").strip()
+                }
+                page_rows = [by_code[c] for c in page_codes if c in by_code]
 
         message = None
-        if not embeddings_on:
-            message = "임베딩이 꺼져 있어 BM25·메타데이터만 사용합니다. 설정에서 임베딩을 켜면 시맨틱 검색이 강화됩니다."
-        elif not embedding_used:
-            err = str(emb_diag.get("error") or "")
-            status = str(emb_diag.get("status") or "")
-            if status == "query_failed" and (
-                "ConnectError" in err or "connection" in err.lower() or "ConnectTimeout" in err
-            ):
-                message = (
-                    "Ollama에 연결할 수 없어 시맨틱 검색을 건너뛰었습니다. "
-                    "Ollama 앱을 실행하거나 `ollama serve` 후 다시 검색하세요 "
-                    f"(URL: {(emb_diag.get('url') or 'http://localhost:11434')})."
-                )
-            elif status == "query_failed":
-                message = (
-                    "검색어 임베딩에 실패해 시맨틱 채널을 건너뛰었습니다. "
-                    f"Ollama 모델({emb_diag.get('model') or 'embeddings'})과 로그를 확인하세요."
-                )
-            elif int(emb_diag.get("returned_n") or 0) == 0 and int(emb_diag.get("scored_n") or 0) == 0:
-                message = (
-                    "현재 모델과 맞는 임베딩 캐시가 없어 시맨틱 채널이 비어 있습니다. "
-                    "설정에서 모델명을 맞추거나 임베딩 워밍업을 실행해 보세요."
-                )
-            else:
-                message = (
-                    "시맨틱 채널이 결과에 반영되지 않았습니다. "
-                    "설정에서 임베딩 워밍업을 실행해 보세요."
-                )
+        if not embedding_used:
+            message = (
+                "시맨틱 채널이 결과에 반영되지 않았습니다. "
+                "설정에서 임베딩 워밍업을 실행해 보세요."
+            )
 
         return {
             "total": total,
@@ -743,6 +858,7 @@ class LibraryService:
     ) -> dict[str, bool]:
         pc = (row.product_code or "").strip().upper()
         folder = (row.folder_path or "").strip() or None
+        trust_cache = cache is not None
 
         video_path: Path | None = None
         if cache and cache.get("video_path"):
@@ -751,7 +867,8 @@ class LibraryService:
             except Exception:
                 video_path = None
 
-        if video_path is None and folder:
+        # 목록 하이드레이션(캐시 있음)에서는 디스크 경로 추측을 하지 않는다
+        if video_path is None and folder and not trust_cache:
             try:
                 from javstory.library.video_discovery import guess_video_path_for_product_fast
 
@@ -769,8 +886,9 @@ class LibraryService:
 
         has_subtitle = False
         if not hardcoded:
-            if cache and int(cache.get("lamp_sub") or 0):
-                has_subtitle = True
+            if trust_cache:
+                # FileFlagCache 를 신뢰 — lamp_sub=0 일 때 폴더 rglob 하지 않음
+                has_subtitle = bool(int(cache.get("lamp_sub") or 0))
             elif folder:
                 has_subtitle = _folder_has_subtitle_srt(folder, pc, video_path)
 

@@ -55,6 +55,7 @@ _idle_thread: threading.Thread | None = None
 _idle_stop_event = threading.Event()
 _idle_shutdown_logged = False
 _idle_managed_port: int | None = None
+_reuse_log_base: str | None = None
 
 LoggerFunc = Callable[[str], Any]
 
@@ -1235,7 +1236,11 @@ def _ensure_llamacpp_server_ready_locked(
                 f"선택한 모델은 {runtime.label}입니다. 기존 llama-server를 종료한 뒤 다시 시작하세요."
             )
         touch_llamacpp_activity()
-        log(f"[llama.cpp] 기존 llama-server 재사용 — {base}/v1")
+        # 청크마다 재사용 로그가 수백 줄 쌓이지 않도록 동일 base는 1회만 알림
+        global _reuse_log_base
+        if _reuse_log_base != base:
+            log(f"[llama.cpp] 기존 llama-server 재사용 — {base}/v1")
+            _reuse_log_base = base
         _finalize_server_ready(preset, base, runtime_id=runtime.runtime_id, logger_func=log)
         return runtime.serve_alias
 

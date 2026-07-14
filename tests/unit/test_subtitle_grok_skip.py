@@ -32,6 +32,32 @@ def test_load_grok_cache_async_continues_when_grok_fetch_fails(monkeypatch: pyte
     assert any("DB 배경만으로 번역 계속" in m for m in logs)
 
 
+def test_load_grok_cache_async_skips_api_when_collect_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    logs: list[str] = []
+    called: list[str] = []
+
+    async def _fake_ensure(**kwargs: object) -> dict:
+        called.append("ensure")
+        return {"overall_summary": "should not run"}
+
+    monkeypatch.setattr(orch_mod, "ensure_grok_story_cache_for_translation", _fake_ensure)
+    monkeypatch.setattr(
+        "javstory.translation.story_grok_module.load_cached_grok_json_flexible",
+        lambda *a, **k: None,
+    )
+
+    async def _run() -> tuple[dict | None, str]:
+        return await orch_mod._load_grok_cache_async(
+            "ABW-001", None, logs.append, collect_grok=False
+        )
+
+    grok, hints = asyncio.run(_run())
+    assert grok is None
+    assert hints == ""
+    assert called == []
+    assert any("Grok 수집 꺼짐" in m for m in logs)
+
+
 def test_run_story_grok_skips_on_credit_exhausted(monkeypatch: pytest.MonkeyPatch) -> None:
     from javstory.translation import story_grok_module as grok_mod
 

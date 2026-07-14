@@ -220,10 +220,33 @@ class HarvestQueueService:
         return snap
 
     def _validate_folder(self, path: str) -> Path:
-        p = Path(path.strip()).expanduser().resolve()
-        if not p.is_dir():
-            raise ValueError(f"폴더가 아닙니다: {p}")
-        return p
+        raw = (path or "").strip()
+        candidates = [raw]
+        # Electron↔Python stdout 인코딩 불일치로 깨진 한글 경로 복구 시도
+        for fixer in (
+            lambda s: s.encode("latin1").decode("utf-8"),
+            lambda s: s.encode("cp949").decode("utf-8"),
+            lambda s: s.encode("latin1").decode("cp949"),
+            lambda s: s.encode("utf-8").decode("cp949"),
+        ):
+            try:
+                fixed = fixer(raw)
+            except (UnicodeEncodeError, UnicodeDecodeError, ValueError):
+                continue
+            if fixed and fixed not in candidates:
+                candidates.append(fixed)
+
+        last_err: Path | None = None
+        for candidate in candidates:
+            try:
+                p = Path(candidate).expanduser()
+                # resolve() 전에 exists 확인 (깨진 경로 resolve 실패 방지)
+                if p.is_dir():
+                    return p.resolve()
+                last_err = p
+            except OSError:
+                continue
+        raise ValueError(f"폴더가 아닙니다: {last_err or raw}")
 
     def queue_folder(self, path: str) -> dict[str, Any]:
         from javstory.harvest.database import assert_db_writable

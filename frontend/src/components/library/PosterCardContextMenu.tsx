@@ -7,7 +7,8 @@ export interface PosterCardContextMenuProps {
   open: boolean;
   x: number;
   y: number;
-  productCode: string;
+  /** 단일 또는 다중 선택 품번 */
+  productCodes: string[];
   hasFolder: boolean;
   onClose: () => void;
   onAddStt: () => void;
@@ -19,7 +20,7 @@ export interface PosterCardContextMenuProps {
   watchLater?: boolean;
   onPlay?: () => void;
   onOpenFolder?: () => void;
-  onOpenDetail: () => void;
+  onOpenDetail?: () => void;
 }
 
 function MenuItem({
@@ -60,7 +61,7 @@ export function PosterCardContextMenu({
   open,
   x,
   y,
-  productCode,
+  productCodes,
   hasFolder,
   onClose,
   onAddStt,
@@ -75,6 +76,9 @@ export function PosterCardContextMenu({
   onOpenDetail,
 }: PosterCardContextMenuProps) {
   const menuRef = useRef<HTMLDivElement>(null);
+  const codes = productCodes.map(c => c.trim().toUpperCase()).filter(Boolean);
+  const multi = codes.length > 1;
+  const labelPrefix = multi ? `${codes.length}개` : (codes[0] || "");
 
   useEffect(() => {
     if (!open) return;
@@ -96,11 +100,11 @@ export function PosterCardContextMenu({
     };
   }, [open, onClose]);
 
-  if (!open || typeof document === "undefined") return null;
+  if (!open || typeof document === "undefined" || codes.length === 0) return null;
 
   const pad = 8;
-  const menuW = 220;
-  const menuH = 280;
+  const menuW = 240;
+  const menuH = 300;
   const left = Math.min(x, window.innerWidth - menuW - pad);
   const top = Math.min(y, window.innerHeight - menuH - pad);
 
@@ -112,11 +116,13 @@ export function PosterCardContextMenu({
       onClick={e => e.stopPropagation()}
       onContextMenu={e => e.preventDefault()}
     >
-      <p className="px-3 py-1.5 text-xs font-mono text-indigo-300 truncate">{productCode}</p>
+      <p className="px-3 py-1.5 text-xs font-mono text-indigo-300 truncate" title={codes.join(", ")}>
+        {multi ? `${codes.length}개 선택` : codes[0]}
+      </p>
       <MenuDivider />
       <MenuItem
         icon={<FileAudio className="w-4 h-4 text-indigo-300 shrink-0" />}
-        label="STT 큐에 추가"
+        label={multi ? `${labelPrefix} STT 큐에 추가` : "STT 큐에 추가"}
         onClick={() => {
           onClose();
           onAddStt();
@@ -124,7 +130,7 @@ export function PosterCardContextMenu({
       />
       <MenuItem
         icon={<Languages className="w-4 h-4 text-violet-300 shrink-0" />}
-        label="번역 큐에 추가"
+        label={multi ? `${labelPrefix} 번역 큐에 추가` : "번역 큐에 추가"}
         onClick={() => {
           onClose();
           onAddSubtitle();
@@ -133,7 +139,7 @@ export function PosterCardContextMenu({
       {onGrokStory && (
         <MenuItem
           icon={<Sparkles className="w-4 h-4 text-amber-300 shrink-0" />}
-          label="Grok 스토리 생성"
+          label={multi ? `${labelPrefix} Grok 스토리` : "Grok 스토리 생성"}
           onClick={() => {
             onClose();
             onGrokStory();
@@ -142,8 +148,8 @@ export function PosterCardContextMenu({
       )}
       {onToggleLike && (
         <MenuItem
-          icon={<Heart className={cn("w-4 h-4 shrink-0", userLiked ? "text-rose-400 fill-current" : "text-rose-300")} />}
-          label={userLiked ? "좋아요 해제" : "좋아요"}
+          icon={<Heart className={cn("w-4 h-4 shrink-0", !multi && userLiked ? "text-rose-400 fill-current" : "text-rose-300")} />}
+          label={multi ? `${labelPrefix} 좋아요 토글` : (userLiked ? "좋아요 해제" : "좋아요")}
           onClick={() => {
             onClose();
             onToggleLike();
@@ -152,15 +158,15 @@ export function PosterCardContextMenu({
       )}
       {onToggleWatchLater && (
         <MenuItem
-          icon={<Bookmark className={cn("w-4 h-4 shrink-0", watchLater ? "text-sky-400 fill-current" : "text-sky-300")} />}
-          label={watchLater ? "나중에 볼 해제" : "나중에 볼"}
+          icon={<Bookmark className={cn("w-4 h-4 shrink-0", !multi && watchLater ? "text-sky-400 fill-current" : "text-sky-300")} />}
+          label={multi ? `${labelPrefix} 나중에 볼 토글` : (watchLater ? "나중에 볼 해제" : "나중에 볼")}
           onClick={() => {
             onClose();
             onToggleWatchLater();
           }}
         />
       )}
-      {(hasFolder && (onPlay || onOpenFolder)) && (
+      {!multi && hasFolder && (onPlay || onOpenFolder) && (
         <>
           <MenuDivider />
           {onPlay && (
@@ -185,15 +191,19 @@ export function PosterCardContextMenu({
           )}
         </>
       )}
-      <MenuDivider />
-      <MenuItem
-        icon={<ScanEye className="w-4 h-4 text-muted-foreground shrink-0" />}
-        label="상세 보기"
-        onClick={() => {
-          onClose();
-          onOpenDetail();
-        }}
-      />
+      {!multi && onOpenDetail && (
+        <>
+          <MenuDivider />
+          <MenuItem
+            icon={<ScanEye className="w-4 h-4 text-muted-foreground shrink-0" />}
+            label="상세 보기"
+            onClick={() => {
+              onClose();
+              onOpenDetail();
+            }}
+          />
+        </>
+      )}
     </div>,
     document.body,
   );

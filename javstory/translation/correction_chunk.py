@@ -399,6 +399,23 @@ def collapse_repeated_vocal_sounds(text: str) -> str:
     return _RE_KO_SAME_CHAR_RUN.sub(r"\1…", text)
 
 
+def _coerce_cue_index(raw: Any) -> int | None:
+    if isinstance(raw, bool):
+        return None
+    if isinstance(raw, int):
+        return raw
+    if isinstance(raw, float) and raw.is_integer():
+        return int(raw)
+    if isinstance(raw, str):
+        s = raw.strip()
+        if s.isdigit() or (s.startswith("-") and s[1:].isdigit()):
+            try:
+                return int(s)
+            except ValueError:
+                return None
+    return None
+
+
 def _apply_json_chunk(
     tgt_segs: List[SimpleSegment],
     raw: str,
@@ -406,17 +423,29 @@ def _apply_json_chunk(
     log: Callable[[str], None],
     log_prefix: str = "[CORRECTION]",
     postprocess_text: Optional[Callable[[str], str]] = None,
+    require_start_end: bool = True,
+    require_complete: bool = False,
 ) -> bool:
+    """Parse model JSON and apply `text` onto cue segments.
+
+    When ``require_complete`` is True (KO translation), every target index must
+    receive a non-empty text; partial updates are discarded so mixed JA/KO
+    leftovers are never treated as success.
+    """
     arr = parse_json_array(raw)
     if not arr:
-        log(f"{log_prefix} JSON 배열 파싱 실패")
+        preview = re.sub(r"\s+", " ", (raw or "").strip())[:280]
+        log(f"{log_prefix} JSON 배열 파싱 실패" + (f" — 미리보기: {preview}" if preview else ""))
         return False
     by_idx: dict[int, dict[str, Any]] = {}
     for item in arr:
-        if isinstance(item, dict) and isinstance(item.get("index"), int):
-            by_idx[item["index"]] = item
+        if not isinstance(item, dict):
+            continue
+        idx = _coerce_cue_index(item.get("index"))
+        if idx is not None:
+            by_idx[idx] = item
     n = len(tgt_segs)
-    applied = 0
+    pending: dict[int, str] = {}
     for j in range(n):
         item = by_idx.get(j)
         if item is None and j < len(arr) and isinstance(arr[j], dict):
@@ -424,7 +453,7 @@ def _apply_json_chunk(
         if not isinstance(item, dict):
             log(f"{log_prefix} index {j} 항목 없음")
             continue
-        if not _start_end_ok(tgt_segs[j], item):
+        if require_start_end and not _start_end_ok(tgt_segs[j], item):
             log(f"{log_prefix} index {j} start/end 불일치 — text 스킵")
             continue
         tx = item.get("text")
@@ -432,10 +461,15 @@ def _apply_json_chunk(
             t = tx.strip()
             if postprocess_text is not None:
                 t = postprocess_text(t)
-            tgt_segs[j].text = t
-            applied += 1
+            pending[j] = t
+    applied = len(pending)
     if applied == 0 and n > 0:
         return False
+    if require_complete and applied < n:
+        log(f"{log_prefix} 부분 적용 {applied}/{n} — 불완전(반영 취소)")
+        return False
+    for j, t in pending.items():
+        tgt_segs[j].text = t
     return True
 
 

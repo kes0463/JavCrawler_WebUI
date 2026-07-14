@@ -8,6 +8,11 @@ export function useSelection<T>(items: T[], getKey: (item: T) => string) {
     [selected, getKey],
   );
 
+  const isSelectedKey = useCallback(
+    (key: string) => selected.has(key),
+    [selected],
+  );
+
   const toggle = useCallback(
     (item: T) => {
       const key = getKey(item);
@@ -21,6 +26,28 @@ export function useSelection<T>(items: T[], getKey: (item: T) => string) {
     [getKey],
   );
 
+  const select = useCallback(
+    (item: T) => {
+      const key = getKey(item);
+      setSelected(prev => {
+        if (prev.has(key)) return prev;
+        const next = new Set(prev);
+        next.add(key);
+        return next;
+      });
+    },
+    [getKey],
+  );
+
+  const selectKey = useCallback((key: string) => {
+    setSelected(prev => {
+      if (prev.has(key)) return prev;
+      const next = new Set(prev);
+      next.add(key);
+      return next;
+    });
+  }, []);
+
   const selectAll = useCallback(
     () => setSelected(new Set(items.map(getKey))),
     [items, getKey],
@@ -33,10 +60,16 @@ export function useSelection<T>(items: T[], getKey: (item: T) => string) {
     [items, selected, getKey],
   );
 
+  const selectedKeys = useMemo(() => Array.from(selected), [selected]);
+
   return {
     selected,
+    selectedKeys,
     isSelected,
+    isSelectedKey,
     toggle,
+    select,
+    selectKey,
     selectAll,
     clearAll,
     count: selected.size,

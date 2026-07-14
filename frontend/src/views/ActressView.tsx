@@ -464,6 +464,7 @@ export default function ActressView() {
               onRefresh={() => selectedId && loadDetail(selectedId)}
               onListRefresh={refreshList}
               onWorkClick={setWorkDetailCode}
+              onWorksChange={setWorks}
               onMergeClick={() => setShowMerge(true)}
               onError={msg => showToast(msg, "error")}
               onSuccess={msg => showToast(msg, "success")}

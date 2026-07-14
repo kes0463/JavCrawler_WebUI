@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from "react";
-import { Search, SlidersHorizontal, FolderOpen, FolderX, RefreshCw, Subtitles, Layers, Heart, Bookmark, Loader2 } from "lucide-react";
+import { Search, SlidersHorizontal, FolderOpen, FolderX, RefreshCw, Subtitles, Layers, Heart, Bookmark, Loader2, SquareCheck, Square, X } from "lucide-react";
 import { cn } from "@/lib/utils";
-import { fetchLibraryListed, fetchLibraryGenresResilient, fetchLibraryStats, coverUrl, previewUrl, openLibraryFolder, hasRealLibraryMetadata, clearLibraryGenreScanCache, probeLibraryGenreFilterSupport, prefetchLibraryClientIndex, isClientLibraryIndexReady, backfillLibraryEmbeddings, startGrokStory, toggleLibraryLike, toggleLibraryWatchLater } from "@/api/library";
+import { fetchLibraryListed, fetchLibraryGenresResilient, fetchLibraryStats, coverUrl, previewUrl, openLibraryFolder, hasRealLibraryMetadata, clearLibraryGenreScanCache, probeLibraryGenreFilterSupport, prefetchLibraryClientIndex, isClientLibraryIndexReady, backfillLibraryEmbeddings, startGrokStory, startGrokStoryBatch, toggleLibraryLike, toggleLibraryWatchLater } from "@/api/library";
 import type { LibraryItem, LibraryStats, LibraryQuery, LibraryGenreItem, LibrarySearchMode } from "@/api/library";
 import { GlassCard } from "@/components/ui/GlassCard";
 import { Skeleton } from "@/components/ui/Skeleton";
@@ -12,6 +12,7 @@ import { useToast } from "@/contexts/ToastContext";
 import { usePlayer } from "@/contexts/PlayerContext";
 import { useNavigation } from "@/contexts/NavigationContext";
 import { useLibraryProcessingActions } from "@/hooks/useLibraryProcessingActions";
+import { useSelection } from "@/hooks/useSelection";
 import type { ProcessingKind } from "@/api/processing";
 import { getScrollableAncestor, useInfiniteScrollNearEnd } from "@/hooks/useGlobalDragScroll";
 import {
@@ -20,7 +21,10 @@ import {
   useLibrarySessionCache,
 } from "@/hooks/useLibrarySessionCache";
 
+const libraryItemKey = (item: LibraryItem) => item.product_code.toUpperCase();
+
 const SORT_OPTIONS = [
+  { label: "유사도", value: "similarity" },
   { label: "최근 수정", value: "updated_at" },
   { label: "발매일", value: "release_date" },
   { label: "품번", value: "product_code" },
@@ -114,6 +118,9 @@ export default function LibraryView() {
   const queryFilterKeyRef = useRef(
     JSON.stringify({ ...query, page: undefined }),
   );
+
+  const selection = useSelection(items, libraryItemKey);
+  const selectionMode = selection.count > 0;
 
   const { clearSession, restoreScroll } = useLibrarySessionCache(
     query,
@@ -275,6 +282,7 @@ export default function LibraryView() {
       clearSession();
       skipInitialFetchRef.current = false;
       suppressCardAnimRef.current = false;
+      selection.clearAll();
     }
 
     if (skipInitialFetchRef.current) {
@@ -284,7 +292,7 @@ export default function LibraryView() {
     }
 
     loadItems(query, append);
-  }, [query, loadItems, clearSession]);
+  }, [query, loadItems, clearSession, selection.clearAll]);
 
   const [searchText, setSearchText] = useState(query.q ?? "");
 
@@ -292,7 +300,24 @@ export default function LibraryView() {
     setSearchText(value);
     if (searchTimer.current) clearTimeout(searchTimer.current);
     searchTimer.current = setTimeout(() => {
-      setQuery(q => ({ ...q, q: value, page: 1 }));
+      setQuery(q => {
+        const mode = q.search_mode ?? "auto";
+        const trimmed = value.trim();
+        const looksNatural =
+          /\s/.test(trimmed)
+          || /[가-힣]{4,}/.test(trimmed);
+        const next: LibraryQuery = { ...q, q: value, page: 1 };
+        if (
+          trimmed
+          && (mode === "hybrid" || (mode === "auto" && looksNatural))
+          && (q.sort === "updated_at" || q.sort === "similarity" || !q.sort)
+        ) {
+          next.sort = "similarity";
+        } else if (!trimmed && q.sort === "similarity") {
+          next.sort = "updated_at";
+        }
+        return next;
+      });
     }, 350);
   };
 
@@ -368,12 +393,16 @@ export default function LibraryView() {
     void openPlayer(productCode);
   }, [openPlayer]);
 
-  const handleAddToProcessing = useCallback((productCode: string, kind: ProcessingKind) => {
-    void enqueueLibraryProducts([productCode], kind);
+  const handleAddToProcessing = useCallback((codes: string[], kind: ProcessingKind) => {
+    void enqueueLibraryProducts(codes, kind);
   }, [enqueueLibraryProducts]);
 
-  const handleGrokStory = useCallback((productCode: string) => {
-    void startGrokStory(productCode, false)
+  const handleGrokStory = useCallback((codes: string[]) => {
+    const run =
+      codes.length === 1
+        ? startGrokStory(codes[0], false)
+        : startGrokStoryBatch(codes, false);
+    void run
       .then(res => showToast(res.message, res.ok && res.queued > 0 ? "success" : res.ok ? "info" : "warn"))
       .catch(err => showToast(err instanceof Error ? err.message : "Grok 스토리 시작 실패", "error"));
   }, [showToast]);
@@ -389,36 +418,67 @@ export default function LibraryView() {
     );
   }, []);
 
-  const handleToggleLike = useCallback((productCode: string) => {
-    void toggleLibraryLike(productCode)
-      .then(res => {
-        patchWatchFlags(productCode, res);
+  const handleToggleLike = useCallback((codes: string[]) => {
+    void (async () => {
+      try {
+        for (const code of codes) {
+          const res = await toggleLibraryLike(code);
+          patchWatchFlags(code, res);
+          if (query.user_liked && !res.user_liked) {
+            setItems(prev => prev.filter(i => i.product_code.toUpperCase() !== code.toUpperCase()));
+          }
+        }
         showToast(
-          res.user_liked ? `${productCode}: 좋아요` : `${productCode}: 좋아요 해제`,
+          codes.length === 1
+            ? `${codes[0]}: 좋아요 토글`
+            : `${codes.length}개 좋아요 토글`,
           "success",
         );
-        if (query.user_liked && !res.user_liked) {
-          setItems(prev => prev.filter(i => i.product_code.toUpperCase() !== productCode.toUpperCase()));
-        }
-      })
-      .catch(err => showToast(err instanceof Error ? err.message : "좋아요 변경 실패", "error"));
+      } catch (err) {
+        showToast(err instanceof Error ? err.message : "좋아요 변경 실패", "error");
+      }
+    })();
   }, [patchWatchFlags, query.user_liked, showToast]);
 
-  const handleToggleWatchLater = useCallback((productCode: string) => {
-    void toggleLibraryWatchLater(productCode)
-      .then(res => {
-        patchWatchFlags(productCode, res);
+  const handleToggleWatchLater = useCallback((codes: string[]) => {
+    void (async () => {
+      try {
+        for (const code of codes) {
+          const res = await toggleLibraryWatchLater(code);
+          patchWatchFlags(code, res);
+          if (query.watch_later && !res.watch_later) {
+            setItems(prev => prev.filter(i => i.product_code.toUpperCase() !== code.toUpperCase()));
+          }
+        }
         showToast(
-          res.watch_later ? `${productCode}: 나중에 볼에 추가` : `${productCode}: 나중에 볼 해제`,
+          codes.length === 1
+            ? `${codes[0]}: 나중에 볼 토글`
+            : `${codes.length}개 나중에 볼 토글`,
           "success",
         );
-        if (query.watch_later && !res.watch_later) {
-          setItems(prev => prev.filter(i => i.product_code.toUpperCase() !== productCode.toUpperCase()));
-        }
-      })
-      .catch(err => showToast(err instanceof Error ? err.message : "나중에 볼 변경 실패", "error"));
+      } catch (err) {
+        showToast(err instanceof Error ? err.message : "나중에 볼 변경 실패", "error");
+      }
+    })();
   }, [patchWatchFlags, query.watch_later, showToast]);
 
+  const resolveContextMenuProductCodes = useCallback((clickedCode: string) => {
+    const key = clickedCode.toUpperCase();
+    if (selection.count > 0 && selection.isSelectedKey(key)) {
+      return selection.selectedKeys;
+    }
+    return [clickedCode];
+  }, [selection.count, selection.isSelectedKey, selection.selectedKeys]);
+
+  // Escape로 선택 해제
+  useEffect(() => {
+    if (!selectionMode) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") selection.clearAll();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [selectionMode, selection.clearAll]);
   const handleDetailSaved = useCallback((updated: LibraryItem) => {
     const pc = updated.product_code.toUpperCase();
     setCoverRev(prev => ({ ...prev, [pc]: Date.now() }));
@@ -498,8 +558,8 @@ export default function LibraryView() {
       </div>
 
       <div className="flex flex-wrap items-center gap-2">
-        <div className="relative flex-1 min-w-[200px]">
-          <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
+        <div className="relative flex-1 min-w-[min(100%,28rem)]">
+          <Search className="absolute left-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground pointer-events-none" />
           <input
             type="text"
             placeholder={
@@ -513,8 +573,8 @@ export default function LibraryView() {
             onChange={e => handleSearch(e.target.value)}
             aria-busy={isSemanticSearching}
             className={cn(
-              "w-full h-10 pl-10 text-base rounded-xl",
-              isSemanticSearching ? "pr-10" : "pr-4",
+              "w-full h-11 pl-11 text-base rounded-xl",
+              isSemanticSearching ? "pr-11" : "pr-4",
               "bg-bg-surface border border-white/[0.08] text-white placeholder:text-muted-foreground",
               "focus:outline-none focus:border-accent/50 focus:ring-1 focus:ring-accent/30",
               "transition-all duration-150",
@@ -522,7 +582,7 @@ export default function LibraryView() {
           />
           {isSemanticSearching && (
             <Loader2
-              className="absolute right-3 top-1/2 -translate-y-1/2 w-4 h-4 text-violet-300 animate-spin"
+              className="absolute right-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-violet-300 animate-spin"
               aria-hidden
             />
           )}
@@ -530,9 +590,19 @@ export default function LibraryView() {
 
         <select
           value={query.search_mode ?? "auto"}
-          onChange={e => updateQueryFilter({ search_mode: e.target.value as LibrarySearchMode })}
+          onChange={e => {
+            const mode = e.target.value as LibrarySearchMode;
+            updateQueryFilter({
+              search_mode: mode,
+              ...(mode === "hybrid" && (query.sort === "updated_at" || !query.sort)
+                ? { sort: "similarity" as const }
+                : mode === "keyword" && query.sort === "similarity"
+                  ? { sort: "updated_at" as const }
+                  : {}),
+            });
+          }}
           title="검색 모드"
-          className="h-10 px-3 text-base rounded-xl bg-bg-surface border border-white/[0.08] text-[#c8c8e0] focus:outline-none"
+          className="h-11 px-3 text-base rounded-xl bg-bg-surface border border-white/[0.08] text-[#c8c8e0] focus:outline-none shrink-0"
         >
           <option value="auto">자동</option>
           <option value="keyword">키워드</option>
@@ -542,7 +612,7 @@ export default function LibraryView() {
         <select
           value={query.sort}
           onChange={e => updateQueryFilter({ sort: e.target.value as LibraryQuery["sort"] })}
-          className="h-10 px-3 text-base rounded-xl bg-bg-surface border border-white/[0.08] text-[#c8c8e0] focus:outline-none"
+          className="h-11 px-3 text-base rounded-xl bg-bg-surface border border-white/[0.08] text-[#c8c8e0] focus:outline-none shrink-0"
         >
           {SORT_OPTIONS.map(o => (
             <option key={o.value} value={o.value}>{o.label}</option>
@@ -551,11 +621,24 @@ export default function LibraryView() {
 
         <button
           onClick={() => updateQueryFilter({ order: query.order === "desc" ? "asc" : "desc" })}
-          className="h-10 px-3 text-base rounded-xl bg-bg-surface border border-white/[0.08] text-[#c8c8e0] hover:text-white transition-colors"
+          className="h-11 px-3 text-base rounded-xl bg-bg-surface border border-white/[0.08] text-[#c8c8e0] hover:text-white transition-colors shrink-0"
         >
           {query.order === "desc" ? "↓ 내림차순" : "↑ 오름차순"}
         </button>
 
+        <span className="text-sm text-muted-foreground ml-auto tabular-nums shrink-0">
+          {isSemanticSearching
+            ? "검색 중…"
+            : (
+              <>
+                {items.length.toLocaleString()} / {total.toLocaleString()}건
+                {searchModeUsed === "hybrid" && (query.q || "").trim() ? " · 자연어" : null}
+              </>
+            )}
+        </span>
+      </div>
+
+      <div className="flex flex-wrap items-center gap-2">
         <button
           onClick={() => updateQueryFilter({
             has_folder: query.has_folder === true ? undefined : true,
@@ -602,18 +685,42 @@ export default function LibraryView() {
         </button>
 
         <button
-          onClick={() => updateQueryFilter({
-            has_subtitle: query.has_subtitle ? undefined : true,
-          })}
+          onClick={() => {
+            const cur = query.subtitle_filter
+              ?? (query.has_subtitle === true ? "has" as const
+                : query.has_subtitle === false ? "none" as const
+                  : undefined);
+            const next =
+              cur === undefined ? "has" as const
+              : cur === "has" ? "none" as const
+              : cur === "none" ? "ja_only" as const
+              : undefined;
+            updateQueryFilter({
+              subtitle_filter: next,
+              has_subtitle: undefined,
+            });
+          }}
+          title="자막 필터: 전체 → 자막·자체자막 → 자막 없음 → 일본어만"
           className={cn(
             "h-10 px-3 text-base rounded-xl border transition-colors flex items-center gap-1.5",
-            query.has_subtitle
-              ? "bg-emerald-500/20 border-emerald-500/40 text-emerald-300"
-              : "bg-bg-surface border-white/[0.08] text-muted-foreground hover:text-white",
+            (query.subtitle_filter === "has" || query.has_subtitle === true)
+              && "bg-emerald-500/20 border-emerald-500/40 text-emerald-300",
+            (query.subtitle_filter === "none" || (query.has_subtitle === false && !query.subtitle_filter))
+              && "bg-amber-500/20 border-amber-500/40 text-amber-300",
+            query.subtitle_filter === "ja_only"
+              && "bg-sky-500/20 border-sky-500/40 text-sky-300",
+            query.subtitle_filter === undefined && query.has_subtitle === undefined
+              && "bg-bg-surface border-white/[0.08] text-muted-foreground hover:text-white",
           )}
         >
           <Subtitles className="w-3.5 h-3.5" />
-          자막·자체자막
+          {query.subtitle_filter === "has" || query.has_subtitle === true
+            ? "자막·자체자막"
+            : query.subtitle_filter === "none" || (query.has_subtitle === false && !query.subtitle_filter)
+              ? "자막 없음"
+              : query.subtitle_filter === "ja_only"
+                ? "일본어만"
+                : "전체"}
         </button>
 
         <button
@@ -674,17 +781,6 @@ export default function LibraryView() {
           onModeChange={mode => updateQueryFilter({ genre_mode: mode })}
           onClear={clearGenres}
         />
-
-        <span className="text-sm text-muted-foreground ml-auto tabular-nums">
-          {isSemanticSearching
-            ? "검색 중…"
-            : (
-              <>
-                {items.length.toLocaleString()} / {total.toLocaleString()}건
-                {searchModeUsed === "hybrid" && (query.q || "").trim() ? " · 자연어" : null}
-              </>
-            )}
-        </span>
       </div>
 
       {isSemanticSearching && (
@@ -731,6 +827,48 @@ export default function LibraryView() {
         </p>
       )}
 
+      {(selectionMode || items.length > 0) && (
+        <div className="flex flex-wrap items-center gap-2">
+          <button
+            type="button"
+            onClick={selection.allSelected ? selection.clearAll : selection.selectAll}
+            className={cn(
+              "h-9 px-3 text-sm rounded-xl border transition-colors flex items-center gap-1.5",
+              selection.allSelected
+                ? "bg-indigo-500/20 border-indigo-500/40 text-indigo-200"
+                : "bg-bg-surface border-white/[0.08] text-muted-foreground hover:text-white",
+            )}
+          >
+            {selection.allSelected
+              ? <SquareCheck className="w-3.5 h-3.5 text-indigo-300" />
+              : <Square className="w-3.5 h-3.5" />}
+            {selection.allSelected ? "전체 해제" : "전체 선택"}
+          </button>
+          {selectionMode && (
+            <GlassCard
+              variant="accent"
+              noPadding
+              className="px-3 py-1.5 flex items-center gap-2 animate-slide-in"
+            >
+              <span className="text-sm font-medium text-indigo-300">
+                {selection.count}개 선택됨
+              </span>
+              <span className="text-xs text-muted-foreground hidden sm:inline">
+                우클릭으로 일괄 작업 · Esc 해제
+              </span>
+              <button
+                type="button"
+                title="선택 해제"
+                onClick={selection.clearAll}
+                className="w-7 h-7 rounded-lg flex items-center justify-center text-muted-foreground hover:text-white hover:bg-white/[0.08]"
+              >
+                <X className="w-3.5 h-3.5" />
+              </button>
+            </GlassCard>
+          )}
+        </div>
+      )}
+
       <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-4 w-full">
         {items.map((item, i) => {
           const hasMeta = hasRealLibraryMetadata(item);
@@ -740,9 +878,10 @@ export default function LibraryView() {
             && i < 48
               ? (i % 48) * 15
               : 0;
+          const codeKey = item.product_code.toUpperCase();
           return (
           <PosterCard
-            key={`${item.id}-${item.cover_image_local_path ?? ""}-${coverRev[item.product_code.toUpperCase()] ?? ""}`}
+            key={`${item.id}-${item.cover_image_local_path ?? ""}-${coverRev[codeKey] ?? ""}`}
             productCode={item.product_code}
             coverSrc={item.product_code ? coverUrl(item.product_code, coverCacheKey(item)) : undefined}
             previewSrc={item.has_preview && item.product_code ? previewUrl(item.product_code, item.updated_at ?? "") : undefined}
@@ -760,14 +899,19 @@ export default function LibraryView() {
             hasMosaicRemoved={!!item.has_mosaic_removed}
             userLiked={!!item.user_liked}
             watchLater={!!item.watch_later}
+            selected={selection.isSelectedKey(codeKey)}
+            selectionMode={selectionMode}
             delay={delay}
+            onLongPressSelect={() => selection.select(item)}
+            onToggleSelect={() => selection.toggle(item)}
+            resolveContextMenuProductCodes={resolveContextMenuProductCodes}
             onClick={() => openLibraryDetail(item.product_code)}
             onPlay={item.folder_path ? () => handlePlay(item.product_code) : undefined}
             onOpenFolder={() => handleOpenFolder(item.product_code)}
-            onAddToProcessing={kind => handleAddToProcessing(item.product_code, kind)}
-            onGrokStory={() => handleGrokStory(item.product_code)}
-            onToggleLike={() => handleToggleLike(item.product_code)}
-            onToggleWatchLater={() => handleToggleWatchLater(item.product_code)}
+            onAddToProcessing={(kind, codes) => handleAddToProcessing(codes, kind)}
+            onGrokStory={codes => handleGrokStory(codes)}
+            onToggleLike={codes => handleToggleLike(codes)}
+            onToggleWatchLater={codes => handleToggleWatchLater(codes)}
             onActorClick={handleActorClick}
           />
           );

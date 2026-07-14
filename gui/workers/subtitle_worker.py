@@ -43,6 +43,14 @@ class SubtitleWorker(QThread):
     def stop(self):
         self._is_running = False
 
+    def _refresh_flags(self) -> None:
+        try:
+            from javstory.library.file_flag_scanner import refresh_flags_after_media_change
+
+            refresh_flags_after_media_change(self.product_code, self.video_path)
+        except Exception:
+            pass
+
     def run(self):
         try:
             base_name = os.path.splitext(self.video_path)[0]
@@ -54,16 +62,19 @@ class SubtitleWorker(QThread):
             if any("자체자막" in part for part in p.parts):
                 self.progress.emit("[완료] 자체자막 표기 감지 → 번역 스킵", 100)
                 res_path = ko_srt if os.path.exists(ko_srt) else (plain_srt if os.path.exists(plain_srt) else "")
+                self._refresh_flags()
                 self.finished.emit(True, f"자체자막 표기: 번역 공정 스킵 완료 (기존:{os.path.basename(res_path)})")
                 return
 
             # 2. 결과물(KO SRT)이 이미 존재하면 스킵
             if os.path.exists(ko_srt):
                 self.progress.emit("[완료] 기존 .ko.srt 감지 → 번역 스킵", 100)
+                self._refresh_flags()
                 self.finished.emit(True, "기존 .ko.srt 존재: 번역 공정 스킵")
                 return
             if os.path.exists(plain_srt):
                 self.progress.emit("[완료] 기존 .srt(외부) 감지 → 번역 스킵", 100)
+                self._refresh_flags()
                 self.finished.emit(True, "기존 .srt 존재: 번역 공정 스킵")
                 return
 
@@ -119,8 +130,10 @@ class SubtitleWorker(QThread):
                 ko_srt = str(video.with_suffix(".ko.srt"))
 
             if Path(ko_srt).exists():
+                self._refresh_flags()
                 self.finished.emit(True, f"자막 파이프라인 완료: {ko_srt}")
             else:
+                self._refresh_flags()
                 self.finished.emit(True, "자막 파이프라인 완료 (KO SRT 경로 확인 필요)")
 
         except STTCancelled:

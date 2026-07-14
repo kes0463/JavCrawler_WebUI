@@ -87,9 +87,24 @@ def parse_grok_story_json(raw: str) -> dict[str, Any] | None:
     return None
 
 
-def format_story_context_for_translation(data: dict[str, Any]) -> str:
+def _clip_story_text(text: str, max_chars: int) -> str:
+    t = (text or "").strip()
+    if max_chars <= 0 or len(t) <= max_chars:
+        return t
+    return t[: max(0, max_chars - 1)].rstrip() + "…"
+
+
+def format_story_context_for_translation(
+    data: dict[str, Any],
+    *,
+    compact: bool = False,
+    max_chars: int | None = None,
+) -> str:
     """
     KO 번역용 TranslationHints 문자열 — JSON 전체를 읽기 쉬운 한국어 블록으로 변환.
+
+    compact=True: 로컬 LLM(짧은 n_ctx)용 — 씬 본문 생략·요약 축약.
+    청크별 scene_id/tone은 번역 호출 쪽에서 별도 주입한다.
     """
     if not isinstance(data, dict):
         return ""
@@ -102,6 +117,9 @@ def format_story_context_for_translation(data: dict[str, Any]) -> str:
             "번역은 자막 큐와 [Background] JSON만 우선한다.\n"
         )
 
+    syn_cap = 180 if compact else 0
+    overall_cap = 260 if compact else 0
+
     lines: list[str] = [
         "[스토리 맥락 · Grok 웹 메타]",
         f"품번: {data.get('product_code', '')}",
@@ -113,9 +131,13 @@ def format_story_context_for_translation(data: dict[str, Any]) -> str:
     ]
     syn = (data.get("synopsis_short") or "").strip()
     if syn:
+        if syn_cap:
+            syn = _clip_story_text(syn, syn_cap)
         lines.append(f"시놉시스(공개): {syn}")
     overall = (data.get("overall_summary") or "").strip()
     if overall:
+        if overall_cap:
+            overall = _clip_story_text(overall, overall_cap)
         lines.append("")
         lines.append("[전체 요약]")
         lines.append(overall)
@@ -137,16 +159,22 @@ def format_story_context_for_translation(data: dict[str, Any]) -> str:
             if isinstance(tags, list):
                 tag_s = ", ".join(str(x) for x in tags if x)
             lines.append(f"- {sid} [{tr}] {lab}")
-            if sm:
-                lines.append(f"  {sm}")
-            if tone or tag_s:
-                lines.append(f"  (톤: {tone} / 태그: {tag_s})")
+            if not compact:
+                if sm:
+                    lines.append(f"  {sm}")
+                if tone or tag_s:
+                    lines.append(f"  (톤: {tone} / 태그: {tag_s})")
+            elif tone:
+                lines.append(f"  (톤: {_clip_story_text(str(tone), 80)})")
 
     lines.append("")
     lines.append(
         "번역 시: 위 씬 톤·호칭·분위기를 자막 큐와 맞출 것. 웹 메타와 대사가 충돌하면 대사 우선."
     )
-    return "\n".join(lines).strip()
+    out = "\n".join(lines).strip()
+    if max_chars is not None and max_chars > 0:
+        out = _clip_story_text(out, max_chars)
+    return out
 
 
 def story_context_json_dumps(data: dict[str, Any]) -> str:

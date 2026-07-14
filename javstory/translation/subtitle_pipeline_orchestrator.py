@@ -31,6 +31,7 @@ from javstory.translation.story_grok_module import (
 )
 from javstory.translation.story_context_prompts import format_story_context_for_translation
 from javstory.transcription.stt_types import SimpleSegment
+from javstory.translation.translation_note_generator import ensure_pipeline_work_note_async
 
 
 def _load_simple_segments_from_srt(path: Path) -> list[SimpleSegment]:
@@ -193,12 +194,27 @@ async def _load_grok_cache_async(
     product_code: str,
     tier_raw: Any,
     log: Any,
+    *,
+    collect_grok: bool = True,
 ) -> tuple[dict | None, str]:
-    """Grok 캐시 로드. 없으면 API 생성 시도 — 크레딧 부족 등 실패 시 None으로 번역 계속."""
+    """Grok 캐시 로드.
+
+    collect_grok=True: 디스크 우선, 없으면 API 생성 시도 — 실패 시 None으로 번역 계속.
+    collect_grok=False: API 호출 없이 디스크 캐시만 사용 (OpenRouter 크레딧 절약).
+    """
     pc = (product_code or "").strip()
     if not pc:
         return None, ""
     tier = _resolve_story_context_tier(tier_raw)
+    if not collect_grok:
+        from javstory.translation.story_grok_module import load_cached_grok_json_flexible
+
+        cached = load_cached_grok_json_flexible(pc, tier)
+        if isinstance(cached, dict) and cached:
+            log(f"[Orchestrator] Grok 수집 꺼짐 — 디스크 캐시만 사용: {pc}")
+            return cached, _grok_hints_from_data(cached)
+        log(f"[Orchestrator] Grok 수집 꺼짐 — 캐시 없음, 제목/시놉/JA만으로 진행: {pc}")
+        return None, ""
     data = await ensure_grok_story_cache_for_translation(
         product_code=pc,
         logger_func=log,
@@ -216,17 +232,65 @@ class SubtitlePipelineOrchestrator:
 
     async def run_for_product(self, product_code: str, **kwargs: Any) -> None:
         """Grok 캐시 + DB 메타 직접 로드 → KO 번역."""
+        from javstory.transcription.stt_types import STTCancelled
+
         merged: dict[str, Any] = {**kwargs, "product_code": product_code}
         log = kwargs.get("logger_func") or print
+        should_cancel = kwargs.get("should_cancel")
+        collect_grok = bool(merged.get("collect_grok", True))
 
+        def _check_cancel() -> None:
+            if callable(should_cancel) and should_cancel():
+                raise STTCancelled()
+
+        _check_cancel()
         tier_raw = merged.get("story_context_tier") or merged.get("story_analysis_tier")
-        grok_json, hints_text = await _load_grok_cache_async(product_code, tier_raw, log)
+        grok_json, hints_text = await _load_grok_cache_async(
+            product_code, tier_raw, log, collect_grok=collect_grok
+        )
+        _check_cancel()
         merged["story_context_grok_json"] = grok_json
         merged["story_context_report_text"] = hints_text
         if grok_json:
             log(f"[Orchestrator] Grok 캐시 로드 완료: {product_code}")
 
         merged["background_json_str"] = _build_background_from_db(product_code)
+        _check_cancel()
+
+        # JA 경로를 미리 해석해 노트 생성·번역에 공유
+        ja_in = _resolve_ko_translation_input_path(merged)
+        on_note = merged.get("on_translation_note")
+        if ja_in is not None:
+            segments = _load_simple_segments_from_srt(ja_in)
+            try:
+                work_note = await ensure_pipeline_work_note_async(
+                    product_code=product_code,
+                    grok_json=grok_json if isinstance(grok_json, dict) else None,
+                    ja_segments=segments,
+                    router=self.router,
+                    logger_func=log,
+                    force=bool(merged.get("force_regenerate_translation_note")),
+                )
+                if work_note:
+                    merged["translation_note_work"] = work_note
+                if callable(on_note):
+                    try:
+                        on_note(
+                            {
+                                "product_code": product_code,
+                                "text": (work_note or "").strip(),
+                            }
+                        )
+                    except Exception as e:
+                        log(f"[Orchestrator] 번역 노트 UI 알림 실패(무시): {e}")
+            except Exception as e:
+                log(f"[Orchestrator] 작품 번역 노트 자동 생성 오류(무시): {e}")
+                if callable(on_note):
+                    try:
+                        on_note({"product_code": product_code, "text": ""})
+                    except Exception:
+                        pass
+            _check_cancel()
 
         await self._translate_ko_chunks(**merged)
 
@@ -262,9 +326,27 @@ class SubtitlePipelineOrchestrator:
                 "[Orchestrator] 번역 노트 — "
                 f"전역 {len(notes['global'])}자 / 배우 {len(notes['actress'])}자 / 작품 {len(notes['work'])}자"
             )
+        else:
+            # 작품 노트만 사전 주입된 경우 나머지 계층 보완
+            notes = _gather_translation_notes(product_code)
+            forward.setdefault("translation_note_global", notes["global"])
+            forward.setdefault("translation_note_actress", notes["actress"])
+            if not str(forward.get("translation_note_work") or "").strip():
+                forward["translation_note_work"] = notes["work"]
+            log(
+                "[Orchestrator] 번역 노트 — "
+                f"전역 {len(str(forward.get('translation_note_global') or ''))}자 / "
+                f"배우 {len(str(forward.get('translation_note_actress') or ''))}자 / "
+                f"작품 {len(str(forward.get('translation_note_work') or ''))}자"
+            )
 
         log(f"[Orchestrator] KO 번역 시작: {ja_in.name} → {out_path.name}")
         hints = kwargs.get("story_context_report_text")
+        should_cancel = kwargs.get("should_cancel")
+        if callable(should_cancel) and should_cancel():
+            from javstory.transcription.stt_types import STTCancelled
+
+            raise STTCancelled()
         await translate_ja_segments_to_ko_async(
             segments,
             product_code=product_code,
@@ -273,5 +355,9 @@ class SubtitlePipelineOrchestrator:
             story_context_hints=hints if isinstance(hints, str) and hints.strip() else None,
             **forward,
         )
+        if callable(should_cancel) and should_cancel():
+            from javstory.transcription.stt_types import STTCancelled
+
+            raise STTCancelled()
         _write_simple_segments_srt(segments, out_path)
         log(f"[Orchestrator] KO 번역 저장: {out_path}")

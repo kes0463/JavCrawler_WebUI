@@ -78,9 +78,12 @@ Return ONLY a valid JSON object. No markdown code blocks.
         try:
             raw_res = await self.router.route(messages, tier_override=harvest_translation_llm_tier())
             json_str = self._extract_json(raw_res)
-            return json.loads(json_str)
+            parsed = json.loads(json_str)
+            if not isinstance(parsed, dict):
+                raise ValueError(f"번역 결과가 dict가 아님: {type(parsed).__name__}")
+            return parsed
         except Exception as e:
-            self.logger(f"[Translator] 일괄 번역 실패 ({product_code}): {e}")
+            self.logger(f"[Translator] 일괄 번역 실패 ({product_code}): {type(e).__name__}: {e}")
             return {}
 
     def _extract_json(self, text: str) -> str:

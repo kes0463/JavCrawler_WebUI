@@ -21,7 +21,9 @@ from javstory.translation.translation_prompt_config import (
 from webapi.schemas import (
     EmbeddingsSettingsPatch,
     EmbeddingsSettingsResponse,
+    FasterWhisperModelOption,
     SttEngineOption,
+    SttFwXxlOptions,
     SttSettingsPatch,
     SttSettingsResponse,
     TranslationSettingsPatch,
@@ -41,7 +43,11 @@ def _to_response(snap: dict) -> SttSettingsResponse:
         hf_whisper_model=snap["hf_whisper_model"],
         vad_threshold=snap["vad_threshold"],
         dialogue_only=snap["dialogue_only"],
+        fw_xxl=SttFwXxlOptions(**snap["fw_xxl"]),
         engine_options=[SttEngineOption(**o) for o in snap["engine_options"]],
+        faster_whisper_model_options=[
+            FasterWhisperModelOption(**o) for o in snap.get("faster_whisper_model_options") or []
+        ],
     )
 
 
@@ -53,6 +59,7 @@ def get_stt_settings():
 @router.patch("/stt", response_model=SttSettingsResponse)
 def patch_stt_settings(body: SttSettingsPatch):
     from javstory.config.secrets_manager import set_env_runtime_value
+    from javstory.transcription.stt_config import fw_xxl_env_key
 
     data = body.model_dump(exclude_unset=True)
     if not data:
@@ -90,6 +97,19 @@ def patch_stt_settings(body: SttSettingsPatch):
             "JAVSTORY_STT_DIALOGUE_ONLY",
             "1" if data["dialogue_only"] else "0",
         )
+
+    if "fw_xxl" in data and data["fw_xxl"] is not None:
+        fw = {k: v for k, v in data["fw_xxl"].items() if v is not None}
+        for field, value in fw.items():
+            env_key = fw_xxl_env_key(field)
+            if not env_key:
+                continue
+            if isinstance(value, bool):
+                set_env_runtime_value(env_key, "1" if value else "0")
+            else:
+                set_env_runtime_value(env_key, str(value))
+        if "vad_threshold" in fw:
+            set_env_runtime_value("JAVSTORY_VAD_THRESHOLD", str(fw["vad_threshold"]))
 
     return _to_response(stt_settings_snapshot())
 

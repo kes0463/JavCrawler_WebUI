@@ -357,6 +357,10 @@ class ActressService:
                 return {"works": [], "genres": []}
             items = fetch_actress_library_works(session, actress)
             if items:
+                from javstory.harvest.database import JAVMetadata
+                from javstory.library.file_flag_scanner import load_flags_for_codes
+                from javstory.services.library_service import LibraryService
+
                 codes = [it["product_code"] for it in items]
                 watch_rows = session.query(WatchHistory).filter(
                     WatchHistory.product_code.in_(codes)
@@ -366,13 +370,44 @@ class ActressService:
                     key = (wh.product_code or "").strip().upper()
                     if key:
                         watch_by_pc[key] = wh
+
+                meta_rows = (
+                    session.query(JAVMetadata)
+                    .filter(JAVMetadata.product_code.in_(codes))
+                    .all()
+                )
+                meta_by_pc = {
+                    (r.product_code or "").strip().upper(): r
+                    for r in meta_rows
+                    if (r.product_code or "").strip()
+                }
+                flags_map = load_flags_for_codes(session, codes)
+                lib = LibraryService()
+
                 for it in items:
-                    wh = watch_by_pc.get(it["product_code"].upper())
+                    pc = (it.get("product_code") or "").strip().upper()
+                    wh = watch_by_pc.get(pc)
                     it["user_rating"] = int(wh.rating or 0) if wh else 0
                     it["user_liked"] = bool(wh.liked) if wh else False
+                    it["watch_later"] = bool(getattr(wh, "watch_later", False)) if wh else False
                     cp = it.get("cover_path") or it.get("coverPath") or ""
                     if cp:
                         it["cover_url"] = f"/api/library/cover/{it['product_code']}"
+
+                    row = meta_by_pc.get(pc)
+                    if row is not None:
+                        folder = (getattr(row, "folder_path", None) or "").strip() or ""
+                        it["folder_path"] = folder
+                        cache = flags_map.get(pc) or flags_map.get(it["product_code"]) or {}
+                        try:
+                            flags = lib.media_flags_for(row, cache)
+                            it["has_subtitle"] = bool(flags.get("has_subtitle"))
+                            it["has_hardcoded_subtitle"] = bool(flags.get("has_hardcoded_subtitle"))
+                            it["has_mosaic_removed"] = bool(flags.get("has_mosaic_removed"))
+                            it["has_preview"] = bool(flags.get("has_preview"))
+                            it["preview_media"] = flags.get("preview_media")
+                        except Exception:
+                            pass
             return {"works": items, "genres": aggregate_work_genres(items)}
 
     def create_actress(self, data: dict) -> int:

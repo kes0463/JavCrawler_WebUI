@@ -31,6 +31,9 @@ def strip_llm_noise_for_json(text: str) -> str:
     t = text.strip()
     t = re.sub(r"`<redacted_thinking>`.*?`</redacted_thinking>`", "", t, flags=re.DOTALL | re.IGNORECASE)
     t = re.sub(r"<redacted_thinking>.*?</redacted_thinking>", "", t, flags=re.DOTALL | re.IGNORECASE)
+    t = re.sub(r"<think>.*?</think>", "", t, flags=re.DOTALL | re.IGNORECASE)
+    t = re.sub(r"<thinking>.*?</thinking>", "", t, flags=re.DOTALL | re.IGNORECASE)
+    t = re.sub(r"<\|[^|>]+\|>", "", t)
     return t.strip()
 
 
@@ -183,6 +186,37 @@ def _repair_trailing_commas(s: str) -> str:
     return re.sub(r",\s*([}\]])", r"\1", s)
 
 
+def _normalize_jsonish_quotes(s: str) -> str:
+    """스마트 따옴표·전각 따옴표를 ASCII로."""
+    return (
+        s.replace("\u201c", '"')
+        .replace("\u201d", '"')
+        .replace("\u2018", "'")
+        .replace("\u2019", "'")
+        .replace("\uff02", '"')
+        .replace("\uff07", "'")
+    )
+
+
+def _repair_truncated_json_array(s: str) -> str | None:
+    """max_tokens 절단으로 닫히지 않은 배열을 마지막 완전 객체까지만 살려 닫는다."""
+    t = (s or "").strip()
+    if not t.startswith("["):
+        return None
+    last = t.rfind("}")
+    if last < 0:
+        return None
+    trimmed = t[: last + 1].rstrip()
+    if trimmed.endswith(","):
+        trimmed = trimmed[:-1].rstrip()
+    repaired = _repair_trailing_commas(trimmed) + "]"
+    try:
+        data = json.loads(repaired)
+        return repaired if isinstance(data, list) and data else None
+    except json.JSONDecodeError:
+        return None
+
+
 def _repair_missing_index_after_colon(s: str) -> str:
     """
     LLM이 `"index":,` 처럼 값을 빠뜨리면 json.loads가 실패한다.
@@ -197,24 +231,79 @@ def _repair_missing_index_after_colon(s: str) -> str:
     return re.sub(r'"index"\s*:\s*,', _repl, s)
 
 
+def _loads_cue_array_literal(s: str) -> list[Any] | None:
+    """Gemma 등이 단일따옴표 Python dict 스타일로 낼 때."""
+    import ast
+
+    try:
+        data = ast.literal_eval(s)
+    except Exception:
+        return None
+    if isinstance(data, list) and _is_subtitle_cue_json_array(data):
+        return data
+    return None
+
+
+def _loads_array_variants(raw: str) -> list[Any] | None:
+    candidates = [
+        raw,
+        _normalize_jsonish_quotes(raw),
+        _repair_trailing_commas(raw),
+        _repair_trailing_commas(_normalize_jsonish_quotes(raw)),
+        _repair_missing_index_after_colon(raw),
+        _repair_trailing_commas(_repair_missing_index_after_colon(_normalize_jsonish_quotes(raw))),
+    ]
+    truncated = _repair_truncated_json_array(_normalize_jsonish_quotes(raw))
+    if truncated:
+        candidates.append(truncated)
+    seen: set[str] = set()
+    for cand in candidates:
+        if not cand or cand in seen:
+            continue
+        seen.add(cand)
+        try:
+            data = json.loads(cand)
+            if isinstance(data, list):
+                return data
+        except json.JSONDecodeError:
+            lit = _loads_cue_array_literal(cand)
+            if lit is not None:
+                return lit
+            continue
+        lit = _loads_cue_array_literal(cand)
+        if lit is not None:
+            return lit
+    lit = _loads_cue_array_literal(_normalize_jsonish_quotes(raw))
+    if lit is not None:
+        return lit
+    return None
+
+
 def parse_json_array(text: str) -> list[Any] | None:
     cand = extract_json_array_candidate(text)
-    if not cand:
-        return None
-    for attempt in (0, 1, 2, 3):
-        if attempt == 0:
-            raw = cand
-        elif attempt == 1:
-            raw = _repair_trailing_commas(cand)
-        elif attempt == 2:
-            raw = _repair_missing_index_after_colon(cand)
-        else:
-            raw = _repair_trailing_commas(_repair_missing_index_after_colon(cand))
-        try:
-            data = json.loads(raw)
-            return data if isinstance(data, list) else None
-        except json.JSONDecodeError:
-            continue
+    if cand:
+        got = _loads_array_variants(cand)
+        if got is not None:
+            return got
+    # 균형 슬라이스가 실패해도(절단·단일따옴표) 본문 전체에서 한 번 더 시도
+    t = strip_cot_preamble_before_cue_json(text)
+    if t and t != cand:
+        got = _loads_array_variants(t)
+        if got is not None:
+            return got
+    # 단일따옴표 배열: bracket-depth 스캐너가 깨질 수 있어 [ ... ] 구간 literal_eval
+    if t:
+        start = t.find("[")
+        end = t.rfind("]")
+        if start >= 0 and end > start:
+            lit = _loads_cue_array_literal(_normalize_jsonish_quotes(t[start : end + 1]))
+            if lit is not None:
+                return lit
+            repaired = _repair_truncated_json_array(_normalize_jsonish_quotes(t[start:]))
+            if repaired:
+                got = _loads_array_variants(repaired)
+                if got is not None:
+                    return got
     return None
 
 

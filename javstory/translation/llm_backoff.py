@@ -61,7 +61,60 @@ def is_openrouter_credit_exhausted(exc_or_msg: BaseException | str) -> bool:
     return False
 
 
+def is_context_size_exceeded(exc_or_msg: BaseException | str) -> bool:
+    """llama.cpp 등: 프롬프트가 n_ctx를 넘는 오류(동일 요청 재시도 무의미)."""
+    if isinstance(exc_or_msg, BaseException):
+        last = getattr(exc_or_msg, "last_error", None)
+        if last and is_context_size_exceeded(str(last)):
+            return True
+        msg = str(exc_or_msg or "")
+    else:
+        msg = str(exc_or_msg or "")
+    s = msg.lower()
+    if "exceed_context_size" in s:
+        return True
+    if "exceeds the available context size" in s:
+        return True
+    if "n_prompt_tokens" in s and "n_ctx" in s and "exceed" in s:
+        return True
+    return False
+
+
+async def await_cancellable(
+    coro: Any,
+    *,
+    should_cancel: Callable[[], bool] | None = None,
+    poll_sec: float = 0.4,
+) -> Any:
+    """코루틴 대기 중 should_cancel이 True면 task를 취소하고 STTCancelled를 올린다."""
+    if should_cancel is None:
+        return await coro
+    task = asyncio.ensure_future(coro)
+    try:
+        while True:
+            if should_cancel():
+                task.cancel()
+                try:
+                    await task
+                except (asyncio.CancelledError, Exception):
+                    pass
+                raise STTCancelled()
+            done, _ = await asyncio.wait({task}, timeout=max(0.1, poll_sec))
+            if done:
+                return await task
+    except STTCancelled:
+        if not task.done():
+            task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):
+                pass
+        raise
+
+
 def retryable_api_error(e: BaseException) -> bool:
+    if is_context_size_exceeded(e):
+        return False
     msg = str(e).lower()
     if "429" in msg or "rate" in msg or "limit" in msg or "timeout" in msg:
         return True
@@ -86,11 +139,17 @@ async def route_with_backoff(
     log: RetryLog,
     json_mode: bool = False,
     max_attempts: int = 6,
+    should_cancel: Callable[[], bool] | None = None,
 ) -> str:
     last: BaseException | None = None
     for attempt in range(max_attempts):
+        if should_cancel and should_cancel():
+            raise STTCancelled()
         try:
-            return await router.route(messages, tier_override=tier, json_mode=json_mode)
+            return await await_cancellable(
+                router.route(messages, tier_override=tier, json_mode=json_mode),
+                should_cancel=should_cancel,
+            )
         except STTCancelled:
             raise
         except Exception as e:
@@ -107,6 +166,13 @@ async def route_with_backoff(
             log(
                 f"API 재시도 {attempt + 1}/{max_attempts} ({e!s:.120}) sleep {wait:.1f}s"
             )
-            await asyncio.sleep(wait)
+            # sleep 중에도 취소 반영
+            slept = 0.0
+            while slept < wait:
+                if should_cancel and should_cancel():
+                    raise STTCancelled()
+                step = min(0.4, wait - slept)
+                await asyncio.sleep(step)
+                slept += step
     assert last is not None
     raise last

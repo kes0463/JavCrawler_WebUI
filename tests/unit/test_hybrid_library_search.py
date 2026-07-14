@@ -95,6 +95,67 @@ def test_hybrid_library_search_skips_zero_weight_rankers(monkeypatch):
     assert results[0]["id"] == "AAA-111"
 
 
+def test_search_by_embedding_keeps_high_similarity_band(monkeypatch):
+    from javstory.search.library_search import HybridLibrarySearch, _LibraryDoc, _SearchResult
+
+    docs = [_LibraryDoc("AAA-001", "A", "a", "a")]
+    search = HybridLibrarySearch()
+    monkeypatch.setattr(search, "_load_docs", lambda: docs)
+    # 상위·근접 유사도는 남고, 평균대 노이즈는 제외
+    monkeypatch.setattr(
+        search,
+        "_search_embedding",
+        lambda query, docs, top_k: [
+            _SearchResult("HI-001", "high", "embedding", 0.62),
+            _SearchResult("HI-002", "high2", "embedding", 0.58),
+            _SearchResult("MID-002", "mid", "embedding", 0.50),
+            _SearchResult("FAR-003", "far", "embedding", 0.40),
+            *[_SearchResult(f"LO-{i:03d}", "low", "embedding", 0.22) for i in range(40)],
+        ],
+    )
+    monkeypatch.delenv("JAVSTORY_EMBEDDING_SEARCH_MIN_SCORE", raising=False)
+    monkeypatch.delenv("JAVSTORY_EMBEDDING_SEARCH_RELATIVE_RATIO", raising=False)
+    monkeypatch.delenv("JAVSTORY_EMBEDDING_SEARCH_MAX_GAP", raising=False)
+
+    results = search.search_by_embedding("비 오는 날")
+    ids = [r["id"] for r in results]
+    assert "HI-001" in ids and "HI-002" in ids and "MID-002" in ids
+    assert "FAR-003" not in ids
+    assert all(not i.startswith("LO-") for i in ids)
+    assert all(r["source"] == "embedding" for r in results)
+
+
+def test_search_by_embedding_caches_results_for_pagination(monkeypatch):
+    from javstory.search.library_search import (
+        HybridLibrarySearch,
+        _LibraryDoc,
+        _SearchResult,
+        clear_embed_search_cache,
+    )
+
+    clear_embed_search_cache()
+    docs = [_LibraryDoc("AAA-001", "A", "a", "a")]
+    search = HybridLibrarySearch()
+    calls = {"n": 0}
+
+    def fake_embed(query, docs, top_k):
+        calls["n"] += 1
+        return [
+            _SearchResult("HI-001", "high", "embedding", 0.62),
+            _SearchResult("HI-002", "high2", "embedding", 0.58),
+        ]
+
+    monkeypatch.setattr(search, "_load_docs", lambda: docs)
+    monkeypatch.setattr(search, "_search_embedding", fake_embed)
+    monkeypatch.setenv("JAVSTORY_EMBEDDINGS_ENABLED", "1")
+
+    first = search.search_by_embedding("비 오는 날 실외")
+    second = search.search_by_embedding("비 오는 날 실외")
+    assert [r["id"] for r in first] == [r["id"] for r in second]
+    assert calls["n"] == 1
+    assert search.last_embedding_diag.get("cache_hit") is True
+
+
 def test_hybrid_results_adapter_matches_persona_schema():
     from javstory.persona.erotic_persona_engine import _adapt_hybrid_search_results
 

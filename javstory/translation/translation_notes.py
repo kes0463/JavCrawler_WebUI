@@ -10,12 +10,14 @@
 최종 결합 결과는 Gemini 프롬프트의 `{{note}}`에 들어간다.
 
 섹션 헤더(권장):
-- [작품 기본 컨텍스트]
-- [화자 프로필 및 관계]
-- [Whisper AI 오인식 교정 사전]
-- [용어/은어 매핑]
-- [고정 표기/호칭 사전]
-- [전역 규칙]
+- [기본 번역 규칙]
+- [줄거리 요약]
+- [등장 인물 요약]
+- [말투에 대한 규칙]
+- [용어 사전]
+- [번역 스타일 지침]
+- (레거시) [작품 기본 컨텍스트] [화자 프로필 및 관계] [Whisper AI 오인식 교정 사전]
+  [용어/은어 매핑] [고정 표기/호칭 사전] [전역 규칙]
 
 사용자가 자유 텍스트로 적어도 동작하지만, 위 헤더를 쓰면 자동 합치기 시
 같은 섹션 내용을 한 곳에 모아준다. 헤더가 없는 자유 텍스트는 [기타]로 묶인다.
@@ -24,7 +26,7 @@ from __future__ import annotations
 
 import os
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -40,20 +42,36 @@ GLOBAL_NOTE_PATH = NOTES_DIR / "translation_note_global.txt"
 
 MAX_GLOBAL = 800
 MAX_ACTRESS = 600
-MAX_WORK = 2000
-MAX_COMBINED = 3500
+MAX_WORK = 4500
+MAX_COMBINED = 7000
 
 
 # ── 섹션 헤더 ─────────────────────────────────────────────────────
 
 # 표시 순서(고정). 사용자가 임의 헤더 쓰면 [기타]로 합쳐짐.
 KNOWN_SECTIONS: tuple[str, ...] = (
+    "기본 번역 규칙",
+    "줄거리 요약",
+    "등장 인물 요약",
+    "말투에 대한 규칙",
+    "용어 사전",
+    "번역 스타일 지침",
+    # 레거시
     "작품 기본 컨텍스트",
     "화자 프로필 및 관계",
     "Whisper AI 오인식 교정 사전",
     "용어/은어 매핑",
     "고정 표기/호칭 사전",
     "전역 규칙",
+)
+
+PIPELINE_NOTE_SECTIONS: tuple[str, ...] = (
+    "기본 번역 규칙",
+    "줄거리 요약",
+    "등장 인물 요약",
+    "말투에 대한 규칙",
+    "용어 사전",
+    "번역 스타일 지침",
 )
 
 _SECTION_HEADER_RE = re.compile(r"^\s*\[([^\]]+)\]\s*$")
@@ -163,7 +181,7 @@ _GLOSS_LINE_RE = re.compile(
 
 
 def extract_glossary(text: str) -> list[tuple[str, str]]:
-    """[용어/은어 매핑] / [고정 표기/호칭 사전] 섹션에서 (원어, 번역어) 쌍 추출.
+    """[용어 사전] / [용어/은어 매핑] / [고정 표기/호칭 사전] 섹션에서 (원어, 번역어) 쌍 추출.
 
     형식 허용:
       - 원어 => 번역어
@@ -174,7 +192,7 @@ def extract_glossary(text: str) -> list[tuple[str, str]]:
     """
     res: dict[str, str] = {}
     sects = parse_note_sections(text)
-    for header in ("용어/은어 매핑", "고정 표기/호칭 사전"):
+    for header in ("용어 사전", "용어/은어 매핑", "고정 표기/호칭 사전"):
         for body in sects.sections.get(header, []):
             for line in body.splitlines():
                 if not line.strip():
@@ -281,3 +299,32 @@ def background_to_note_summary(background_json: dict[str, Any] | None) -> str:
     if syn:
         parts.append(f"줄거리: {_truncate(syn, 400)}")
     return "\n".join(parts).strip()
+
+
+def save_work_translation_note(product_code: str, note: str) -> Path | None:
+    """작품 단위 번역 노트를 library_state.json에 저장. 성공 시 경로."""
+    pc = (product_code or "").strip().upper()
+    if not pc:
+        return None
+    from javstory.library.canonical.store import save_library_state
+    from javstory.library.detail_persist import load_canonical_for_product
+    from javstory.library.paths import library_state_path
+
+    state = load_canonical_for_product(pc)
+    state = replace(state, translation_note=str(note or "").strip())
+    path = library_state_path(pc)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    save_library_state(path, state)
+    return path
+
+
+def load_work_translation_note(product_code: str) -> str:
+    pc = (product_code or "").strip().upper()
+    if not pc:
+        return ""
+    try:
+        from javstory.library.detail_persist import load_canonical_for_product
+
+        return str(getattr(load_canonical_for_product(pc), "translation_note", "") or "").strip()
+    except Exception:
+        return ""

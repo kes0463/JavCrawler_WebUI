@@ -15,6 +15,7 @@ import {
   patchTranslationPromptSettings,
   fetchEmbeddingsSettings,
   patchEmbeddingsSettings,
+  type SttFwXxlOptions,
   type SttSettings,
   type TranslationSettings,
   type TranslationPromptSettings,
@@ -30,6 +31,111 @@ const WHISPER_MODEL_OPTIONS = [
   { label: "small", value: "small" },
   { label: "turbo", value: "turbo" },
 ];
+
+const FASTER_WHISPER_MODEL_OPTIONS = [
+  { label: "kotoba-v2.0-faster (기본)", value: "kotoba-tech/kotoba-whisper-v2.0-faster" },
+  { label: "Medium", value: "medium" },
+  { label: "large-v2", value: "large-v2" },
+  { label: "large-v3", value: "large-v3" },
+  { label: "large-v3-turbo", value: "large-v3-turbo" },
+];
+
+const DEFAULT_FW_XXL: SttFwXxlOptions = {
+  language: "ja",
+  vad_filter: true,
+  vad_threshold: 0.6,
+  vad_min_speech_duration_ms: 400,
+  vad_max_speech_duration_s: 18,
+  condition_on_previous_text: false,
+  no_speech_threshold: 0.6,
+  beam_size: 7,
+  best_of: 5,
+  temperature: 0,
+  temperature_increment_on_fallback: 0.2,
+  hallucination_silence_threshold: 1.5,
+  compute_type: "float16",
+  batch_size: 8,
+  word_timestamps: true,
+  repetition_penalty: 1.2,
+};
+
+type FwXxlDraft = {
+  language: string;
+  vad_filter: boolean;
+  vad_threshold: string;
+  vad_min_speech_duration_ms: string;
+  vad_max_speech_duration_s: string;
+  condition_on_previous_text: boolean;
+  no_speech_threshold: string;
+  beam_size: string;
+  best_of: string;
+  temperature: string;
+  temperature_increment_on_fallback: string;
+  hallucination_silence_threshold: string;
+  compute_type: string;
+  batch_size: string;
+  word_timestamps: boolean;
+  repetition_penalty: string;
+};
+
+function fwXxlToDraft(o: SttFwXxlOptions): FwXxlDraft {
+  const m = { ...DEFAULT_FW_XXL, ...o };
+  return {
+    language: m.language,
+    vad_filter: m.vad_filter,
+    vad_threshold: String(m.vad_threshold),
+    vad_min_speech_duration_ms: String(m.vad_min_speech_duration_ms),
+    vad_max_speech_duration_s: String(m.vad_max_speech_duration_s),
+    condition_on_previous_text: m.condition_on_previous_text,
+    no_speech_threshold: String(m.no_speech_threshold),
+    beam_size: String(m.beam_size),
+    best_of: String(m.best_of),
+    temperature: String(m.temperature),
+    temperature_increment_on_fallback: String(m.temperature_increment_on_fallback),
+    hallucination_silence_threshold: String(m.hallucination_silence_threshold),
+    compute_type: m.compute_type,
+    batch_size: String(m.batch_size),
+    word_timestamps: m.word_timestamps,
+    repetition_penalty: String(m.repetition_penalty),
+  };
+}
+
+function parseFwXxlDraft(d: FwXxlDraft): SttFwXxlOptions | null {
+  const num = (s: string) => parseFloat(s);
+  const int = (s: string) => parseInt(s, 10);
+  const vad = num(d.vad_threshold);
+  const noSpeech = num(d.no_speech_threshold);
+  const beam = int(d.beam_size);
+  const bestOf = int(d.best_of);
+  const temp = num(d.temperature);
+  const tempInc = num(d.temperature_increment_on_fallback);
+  const hallu = num(d.hallucination_silence_threshold);
+  const batch = int(d.batch_size);
+  const minSpeech = int(d.vad_min_speech_duration_ms);
+  const maxSpeech = int(d.vad_max_speech_duration_s);
+  const rep = num(d.repetition_penalty);
+  if ([vad, noSpeech, temp, tempInc, hallu, rep].some(Number.isNaN)) return null;
+  if ([beam, bestOf, batch, minSpeech, maxSpeech].some(Number.isNaN)) return null;
+  if (vad < 0.05 || vad > 0.95) return null;
+  return {
+    language: (d.language || "ja").trim() || "ja",
+    vad_filter: d.vad_filter,
+    vad_threshold: vad,
+    vad_min_speech_duration_ms: minSpeech,
+    vad_max_speech_duration_s: maxSpeech,
+    condition_on_previous_text: d.condition_on_previous_text,
+    no_speech_threshold: noSpeech,
+    beam_size: beam,
+    best_of: bestOf,
+    temperature: temp,
+    temperature_increment_on_fallback: tempInc,
+    hallucination_silence_threshold: hallu,
+    compute_type: (d.compute_type || "float16").trim() || "float16",
+    batch_size: batch,
+    word_timestamps: d.word_timestamps,
+    repetition_penalty: rep,
+  };
+}
 
 export default function SettingsView() {
   const { showToast } = useToast();
@@ -51,6 +157,7 @@ export default function SettingsView() {
     hf_whisper_model: "litagin/anime-whisper",
     vad_threshold: "0.35",
     dialogue_only: true,
+    fw_xxl: fwXxlToDraft(DEFAULT_FW_XXL),
   });
 
   const loadStt = useCallback(async () => {
@@ -65,6 +172,7 @@ export default function SettingsView() {
         hf_whisper_model: snap.hf_whisper_model,
         vad_threshold: String(snap.vad_threshold),
         dialogue_only: snap.dialogue_only,
+        fw_xxl: fwXxlToDraft(snap.fw_xxl ?? DEFAULT_FW_XXL),
       });
     } catch (e) {
       showToast(e instanceof Error ? e.message : "STT 설정 불러오기 실패", "error");
@@ -85,16 +193,35 @@ export default function SettingsView() {
         showToast("VAD 임계값은 0.05~0.95 사이여야 합니다", "error");
         return;
       }
-      const snap = await patchSttSettings({
+      const patch: Parameters<typeof patchSttSettings>[0] = {
         engine: sttDraft.engine,
         whisper_model: sttDraft.whisper_model,
         faster_whisper_model: sttDraft.faster_whisper_model,
         hf_whisper_model: sttDraft.hf_whisper_model,
         vad_threshold: vad,
         dialogue_only: sttDraft.dialogue_only,
-      });
+      };
+      if (sttDraft.engine === "stable_ts_fw") {
+        const fw = parseFwXxlDraft(sttDraft.fw_xxl);
+        if (!fw) {
+          showToast("Faster-Whisper-XXL 옵션 값이 올바르지 않습니다", "error");
+          return;
+        }
+        patch.fw_xxl = fw;
+        patch.vad_threshold = fw.vad_threshold;
+      }
+      const snap = await patchSttSettings(patch);
       setStt(snap);
-      showToast("전사(STT) 설정 저장됨", "success");
+      setSttDraft({
+        engine: snap.engine,
+        whisper_model: snap.whisper_model,
+        faster_whisper_model: snap.faster_whisper_model,
+        hf_whisper_model: snap.hf_whisper_model,
+        vad_threshold: String(snap.vad_threshold),
+        dialogue_only: snap.dialogue_only,
+        fw_xxl: fwXxlToDraft(snap.fw_xxl ?? DEFAULT_FW_XXL),
+      });
+      showToast("자막 전사 설정 저장됨", "success");
     } catch (e) {
       showToast(e instanceof Error ? e.message : "STT 설정 저장 실패", "error");
     } finally {
@@ -111,7 +238,12 @@ export default function SettingsView() {
       hf_whisper_model: stt.hf_whisper_model,
       vad_threshold: String(stt.vad_threshold),
       dialogue_only: stt.dialogue_only,
+      fw_xxl: fwXxlToDraft(stt.fw_xxl ?? DEFAULT_FW_XXL),
     });
+  };
+
+  const setFwXxl = <K extends keyof FwXxlDraft>(key: K, value: FwXxlDraft[K]) => {
+    setSttDraft(d => ({ ...d, fw_xxl: { ...d.fw_xxl, [key]: value } }));
   };
 
   const engineOptions = (stt?.engine_options ?? [])
@@ -403,8 +535,8 @@ export default function SettingsView() {
         </div>
       </div>
 
-      {/* ── STT / 전사 ── */}
-      <SettingsSection icon={Mic2} title="전사 (STT)">
+      {/* ── 자막 전사 ── */}
+      <SettingsSection icon={Mic2} title="자막 전사">
         {sttLoading ? (
           <div className="flex items-center gap-2 text-muted-foreground py-4">
             <Loader2 className="w-4 h-4 animate-spin" />
@@ -421,7 +553,7 @@ export default function SettingsView() {
                 onChange={v => setSttDraft(d => ({ ...d, engine: v }))}
                 options={engineOptions.length ? engineOptions : [
                   { label: "Stable TS (PyTorch)", value: "stable_ts" },
-                  { label: "Stable TS + Faster-Whisper", value: "stable_ts_fw" },
+                  { label: "Faster-Whisper-XXL", value: "stable_ts_fw" },
                   { label: "Anime-Whisper + Stable TS", value: "anime_whisper" },
                 ]}
               />
@@ -438,15 +570,146 @@ export default function SettingsView() {
             )}
 
             {sttDraft.engine === "stable_ts_fw" && (
-              <SettingsRow
-                label="Faster-Whisper 모델"
-                hint="HuggingFace CTranslate2 가중치 (예: kotoba-whisper-v2.0-faster)"
-              >
-                <TextInput
-                  value={sttDraft.faster_whisper_model}
-                  onChange={v => setSttDraft(d => ({ ...d, faster_whisper_model: v }))}
-                />
-              </SettingsRow>
+              <>
+                <SettingsRow
+                  label="Faster-Whisper 모델"
+                  hint="CTranslate2 가중치 — kotoba는 일본어 특화"
+                >
+                  <SelectInput
+                    value={sttDraft.faster_whisper_model}
+                    onChange={v => setSttDraft(d => ({ ...d, faster_whisper_model: v }))}
+                    options={(() => {
+                      const fromApi = (stt?.faster_whisper_model_options ?? []).map(o => ({
+                        label: o.label,
+                        value: o.id,
+                      }));
+                      const base = fromApi.length ? fromApi : FASTER_WHISPER_MODEL_OPTIONS;
+                      const cur = sttDraft.faster_whisper_model;
+                      if (cur && !base.some(o => o.value === cur)) {
+                        return [{ label: cur, value: cur }, ...base];
+                      }
+                      return base;
+                    })()}
+                  />
+                </SettingsRow>
+
+                <div className="pt-2 pb-1 border-t border-white/5">
+                  <p className="text-sm font-medium text-white/90">Faster-Whisper-XXL 세부 옵션</p>
+                  <p className="text-xs text-muted-foreground mt-0.5">
+                    language=ja · VAD·beam·temperature 등 XXL CLI 대응 값
+                  </p>
+                </div>
+
+                <SettingsRow label="Language" hint="--language">
+                  <TextInput
+                    value={sttDraft.fw_xxl.language}
+                    onChange={v => setFwXxl("language", v)}
+                  />
+                </SettingsRow>
+                <SettingsRow label="VAD 필터" hint="--vad_filter" control="switch">
+                  <Toggle
+                    checked={sttDraft.fw_xxl.vad_filter}
+                    onChange={v => setFwXxl("vad_filter", v)}
+                    disabled={sttSaving}
+                  />
+                </SettingsRow>
+                <SettingsRow label="VAD 임계값" hint="--vad_threshold (높을수록 배경음 억제)">
+                  <TextInput
+                    value={sttDraft.fw_xxl.vad_threshold}
+                    onChange={v => setFwXxl("vad_threshold", v)}
+                  />
+                </SettingsRow>
+                <SettingsRow label="최소 발화(ms)" hint="--vad_min_speech_duration_ms">
+                  <TextInput
+                    value={sttDraft.fw_xxl.vad_min_speech_duration_ms}
+                    onChange={v => setFwXxl("vad_min_speech_duration_ms", v)}
+                  />
+                </SettingsRow>
+                <SettingsRow label="최대 발화(s)" hint="--vad_max_speech_duration_s">
+                  <TextInput
+                    value={sttDraft.fw_xxl.vad_max_speech_duration_s}
+                    onChange={v => setFwXxl("vad_max_speech_duration_s", v)}
+                  />
+                </SettingsRow>
+                <SettingsRow
+                  label="이전 텍스트 조건"
+                  hint="--condition_on_previous_text"
+                  control="switch"
+                >
+                  <Toggle
+                    checked={sttDraft.fw_xxl.condition_on_previous_text}
+                    onChange={v => setFwXxl("condition_on_previous_text", v)}
+                    disabled={sttSaving}
+                  />
+                </SettingsRow>
+                <SettingsRow label="무음 임계값" hint="--no_speech_threshold">
+                  <TextInput
+                    value={sttDraft.fw_xxl.no_speech_threshold}
+                    onChange={v => setFwXxl("no_speech_threshold", v)}
+                  />
+                </SettingsRow>
+                <SettingsRow label="Beam size" hint="--beam_size">
+                  <TextInput
+                    value={sttDraft.fw_xxl.beam_size}
+                    onChange={v => setFwXxl("beam_size", v)}
+                  />
+                </SettingsRow>
+                <SettingsRow label="Best of" hint="--best_of">
+                  <TextInput
+                    value={sttDraft.fw_xxl.best_of}
+                    onChange={v => setFwXxl("best_of", v)}
+                  />
+                </SettingsRow>
+                <SettingsRow label="Temperature" hint="--temperature">
+                  <TextInput
+                    value={sttDraft.fw_xxl.temperature}
+                    onChange={v => setFwXxl("temperature", v)}
+                  />
+                </SettingsRow>
+                <SettingsRow label="Temp 증가(fallback)" hint="--temperature_increment_on_fallback">
+                  <TextInput
+                    value={sttDraft.fw_xxl.temperature_increment_on_fallback}
+                    onChange={v => setFwXxl("temperature_increment_on_fallback", v)}
+                  />
+                </SettingsRow>
+                <SettingsRow label="환각 침묵 임계(s)" hint="--hallucination_silence_threshold">
+                  <TextInput
+                    value={sttDraft.fw_xxl.hallucination_silence_threshold}
+                    onChange={v => setFwXxl("hallucination_silence_threshold", v)}
+                  />
+                </SettingsRow>
+                <SettingsRow label="Compute type" hint="--compute_type (CUDA float16)">
+                  <SelectInput
+                    value={sttDraft.fw_xxl.compute_type}
+                    onChange={v => setFwXxl("compute_type", v)}
+                    options={[
+                      { label: "float16", value: "float16" },
+                      { label: "int8_float16", value: "int8_float16" },
+                      { label: "int8", value: "int8" },
+                      { label: "float32", value: "float32" },
+                    ]}
+                  />
+                </SettingsRow>
+                <SettingsRow label="Batch size" hint="--batch_size">
+                  <TextInput
+                    value={sttDraft.fw_xxl.batch_size}
+                    onChange={v => setFwXxl("batch_size", v)}
+                  />
+                </SettingsRow>
+                <SettingsRow label="단어 타임스탬프" hint="--word_timestamps" control="switch">
+                  <Toggle
+                    checked={sttDraft.fw_xxl.word_timestamps}
+                    onChange={v => setFwXxl("word_timestamps", v)}
+                    disabled={sttSaving}
+                  />
+                </SettingsRow>
+                <SettingsRow label="반복 페널티" hint="--repetition_penalty">
+                  <TextInput
+                    value={sttDraft.fw_xxl.repetition_penalty}
+                    onChange={v => setFwXxl("repetition_penalty", v)}
+                  />
+                </SettingsRow>
+              </>
             )}
 
             {sttDraft.engine === "anime_whisper" && (
@@ -458,15 +721,17 @@ export default function SettingsView() {
               </SettingsRow>
             )}
 
-            <SettingsRow
-              label="VAD 임계값"
-              hint="높을수록 헛소리·배경음 자막 억제 (대사만 모드 시 최소 0.45)"
-            >
-              <TextInput
-                value={sttDraft.vad_threshold}
-                onChange={v => setSttDraft(d => ({ ...d, vad_threshold: v }))}
-              />
-            </SettingsRow>
+            {sttDraft.engine !== "stable_ts_fw" && (
+              <SettingsRow
+                label="VAD 임계값"
+                hint="높을수록 헛소리·배경음 자막 억제 (대사만 모드 시 최소 0.45)"
+              >
+                <TextInput
+                  value={sttDraft.vad_threshold}
+                  onChange={v => setSttDraft(d => ({ ...d, vad_threshold: v }))}
+                />
+              </SettingsRow>
+            )}
 
             <SettingsRow
               label="대사만 모드"
@@ -497,7 +762,7 @@ export default function SettingsView() {
                 icon={<Save className="w-3.5 h-3.5" />}
                 onClick={() => void handleSaveStt()}
               >
-                STT 설정 저장
+                전사 설정 저장
               </ActionButton>
             </div>
           </>

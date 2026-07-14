@@ -1,8 +1,24 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Square, SquareCheck, X } from "lucide-react";
 import { cn } from "@/lib/utils";
-import { coverUrl } from "@/api/library";
+import {
+  coverUrl,
+  openLibraryFolder,
+  previewUrl,
+  startGrokStory,
+  startGrokStoryBatch,
+  toggleLibraryLike,
+  toggleLibraryWatchLater,
+} from "@/api/library";
 import type { ActressWork } from "@/api/actress";
+import type { ProcessingKind } from "@/api/processing";
+import { PosterCard } from "@/components/library/PosterCard";
+import { GlassCard } from "@/components/ui/GlassCard";
 import { getScrollableAncestor, useInfiniteScrollNearEnd } from "@/hooks/useGlobalDragScroll";
+import { useLibraryProcessingActions } from "@/hooks/useLibraryProcessingActions";
+import { useSelection } from "@/hooks/useSelection";
+import { usePlayer } from "@/contexts/PlayerContext";
+import { useToast } from "@/contexts/ToastContext";
 
 type WorkSortKey = "product_code" | "release_date" | "favorite_score" | "user_rating";
 
@@ -14,6 +30,7 @@ const SORT_OPTIONS: { value: WorkSortKey; label: string }[] = [
 ];
 
 const PAGE_SIZE = 48;
+const workKey = (w: ActressWork) => w.product_code.toUpperCase();
 
 const controlClass =
   "h-10 px-3 text-base rounded-xl bg-bg-surface border border-white/[0.08] text-[#c8c8e0] focus:outline-none";
@@ -22,6 +39,7 @@ interface ActressWorksGridProps {
   works: ActressWork[];
   genres: string[];
   onWorkClick: (productCode: string) => void;
+  onWorksChange?: (works: ActressWork[]) => void;
 }
 
 function compareWorks(a: ActressWork, b: ActressWork, key: WorkSortKey, asc: boolean): number {
@@ -38,7 +56,16 @@ function compareWorks(a: ActressWork, b: ActressWork, key: WorkSortKey, asc: boo
   return asc ? cmp : -cmp;
 }
 
-export function ActressWorksGrid({ works, genres, onWorkClick }: ActressWorksGridProps) {
+export function ActressWorksGrid({
+  works,
+  genres,
+  onWorkClick,
+  onWorksChange,
+}: ActressWorksGridProps) {
+  const { showToast } = useToast();
+  const { openPlayer } = usePlayer();
+  const { enqueueLibraryProducts } = useLibraryProcessingActions();
+
   const [genreFilter, setGenreFilter] = useState("");
   const [sortKey, setSortKey] = useState<WorkSortKey>("release_date");
   const [sortAsc, setSortAsc] = useState(false);
@@ -58,6 +85,9 @@ export function ActressWorksGrid({ works, genres, onWorkClick }: ActressWorksGri
     }
     return [...list].sort((a, b) => compareWorks(a, b, sortKey, sortAsc));
   }, [works, genreFilter, sortKey, sortAsc]);
+
+  const selection = useSelection(filtered, workKey);
+  const selectionMode = selection.count > 0;
 
   const visible = filtered.slice(0, visibleCount);
   const hasMore = visibleCount < filtered.length;
@@ -89,6 +119,98 @@ export function ActressWorksGrid({ works, genres, onWorkClick }: ActressWorksGri
     return () => observer.disconnect();
   }, [scrollRoot, requestLoadMore, filtered.length, visibleCount]);
 
+  // 필터/정렬 변경 시 선택 초기화
+  const filterKey = `${genreFilter}|${sortKey}|${sortAsc}`;
+  const filterKeyRef = useRef(filterKey);
+  useEffect(() => {
+    if (filterKeyRef.current === filterKey) return;
+    filterKeyRef.current = filterKey;
+    selection.clearAll();
+    setVisibleCount(PAGE_SIZE);
+  }, [filterKey, selection.clearAll]);
+
+  useEffect(() => {
+    if (!selectionMode) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") selection.clearAll();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [selectionMode, selection.clearAll]);
+
+  const resolveContextMenuProductCodes = useCallback((clickedCode: string) => {
+    const key = clickedCode.toUpperCase();
+    if (selection.count > 0 && selection.isSelectedKey(key)) {
+      return selection.selectedKeys;
+    }
+    return [clickedCode];
+  }, [selection.count, selection.isSelectedKey, selection.selectedKeys]);
+
+  const patchWorkFlags = useCallback((productCode: string, flags: { user_liked: boolean; watch_later: boolean }) => {
+    const pc = productCode.toUpperCase();
+    onWorksChange?.(
+      works.map(w =>
+        w.product_code.toUpperCase() === pc
+          ? { ...w, user_liked: flags.user_liked, watch_later: flags.watch_later }
+          : w,
+      ),
+    );
+  }, [onWorksChange, works]);
+
+  const handleAddToProcessing = useCallback((codes: string[], kind: ProcessingKind) => {
+    void enqueueLibraryProducts(codes, kind);
+  }, [enqueueLibraryProducts]);
+
+  const handleGrokStory = useCallback((codes: string[]) => {
+    const run =
+      codes.length === 1
+        ? startGrokStory(codes[0], false)
+        : startGrokStoryBatch(codes, false);
+    void run
+      .then(res => showToast(res.message, res.ok && res.queued > 0 ? "success" : res.ok ? "info" : "warn"))
+      .catch(err => showToast(err instanceof Error ? err.message : "Grok 스토리 시작 실패", "error"));
+  }, [showToast]);
+
+  const handleToggleLike = useCallback((codes: string[]) => {
+    void (async () => {
+      try {
+        for (const code of codes) {
+          const res = await toggleLibraryLike(code);
+          patchWorkFlags(code, res);
+        }
+        showToast(
+          codes.length === 1 ? `${codes[0]}: 좋아요 토글` : `${codes.length}개 좋아요 토글`,
+          "success",
+        );
+      } catch (err) {
+        showToast(err instanceof Error ? err.message : "좋아요 변경 실패", "error");
+      }
+    })();
+  }, [patchWorkFlags, showToast]);
+
+  const handleToggleWatchLater = useCallback((codes: string[]) => {
+    void (async () => {
+      try {
+        for (const code of codes) {
+          const res = await toggleLibraryWatchLater(code);
+          patchWorkFlags(code, res);
+        }
+        showToast(
+          codes.length === 1 ? `${codes[0]}: 나중에 볼 토글` : `${codes.length}개 나중에 볼 토글`,
+          "success",
+        );
+      } catch (err) {
+        showToast(err instanceof Error ? err.message : "나중에 볼 변경 실패", "error");
+      }
+    })();
+  }, [patchWorkFlags, showToast]);
+
+  const handleOpenFolder = useCallback((productCode: string) => {
+    openLibraryFolder(productCode)
+      .then(res => showToast(`폴더 열림: ${res.path}`, "success"))
+      .catch(err => showToast(err instanceof Error ? err.message : "폴더 열기 실패", "error"));
+  }, [showToast]);
+
   return (
     <div>
       <div className="flex flex-wrap items-center gap-2 mb-3">
@@ -97,10 +219,7 @@ export function ActressWorksGrid({ works, genres, onWorkClick }: ActressWorksGri
         </p>
         <select
           value={sortKey}
-          onChange={e => {
-            setSortKey(e.target.value as WorkSortKey);
-            setVisibleCount(PAGE_SIZE);
-          }}
+          onChange={e => setSortKey(e.target.value as WorkSortKey)}
           className={controlClass}
         >
           {SORT_OPTIONS.map(o => (
@@ -109,10 +228,7 @@ export function ActressWorksGrid({ works, genres, onWorkClick }: ActressWorksGri
         </select>
         <button
           type="button"
-          onClick={() => {
-            setSortAsc(a => !a);
-            setVisibleCount(PAGE_SIZE);
-          }}
+          onClick={() => setSortAsc(a => !a)}
           className={cn(controlClass, "hover:text-white transition-colors")}
         >
           {sortAsc ? "↑ 오름차순" : "↓ 내림차순"}
@@ -123,10 +239,7 @@ export function ActressWorksGrid({ works, genres, onWorkClick }: ActressWorksGri
         <div className="flex flex-wrap gap-1.5 mb-3">
           <button
             type="button"
-            onClick={() => {
-              setGenreFilter("");
-              setVisibleCount(PAGE_SIZE);
-            }}
+            onClick={() => setGenreFilter("")}
             className={cn(
               "px-2 py-0.5 rounded-full text-xs border transition-colors",
               !genreFilter
@@ -140,10 +253,7 @@ export function ActressWorksGrid({ works, genres, onWorkClick }: ActressWorksGri
             <button
               key={g}
               type="button"
-              onClick={() => {
-                setGenreFilter(prev => (prev === g ? "" : g));
-                setVisibleCount(PAGE_SIZE);
-              }}
+              onClick={() => setGenreFilter(prev => (prev === g ? "" : g))}
               className={cn(
                 "px-2 py-0.5 rounded-full text-xs border transition-colors",
                 genreFilter === g
@@ -157,32 +267,86 @@ export function ActressWorksGrid({ works, genres, onWorkClick }: ActressWorksGri
         </div>
       )}
 
-      <div className="grid grid-cols-2 sm:grid-cols-3 xl:grid-cols-4 gap-3">
-        {visible.map(w => (
+      {(selectionMode || filtered.length > 0) && (
+        <div className="flex flex-wrap items-center gap-2 mb-3">
           <button
-            key={w.product_code}
             type="button"
-            onClick={() => onWorkClick(w.product_code)}
-            className="text-left rounded-xl border border-white/[0.08] overflow-hidden hover:border-violet-500/30 transition-colors"
+            onClick={selection.allSelected ? selection.clearAll : selection.selectAll}
+            className={cn(
+              "h-9 px-3 text-sm rounded-xl border transition-colors flex items-center gap-1.5",
+              selection.allSelected
+                ? "bg-indigo-500/20 border-indigo-500/40 text-indigo-200"
+                : "bg-bg-surface border-white/[0.08] text-muted-foreground hover:text-white",
+            )}
           >
-            <div className="aspect-video bg-black/40">
-              <img
-                src={coverUrl(w.product_code)}
-                alt=""
-                draggable={false}
-                className="w-full h-full object-cover pointer-events-none"
-                loading="lazy"
-              />
-            </div>
-            <div className="p-2">
-              <p className="font-mono text-xs text-violet-300">{w.product_code}</p>
-              <p className="text-sm truncate">{w.title_ko || "—"}</p>
-              {w.release_date && (
-                <p className="text-xs text-slate-500 mt-0.5">{w.release_date}</p>
-              )}
-            </div>
+            {selection.allSelected
+              ? <SquareCheck className="w-3.5 h-3.5 text-indigo-300" />
+              : <Square className="w-3.5 h-3.5" />}
+            {selection.allSelected ? "전체 해제" : "전체 선택"}
           </button>
-        ))}
+          {selectionMode && (
+            <GlassCard
+              variant="accent"
+              noPadding
+              className="px-3 py-1.5 flex items-center gap-2 animate-slide-in"
+            >
+              <span className="text-sm font-medium text-indigo-300">
+                {selection.count}개 선택됨
+              </span>
+              <span className="text-xs text-muted-foreground hidden sm:inline">
+                우클릭으로 일괄 작업 · Esc 해제
+              </span>
+              <button
+                type="button"
+                title="선택 해제"
+                onClick={selection.clearAll}
+                className="w-7 h-7 rounded-lg flex items-center justify-center text-muted-foreground hover:text-white hover:bg-white/[0.08]"
+              >
+                <X className="w-3.5 h-3.5" />
+              </button>
+            </GlassCard>
+          )}
+        </div>
+      )}
+
+      <div className="grid grid-cols-2 sm:grid-cols-3 xl:grid-cols-4 gap-3">
+        {visible.map(w => {
+          const hasFolder = !!(w.folder_path && w.folder_path.trim());
+          const codeKey = workKey(w);
+          return (
+            <PosterCard
+              key={w.product_code}
+              productCode={w.product_code}
+              coverSrc={w.product_code ? coverUrl(w.product_code, w.updated_at) : undefined}
+              previewSrc={w.has_preview && w.product_code ? previewUrl(w.product_code, w.updated_at ?? "") : undefined}
+              previewMedia={w.preview_media ?? undefined}
+              hasPreview={!!w.has_preview}
+              hasFolder={hasFolder}
+              hasMeta={!!(w.title_ko || w.actors_ko)}
+              title={w.title_ko || null}
+              actors={w.actors_ko || null}
+              genres={w.genres_ko || null}
+              favoriteScore={Number(w.favorite_score) || 0}
+              hasSubtitle={!!w.has_subtitle}
+              hasHardcodedSubtitle={!!w.has_hardcoded_subtitle}
+              hasMosaicRemoved={!!w.has_mosaic_removed}
+              userLiked={!!w.user_liked}
+              watchLater={!!w.watch_later}
+              selected={selection.isSelectedKey(codeKey)}
+              selectionMode={selectionMode}
+              onLongPressSelect={() => selection.select(w)}
+              onToggleSelect={() => selection.toggle(w)}
+              resolveContextMenuProductCodes={resolveContextMenuProductCodes}
+              onClick={() => onWorkClick(w.product_code)}
+              onPlay={hasFolder ? () => void openPlayer(w.product_code) : undefined}
+              onOpenFolder={() => handleOpenFolder(w.product_code)}
+              onAddToProcessing={(kind, codes) => handleAddToProcessing(codes, kind)}
+              onGrokStory={codes => handleGrokStory(codes)}
+              onToggleLike={codes => handleToggleLike(codes)}
+              onToggleWatchLater={codes => handleToggleWatchLater(codes)}
+            />
+          );
+        })}
       </div>
 
       {filtered.length === 0 && (

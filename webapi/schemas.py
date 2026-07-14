@@ -279,6 +279,7 @@ class ProcessingQueueItem(BaseModel):
     progress: int = 0
     message: str = ""
     file_name: str = ""
+    collect_grok: bool = True
 
 
 class ProcessingQueueSection(BaseModel):
@@ -292,6 +293,15 @@ class ProcessingQueueResponse(BaseModel):
     planned: Optional[int] = None
     warnings: Optional[list[str]] = None
     folder_path: Optional[str] = None
+
+
+class PatchProcessingItemRequest(BaseModel):
+    collect_grok: bool
+
+
+class PatchProcessingCollectGrokRequest(BaseModel):
+    kind: Literal["stt", "subtitle"] = "subtitle"
+    collect_grok: bool
 
 
 class AddProcessingRequest(BaseModel):
@@ -365,6 +375,49 @@ class SttEngineOption(BaseModel):
     implemented: bool = True
 
 
+class SttFwXxlOptions(BaseModel):
+    language: str = "ja"
+    vad_filter: bool = True
+    vad_threshold: float = 0.6
+    vad_min_speech_duration_ms: int = 400
+    vad_max_speech_duration_s: int = 18
+    condition_on_previous_text: bool = False
+    no_speech_threshold: float = 0.6
+    beam_size: int = 7
+    best_of: int = 5
+    temperature: float = 0.0
+    temperature_increment_on_fallback: float = 0.2
+    hallucination_silence_threshold: float = 1.5
+    compute_type: str = "float16"
+    batch_size: int = 8
+    word_timestamps: bool = True
+    repetition_penalty: float = 1.2
+
+
+class SttFwXxlOptionsPatch(BaseModel):
+    language: Optional[str] = None
+    vad_filter: Optional[bool] = None
+    vad_threshold: Optional[float] = None
+    vad_min_speech_duration_ms: Optional[int] = None
+    vad_max_speech_duration_s: Optional[int] = None
+    condition_on_previous_text: Optional[bool] = None
+    no_speech_threshold: Optional[float] = None
+    beam_size: Optional[int] = None
+    best_of: Optional[int] = None
+    temperature: Optional[float] = None
+    temperature_increment_on_fallback: Optional[float] = None
+    hallucination_silence_threshold: Optional[float] = None
+    compute_type: Optional[str] = None
+    batch_size: Optional[int] = None
+    word_timestamps: Optional[bool] = None
+    repetition_penalty: Optional[float] = None
+
+
+class FasterWhisperModelOption(BaseModel):
+    id: str
+    label: str
+
+
 class SttSettingsResponse(BaseModel):
     engine: str
     whisper_model: str
@@ -372,7 +425,9 @@ class SttSettingsResponse(BaseModel):
     hf_whisper_model: str
     vad_threshold: float
     dialogue_only: bool
+    fw_xxl: SttFwXxlOptions
     engine_options: list[SttEngineOption]
+    faster_whisper_model_options: list[FasterWhisperModelOption] = []
 
 
 class SttSettingsPatch(BaseModel):
@@ -382,6 +437,7 @@ class SttSettingsPatch(BaseModel):
     hf_whisper_model: Optional[str] = None
     vad_threshold: Optional[float] = None
     dialogue_only: Optional[bool] = None
+    fw_xxl: Optional[SttFwXxlOptionsPatch] = None
 
     @field_validator("vad_threshold")
     @classmethod
@@ -754,9 +810,17 @@ class ActressWorkItem(BaseModel):
     cover_path: str = ""
     cover_url: str = ""
     release_date: str = ""
+    folder_path: str = ""
     favorite_score: int = 0
     user_rating: int = 0
     user_liked: bool = False
+    watch_later: bool = False
+    has_subtitle: bool = False
+    has_hardcoded_subtitle: bool = False
+    has_mosaic_removed: bool = False
+    has_preview: bool = False
+    preview_media: str | None = None
+    updated_at: str = ""
 
 
 class ActressWorksBundle(BaseModel):

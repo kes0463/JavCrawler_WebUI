@@ -1,4 +1,4 @@
-import { useMemo } from "react";
+import { memo, useMemo } from "react";
 import { cn } from "@/lib/utils";
 import type { SentenceLineEntry } from "@/api/processing";
 import { useStickToBottomScroll } from "@/hooks/useStickToBottomScroll";
@@ -18,13 +18,30 @@ function formatTime(sec?: number): string {
   return `${String(m).padStart(2, "0")}:${String(r).padStart(2, "0")}`;
 }
 
-export function SentenceStreamPanel({
+export const SentenceStreamPanel = memo(function SentenceStreamPanel({
   entries,
   autoScroll = true,
   maxHeight = "280px",
   className,
 }: SentenceStreamPanelProps) {
+  // 표시용으로만 정렬 — 입력은 이미 상한 잘림
   const sortedEntries = useMemo(() => {
+    if (entries.length <= 1) return entries;
+    let needsSort = false;
+    for (let i = 1; i < entries.length; i++) {
+      const a = entries[i - 1];
+      const b = entries[i];
+      const ai = a.index ?? -1;
+      const bi = b.index ?? -1;
+      if (ai >= 0 && bi >= 0) {
+        if (ai > bi) { needsSort = true; break; }
+        continue;
+      }
+      const as = a.start ?? Number.POSITIVE_INFINITY;
+      const bs = b.start ?? Number.POSITIVE_INFINITY;
+      if (as > bs) { needsSort = true; break; }
+    }
+    if (!needsSort) return entries;
     return [...entries].sort((a, b) => {
       const ai = a.index ?? -1;
       const bi = b.index ?? -1;
@@ -74,4 +91,4 @@ export function SentenceStreamPanel({
       )}
     </div>
   );
-}
+});

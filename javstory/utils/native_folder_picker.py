@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -38,11 +39,18 @@ def pick_folders(*, title: str = "폴더 선택 (Ctrl+클릭 다중 선택)", _i
 def _pick_folders_via_subprocess(title: str) -> list[str] | None:
     """Run picker in a fresh process (avoids uvicorn thread-pool COM issues)."""
     try:
+        env = {
+            **os.environ,
+            "PYTHONIOENCODING": "utf-8",
+            "PYTHONUTF8": "1",
+        }
         result = subprocess.run(
             [sys.executable, "-m", "javstory.utils.native_folder_picker", title, "--isolated"],
             cwd=_PROJECT_ROOT,
             capture_output=True,
-            text=True,
+            encoding="utf-8",
+            errors="replace",
+            env=env,
             timeout=600,
         )
         if result.returncode == 0 and result.stdout:
@@ -299,7 +307,15 @@ def main() -> None:
     if args:
         title = args[0]
     paths = pick_folders(title=title, _in_subprocess=isolated)
-    sys.stdout.write(json.dumps(paths, ensure_ascii=False))
+    # Windows 콘솔(cp949)과 Electron(utf-8) 불일치로 한글 경로가 깨지지 않게
+    # stdout 버퍼에 UTF-8 바이트를 직접 기록한다.
+    payload = json.dumps(paths, ensure_ascii=False) + "\n"
+    try:
+        sys.stdout.buffer.write(payload.encode("utf-8"))
+        sys.stdout.buffer.flush()
+    except Exception:
+        sys.stdout.write(payload)
+        sys.stdout.flush()
 
 
 if __name__ == "__main__":

@@ -132,12 +132,13 @@ export function TextInput({ value, onChange, placeholder, type = "text" }: {
   );
 }
 
-export function TextArea({ value, onChange, placeholder, rows = 6, className }: {
+export function TextArea({ value, onChange, placeholder, rows = 6, className, readOnly }: {
   value: string;
   onChange: (v: string) => void;
   placeholder?: string;
   rows?: number;
   className?: string;
+  readOnly?: boolean;
 }) {
   return (
     <textarea
@@ -145,10 +146,12 @@ export function TextArea({ value, onChange, placeholder, rows = 6, className }: 
       onChange={e => onChange(e.target.value)}
       placeholder={placeholder}
       rows={rows}
+      readOnly={readOnly}
       className={cn(
         "w-full px-3 py-2 text-sm rounded-xl bg-bg-base border border-white/[0.08]",
         "text-white placeholder:text-muted-foreground font-mono leading-relaxed",
         "focus:outline-none focus:border-accent/50 focus:ring-1 focus:ring-accent/30 transition-all resize-y",
+        readOnly && "focus:border-white/[0.08] focus:ring-0 cursor-default opacity-95",
         className,
       )}
     />

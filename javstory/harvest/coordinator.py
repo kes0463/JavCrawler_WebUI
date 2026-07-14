@@ -24,6 +24,7 @@ from javstory.utils.assets_handler import MetadataAssetsHandler
 from javstory.config.app_config import story_analysis_enabled_from_env
 
 from javstory.utils.common import dedupe_preserve_order, log_ts as _log_ts, tagify
+from javstory.harvest.scrapers.av123_scraper import _has_hangul, _is_boilerplate_title
 
 
 def log_ts(msg: str):
@@ -169,7 +170,6 @@ async def run_crawler_for_video_path(
                         row.synopsis_ja and row.synopsis_ja.strip(),
                         row.cover_image_url and row.cover_image_url.strip(),
                     ])
-                    from javstory.harvest.scrapers.av123_scraper import _is_boilerplate_title
 
                     title_ja_db = (row.title_ja or "").strip()
                     title_ko = (row.title_ko or "").strip()
@@ -287,7 +287,6 @@ async def run_crawler_for_video_path(
             db_cover_url = res.get("cover_url", "")
             db_release_date = res.get("release_date", "")
             original_title = str(res.get("original_title") or raw_title or "").strip()
-            from javstory.harvest.scrapers.av123_scraper import _is_boilerplate_title, _has_hangul
             if _is_boilerplate_title(raw_title):
                 raw_title = original_title if not _is_boilerplate_title(original_title) else ""
             if _is_boilerplate_title(original_title):
@@ -329,7 +328,7 @@ async def run_crawler_for_video_path(
                     **({resolved_maker["ja"]: resolved_maker["ko"]} if resolved_maker["ja"] != resolved_maker["ko"] else {}),
                 }
             }
-            
+
             scrape_title_ko = None
             title_for_translation = raw_title
             if (
@@ -342,30 +341,82 @@ async def run_crawler_for_video_path(
                 if ja_candidate and not _is_boilerplate_title(ja_candidate):
                     title_for_translation = ja_candidate
 
-            log_ts(f"🚀 AI 한국어 번역 중…")
-            if progress_cb:
-                progress_cb(code, "AI 한국어 번역 중…", 45)
-            trans_res = await translator.translate_metadata_batch(
-                code,
-                title_for_translation,
-                raw_synopsis,
-                actors=raw_actors,
-                genres=raw_genres,
-                maker=raw_maker,
-                approved_terms=approved_terms,
-            )
-            if scrape_title_ko:
-                trans_res["title_ko"] = scrape_title_ko
-                if not (trans_res.get("title_ja") or "").strip():
-                    trans_res["title_ja"] = (
+            raw_syn = str(raw_synopsis or "").strip()
+            syn_already_ko = bool(raw_syn) and _looks_like_ko(raw_syn, min_hangul=2)
+            # 제목·시놉시스가 이미 한국어면 LLM 생략
+            if scrape_title_ko and (not raw_syn or syn_already_ko):
+                trans_res = {
+                    "title_ja": (
                         original_title
                         if original_title and not _is_boilerplate_title(original_title)
-                        else title_for_translation
+                        else ""
+                    ),
+                    "title_ko": scrape_title_ko,
+                    "synopsis_ja": "" if syn_already_ko else raw_syn,
+                    "synopsis_ko": raw_syn if syn_already_ko else "",
+                }
+                log_ts(f"✅ {code} 수집 메타가 이미 한국어라 AI 번역을 생략합니다.")
+            else:
+                log_ts(f"🚀 AI 한국어 번역 중…")
+                if progress_cb:
+                    progress_cb(code, "AI 한국어 번역 중…", 45)
+                trans_res = await translator.translate_metadata_batch(
+                    code,
+                    title_for_translation,
+                    raw_synopsis,
+                    actors=raw_actors,
+                    genres=raw_genres,
+                    maker=raw_maker,
+                    approved_terms=approved_terms,
+                )
+                if not isinstance(trans_res, dict):
+                    trans_res = {}
+
+                if scrape_title_ko:
+                    trans_res["title_ko"] = scrape_title_ko
+                    if not (trans_res.get("title_ja") or "").strip():
+                        trans_res["title_ja"] = (
+                            original_title
+                            if original_title and not _is_boilerplate_title(original_title)
+                            else title_for_translation
+                        )
+
+                # LLM 실패 시: 이미 있는 한국어/원문·폴더명으로 부분 폴백 (전체 실패 방지)
+                if not trans_res:
+                    fb_title_ko = scrape_title_ko or (
+                        raw_title
+                        if (
+                            _has_hangul(raw_title)
+                            and _looks_like_ko(raw_title, min_hangul=1)
+                            and not _is_boilerplate_title(raw_title)
+                        )
+                        else ""
                     )
-            # 번역 단계가 필요했는데 결과가 비정상이면 "성공"으로 진행하면 안 된다.
-            if not isinstance(trans_res, dict) or not trans_res:
-                log_ts(f"❌ {code} 번역 실패: 번역 결과가 비어 있습니다.")
-                return {"error": "translation_failed_empty", "product_code": code}
+                    if not fb_title_ko and stored_folder_path:
+                        folder_hint = Path(stored_folder_path).name.strip()
+                        if (
+                            _has_hangul(folder_hint)
+                            and _looks_like_ko(folder_hint, min_hangul=4)
+                            and not _is_boilerplate_title(folder_hint)
+                        ):
+                            fb_title_ko = folder_hint
+                    if not fb_title_ko:
+                        log_ts(f"❌ {code} 번역 실패: 번역 결과가 비어 있습니다.")
+                        return {"error": "translation_failed_empty", "product_code": code}
+                    trans_res = {
+                        "title_ja": (
+                            original_title
+                            if original_title and not _is_boilerplate_title(original_title)
+                            else (title_for_translation if not _has_hangul(title_for_translation) else "")
+                        ),
+                        "title_ko": fb_title_ko,
+                        "synopsis_ja": raw_syn if raw_syn and not _looks_like_ko(raw_syn, min_hangul=2) else "",
+                        "synopsis_ko": raw_syn if syn_already_ko else "",
+                    }
+                    log_ts(
+                        f"⚠️ {code} LLM 번역 실패 — 수집/폴더 한국어 제목으로 부분 저장합니다."
+                    )
+
             # 검증:
             # - 제목 KO는 필수
             # - 시놉시스 KO는 "원문 시놉시스가 비어있던 케이스"면 비어있어도 부분 성공으로 허용
@@ -378,11 +429,15 @@ async def run_crawler_for_video_path(
                 return {"error": "translation_failed_missing_ko", "product_code": code}
 
             if (not _syn_ko) and (not _raw_syn):
-                # 원문 시놉시스 자체가 없어서(혹은 추출 실패) 번역 결과도 KO 시놉시스가 비어 내려오는 케이스
                 pass
             elif not _syn_ko:
-                log_ts(f"❌ {code} 번역 실패: KO 시놉시스가 비어 있습니다.")
-                return {"error": "translation_failed_missing_ko", "product_code": code}
+                if _looks_like_ko(_raw_syn, min_hangul=2):
+                    trans_res["synopsis_ko"] = _raw_syn
+                else:
+                    # 원문 시놉시스는 있으나 KO 번역 실패 → 제목만이라도 저장
+                    log_ts(
+                        f"⚠️ {code} 시놉시스 KO가 비어 있습니다. 제목만 저장하고 계속합니다."
+                    )
 
         # 4. DB Upsert (Persistence)
         with get_db_session_ctx() as session:
@@ -402,7 +457,6 @@ async def run_crawler_for_video_path(
                 )
 
             # [4-1] 제목·시놉시스: KO는 LLM, title_en / title_zh_* / synopsis_en / synopsis_zh_* 는 일본어 원문과 동일 문자열
-            from javstory.harvest.scrapers.av123_scraper import _is_boilerplate_title, _has_hangul
 
             _ja_crawl = (original_title or "").strip()
             if not _ja_crawl or _is_boilerplate_title(_ja_crawl):

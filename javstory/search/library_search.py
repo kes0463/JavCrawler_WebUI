@@ -3,15 +3,21 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import math
 import os
 import re
 import threading
+import time
 from dataclasses import dataclass
 from typing import Any, Iterable, List, Sequence
 
 _docs_cache: List["_LibraryDoc"] | None = None
 _docs_cache_lock = threading.Lock()
+_embed_result_cache: dict[str, tuple[float, list, dict[str, Any]]] = {}
+_embed_result_cache_lock = threading.Lock()
+_EMBED_RESULT_CACHE_TTL_SEC = 600.0
+_EMBED_RESULT_CACHE_MAX = 48
 
 try:
     from rank_bm25 import BM25Okapi
@@ -28,6 +34,9 @@ from javstory.llm.ollama_embeddings import ollama_embed_text
 
 _DEFAULT_WEIGHTS = (0.3, 0.5, 0.2)
 _WEIGHTS_ENV = "JAVSTORY_HYBRID_SEARCH_WEIGHTS"
+_EMBED_MIN_SCORE_ENV = "JAVSTORY_EMBEDDING_SEARCH_MIN_SCORE"
+_EMBED_REL_RATIO_ENV = "JAVSTORY_EMBEDDING_SEARCH_RELATIVE_RATIO"
+_EMBED_MAX_GAP_ENV = "JAVSTORY_EMBEDDING_SEARCH_MAX_GAP"
 _TOKEN_RE = re.compile(r"[A-Za-z0-9가-힣ぁ-んァ-ン一-龥]{2,}")
 
 
@@ -127,6 +136,143 @@ def _weights_from_env(default: tuple[float, float, float] = _DEFAULT_WEIGHTS) ->
     return (parts[0] / total, parts[1] / total, parts[2] / total)
 
 
+def _embedding_min_score_from_env(default: float = 0.28) -> float:
+    raw = (os.environ.get(_EMBED_MIN_SCORE_ENV, "") or "").strip()
+    if not raw:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        return default
+
+
+def _embedding_relative_ratio_from_env(default: float = 0.74) -> float:
+    raw = (os.environ.get(_EMBED_REL_RATIO_ENV, "") or "").strip()
+    if not raw:
+        return default
+    try:
+        value = float(raw)
+    except ValueError:
+        return default
+    return min(0.99, max(0.05, value))
+
+
+def _embedding_max_gap_from_env(default: float = 0.12) -> float:
+    """1등 대비 허용 점수 하락폭. 작을수록 상위 유사도만 유지."""
+    raw = (os.environ.get(_EMBED_MAX_GAP_ENV, "") or "").strip()
+    if not raw:
+        return default
+    try:
+        value = float(raw)
+    except ValueError:
+        return default
+    return min(0.5, max(0.01, value))
+
+
+def _embed_result_cache_ttl() -> float:
+    raw = (os.environ.get("JAVSTORY_EMBEDDING_SEARCH_CACHE_TTL", "") or "").strip()
+    if not raw:
+        return _EMBED_RESULT_CACHE_TTL_SEC
+    try:
+        return max(30.0, float(raw))
+    except ValueError:
+        return _EMBED_RESULT_CACHE_TTL_SEC
+
+
+def _embed_search_cache_key(
+    query: str,
+    *,
+    model: str,
+    min_score: float,
+    relative_ratio: float,
+    max_gap: float,
+) -> str:
+    raw = (
+        f"{model}|{min_score:.4f}|{relative_ratio:.4f}|{max_gap:.4f}|"
+        f"{(query or '').strip()}"
+    )
+    return hashlib.sha1(raw.encode("utf-8")).hexdigest()
+
+
+def _get_cached_embed_search(key: str) -> tuple[list, dict[str, Any]] | None:
+    now = time.time()
+    ttl = _embed_result_cache_ttl()
+    with _embed_result_cache_lock:
+        hit = _embed_result_cache.get(key)
+        if not hit:
+            return None
+        ts, results, diag = hit
+        if now - ts > ttl:
+            _embed_result_cache.pop(key, None)
+            return None
+        return list(results), dict(diag)
+
+
+def _store_cached_embed_search(key: str, results: list, diag: dict[str, Any]) -> None:
+    with _embed_result_cache_lock:
+        if len(_embed_result_cache) >= _EMBED_RESULT_CACHE_MAX:
+            oldest = min(_embed_result_cache.items(), key=lambda item: item[1][0])[0]
+            _embed_result_cache.pop(oldest, None)
+        _embed_result_cache[key] = (time.time(), list(results), dict(diag))
+
+
+def clear_embed_search_cache() -> None:
+    with _embed_result_cache_lock:
+        _embed_result_cache.clear()
+
+
+def _filter_relevant_embedding_hits(
+    ranked: Sequence[_SearchResult],
+    *,
+    min_score: float,
+    relative_ratio: float,
+    max_gap: float,
+) -> List[_SearchResult]:
+    """1등에 가까운 고유사도만 남긴다. 아래로 갈수록 내용이 멀어지는 히트는 자른다."""
+    scored = [
+        item
+        for item in ranked
+        if math.isfinite(float(item.raw_score))
+    ]
+    if not scored:
+        return []
+
+    scores = [float(item.raw_score) for item in scored]
+    top = scores[0]
+    if top < min_score:
+        return []
+
+    mean = sum(scores) / len(scores)
+    var = sum((s - mean) ** 2 for s in scores) / len(scores)
+    std = math.sqrt(var)
+    # 코퍼스 평균대는 버리되, 관련 밴드는 이전보다 넓게
+    dist_floor = mean + max(0.04, 0.75 * std)
+    floor = max(
+        min_score,
+        top * relative_ratio,
+        top - max_gap,
+        dist_floor,
+    )
+    floor = min(floor, top)
+
+    selected = [item for item in scored if float(item.raw_score) >= floor]
+    if len(selected) <= 1:
+        return selected
+
+    # 큰 급락에서만 절단 (작은 점수 차이는 허용)
+    cut: List[_SearchResult] = [selected[0]]
+    cliff = max(0.028, top * 0.055)
+    tight = top * relative_ratio
+    for prev, cur in zip(selected, selected[1:]):
+        drop = float(prev.raw_score) - float(cur.raw_score)
+        if drop >= cliff and float(cur.raw_score) < tight:
+            break
+        if (top - float(cur.raw_score)) > max_gap:
+            break
+        cut.append(cur)
+    return cut
+
+
 class HybridLibrarySearch:
     """BM25 + embedding + metadata search fused with RRF."""
 
@@ -138,9 +284,74 @@ class HybridLibrarySearch:
         fusion_k: int = 60,
     ) -> None:
         self.weights = weights or _weights_from_env()
-        self.top_k = max(1, min(200, int(top_k or 20)))
+        self.top_k = max(1, min(1000, int(top_k or 20)))
         self.fusion_k = max(1, int(fusion_k or 60))
         self.last_embedding_diag: dict[str, Any] = {}
+
+    def search_by_embedding(
+        self,
+        query: str,
+        *,
+        min_score: float | None = None,
+        relative_ratio: float | None = None,
+        max_gap: float | None = None,
+    ) -> list:
+        """임베딩 유사도만으로 검색. 1등에 가까운 고유사도만 반환."""
+        q = (query or "").strip()
+        if not q:
+            return []
+        threshold = float(min_score) if min_score is not None else _embedding_min_score_from_env()
+        ratio = (
+            float(relative_ratio)
+            if relative_ratio is not None
+            else _embedding_relative_ratio_from_env()
+        )
+        gap = float(max_gap) if max_gap is not None else _embedding_max_gap_from_env()
+        model = embeddings_ollama_model_from_env()
+        cache_key = _embed_search_cache_key(
+            q,
+            model=model,
+            min_score=threshold,
+            relative_ratio=ratio,
+            max_gap=gap,
+        )
+        cached = _get_cached_embed_search(cache_key)
+        if cached is not None:
+            results, diag = cached
+            self.last_embedding_diag = {**diag, "cache_hit": True}
+            return results
+
+        docs = self._load_docs()
+        if not docs:
+            return []
+        ranked = self._search_embedding(q, docs, top_k=None)
+        selected = _filter_relevant_embedding_hits(
+            ranked,
+            min_score=threshold,
+            relative_ratio=ratio,
+            max_gap=gap,
+        )
+        results = [
+            {
+                "id": item.id,
+                "title": item.title,
+                "score": round(float(item.raw_score), 6),
+                "source": "embedding",
+            }
+            for item in selected
+        ]
+        diag = {
+            **dict(self.last_embedding_diag or {}),
+            "selected_n": len(selected),
+            "min_score": threshold,
+            "relative_ratio": ratio,
+            "max_gap": gap,
+            "cache_hit": False,
+        }
+        self.last_embedding_diag = diag
+        if str(diag.get("status") or "") == "ok" or results:
+            _store_cached_embed_search(cache_key, results, diag)
+        return results
 
     def search_with_fusion(
         self,
@@ -218,7 +429,13 @@ class HybridLibrarySearch:
             if float(score) > 0
         ]
 
-    def _search_embedding(self, query: str, docs: Sequence[_LibraryDoc], *, top_k: int) -> List[_SearchResult]:
+    def _search_embedding(
+        self,
+        query: str,
+        docs: Sequence[_LibraryDoc],
+        *,
+        top_k: int | None,
+    ) -> List[_SearchResult]:
         self.last_embedding_diag = {}
         if not embeddings_enabled_from_env():
             self.last_embedding_diag = {"status": "disabled"}
@@ -267,7 +484,7 @@ class HybridLibrarySearch:
             if math.isfinite(score):
                 results.append(_SearchResult(pc, title_by_code.get(pc, pc), "embedding", float(score)))
         results.sort(key=lambda item: item.raw_score, reverse=True)
-        out = results[:top_k]
+        out = results if top_k is None else results[: max(1, int(top_k))]
         self.last_embedding_diag = {
             "status": "ok",
             "model": model,
@@ -329,4 +546,4 @@ class HybridLibrarySearch:
         return fused
 
 
-__all__ = ["HybridLibrarySearch"]
+__all__ = ["HybridLibrarySearch", "clear_embed_search_cache"]

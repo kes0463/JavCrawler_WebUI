@@ -118,11 +118,14 @@ export interface LibraryQuery {
   q?: string;
   page?: number;
   per_page?: number;
-  sort?: "updated_at" | "release_date" | "product_code" | "title_ko" | "favorite_score";
+  sort?: "similarity" | "updated_at" | "release_date" | "product_code" | "title_ko" | "favorite_score";
   order?: "asc" | "desc";
   has_folder?: boolean;
   has_metadata?: boolean;
+  /** @deprecated subtitle_filter 사용 */
   has_subtitle?: boolean;
+  /** 전체=미지정, has=자막·자체자막, none=자막 없음, ja_only=일본어만 */
+  subtitle_filter?: "has" | "none" | "ja_only";
   has_mosaic_removed?: boolean;
   user_liked?: boolean;
   watch_later?: boolean;
@@ -160,6 +163,7 @@ export const fetchLibrarySearch = (q: LibraryQuery): Promise<LibraryListResponse
     has_folder: q.has_folder,
     has_metadata: q.has_metadata,
     has_subtitle: q.has_subtitle,
+    subtitle_filter: q.subtitle_filter,
     has_mosaic_removed: q.has_mosaic_removed,
     user_liked: q.user_liked,
     watch_later: q.watch_later,
@@ -431,7 +435,8 @@ function hasNonGenreListFilters(q: LibraryQuery): boolean {
     (q.q && q.q.trim())
     || q.has_folder !== undefined
     || q.has_metadata !== undefined
-    || q.has_subtitle
+    || q.has_subtitle !== undefined
+    || q.subtitle_filter !== undefined
     || q.has_mosaic_removed
     || q.user_liked
     || q.watch_later
@@ -449,6 +454,9 @@ function sortLibraryItems(
   sorted.sort((a, b) => {
     let cmp = 0;
     switch (key) {
+      case "similarity":
+        cmp = 0;
+        break;
       case "release_date":
         cmp = (a.release_date ?? "").localeCompare(b.release_date ?? "");
         break;

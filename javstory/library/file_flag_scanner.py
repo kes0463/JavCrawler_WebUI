@@ -8,8 +8,16 @@ from __future__ import annotations
 
 import datetime
 import sqlite3
+import threading
 from pathlib import Path
 from typing import Callable
+
+_LAMP_SUB_REPAIR_DONE = False
+_LAMP_STT_REPAIR_DONE = False
+_LAMP_REPAIR_LOCK = threading.Lock()
+_LAMP_REPAIR_THREAD: threading.Thread | None = None
+_LAMP_REPAIR_PENDING_SUB = False
+_LAMP_REPAIR_PENDING_STT = False
 
 
 def _now_iso() -> str:
@@ -55,6 +63,52 @@ def _resolve_preview_path(product_code: str) -> str | None:
         except Exception:
             continue
     return None
+
+
+def _is_subtitle_srt_name(name: str) -> bool:
+    n = (name or "").lower()
+    return n.endswith(".ko.srt") or (n.endswith(".srt") and not n.endswith(".ja.srt"))
+
+
+def _sidecar_has_ko_or_plain(video_path: Path) -> bool:
+    stem = str(video_path.with_suffix(""))
+    # video.is_file() 선행 검사 금지 — 오프라인/느린 드라이브에서 이중 stat
+    return Path(stem + ".ko.srt").is_file() or Path(stem + ".srt").is_file()
+
+
+def _sidecar_has_ja(video_path: Path) -> bool:
+    stem = str(video_path.with_suffix(""))
+    return Path(stem + ".ja.srt").is_file()
+
+
+def _folder_contains_subtitle_srt(
+    folder_path: str | None,
+    product_code: str = "",
+    video_path: Path | None = None,
+) -> bool:
+    """영상 옆 사이드카 또는 폴더 내 KO/일반 SRT 존재 여부."""
+    vp = video_path
+    if vp is None or not vp.is_file():
+        fp = (folder_path or "").strip()
+        if fp and product_code:
+            try:
+                from javstory.library.video_discovery import guess_video_path_for_product_fast
+
+                vp = guess_video_path_for_product_fast(product_code, fp)
+            except Exception:
+                vp = None
+    if vp and vp.is_file() and _sidecar_has_ko_or_plain(vp):
+        return True
+    root = Path((folder_path or "").strip())
+    if not root.is_dir():
+        return False
+    try:
+        for p in root.rglob("*"):
+            if p.is_file() and _is_subtitle_srt_name(p.name):
+                return True
+    except OSError:
+        pass
+    return False
 
 
 def scan_one(product_code: str, folder_path: str | None, is_hardcoded: bool = False) -> dict:
@@ -105,6 +159,10 @@ def scan_one(product_code: str, folder_path: str | None, is_hardcoded: bool = Fa
                 lamp_sub = bool(st.ko_srt_exists or st.srt_fallback_exists)
             except Exception:
                 pass
+        # 사이드카/파이프라인에 없어도 폴더 안에 KO·일반 SRT가 있으면 자막 있음
+        if not lamp_sub and folder_path:
+            if _folder_contains_subtitle_srt(folder_path, pc, vp):
+                lamp_sub = True
 
     has_story = False
     try:
@@ -249,3 +307,217 @@ def upsert_one_flag(product_code: str, folder_path: str | None, is_hardcoded: bo
 
     row = scan_one(product_code, folder_path, is_hardcoded)
     _bulk_upsert(DB_PATH, [row])
+
+
+def refresh_flags_after_media_change(
+    product_code: str,
+    video_path: str | Path | None = None,
+) -> None:
+    """STT/자막 생성 후 lamp_stt·lamp_sub 등 파일 플래그 캐시를 즉시 갱신."""
+    pc = (product_code or "").strip().upper()
+    vp: Path | None = None
+    if video_path:
+        try:
+            vp = Path(video_path)
+        except Exception:
+            vp = None
+    if not pc and vp is not None:
+        try:
+            from javstory.utils.product_code import resolve_product_code_for_video
+
+            pc = (resolve_product_code_for_video(vp) or "").strip().upper()
+        except Exception:
+            pc = ""
+    if not pc:
+        return
+
+    folder: str | None = None
+    is_hardcoded = False
+    try:
+        from javstory.harvest.database import get_db_session, JAVMetadata
+
+        session = get_db_session()
+        try:
+            row = session.query(JAVMetadata).filter_by(product_code=pc).first()
+            if row:
+                folder = (getattr(row, "folder_path", None) or "").strip() or None
+                is_hardcoded = bool(getattr(row, "is_hardcoded", False))
+        finally:
+            session.close()
+    except Exception:
+        pass
+    if not folder and vp is not None:
+        try:
+            folder = str(vp.parent)
+        except Exception:
+            folder = None
+    upsert_one_flag(pc, folder, is_hardcoded)
+    invalidate_lamp_flag_repair_cache()
+
+
+def repair_stale_lamp_sub_flags(*, force: bool = False) -> dict[str, int]:
+    """lamp_sub=0 인데 영상 옆 KO/일반 SRT가 있으면 lamp_sub=1로 고친다.
+
+    자막 필터(SQL)가 오래된 캐시 때문에 '자막 없음'에 잘못 넣는 문제를 막는다.
+    기본은 프로세스당 1회만 실행(force=True로 재실행).
+    폴더 전체 iterdir는 하지 않는다(느린 HDD/네트워크에서 필터 지연 원인).
+    """
+    global _LAMP_SUB_REPAIR_DONE
+    if _LAMP_SUB_REPAIR_DONE and not force:
+        return {"checked": 0, "updated": 0, "skipped": 1}
+
+    from sqlalchemy import or_
+
+    from javstory.harvest.database import FileFlagCache, JAVMetadata, get_db_session
+
+    checked = 0
+    updated = 0
+    session = get_db_session()
+    try:
+        rows = (
+            session.query(FileFlagCache, JAVMetadata)
+            .outerjoin(
+                JAVMetadata,
+                FileFlagCache.product_code == JAVMetadata.product_code,
+            )
+            .filter(or_(FileFlagCache.lamp_sub == 0, FileFlagCache.lamp_sub.is_(None)))
+            .all()
+        )
+        for cache, meta in rows:
+            checked += 1
+            if meta is not None and bool(getattr(meta, "is_hardcoded", False)):
+                continue
+            if not cache.video_path:
+                continue
+            try:
+                vp = Path(cache.video_path)
+            except Exception:
+                continue
+            if _sidecar_has_ko_or_plain(vp):
+                cache.lamp_sub = 1
+                updated += 1
+        if updated:
+            session.commit()
+        else:
+            session.rollback()
+        _LAMP_SUB_REPAIR_DONE = True
+    except Exception:
+        try:
+            session.rollback()
+        except Exception:
+            pass
+        raise
+    finally:
+        session.close()
+    return {"checked": checked, "updated": updated, "skipped": 0}
+
+
+def repair_stale_lamp_stt_flags(*, force: bool = False) -> dict[str, int]:
+    """lamp_stt=0 인데 영상 옆 .ja.srt가 있으면 lamp_stt=1로 고친다.
+
+    일본어 자막 필터(ja_only) / 자막 없음 필터가 오래된 캐시 때문에 누락·오분류되는 문제를 막는다.
+    폴더 루트 스캔은 생략(사이드카 stem 기준만).
+    """
+    global _LAMP_STT_REPAIR_DONE
+    if _LAMP_STT_REPAIR_DONE and not force:
+        return {"checked": 0, "updated": 0, "skipped": 1}
+
+    from sqlalchemy import or_
+
+    from javstory.harvest.database import FileFlagCache, JAVMetadata, get_db_session
+
+    checked = 0
+    updated = 0
+    session = get_db_session()
+    try:
+        rows = (
+            session.query(FileFlagCache, JAVMetadata)
+            .outerjoin(
+                JAVMetadata,
+                FileFlagCache.product_code == JAVMetadata.product_code,
+            )
+            .filter(or_(FileFlagCache.lamp_stt == 0, FileFlagCache.lamp_stt.is_(None)))
+            .all()
+        )
+        for cache, meta in rows:
+            checked += 1
+            if meta is not None and bool(getattr(meta, "is_hardcoded", False)):
+                continue
+            if not cache.video_path:
+                continue
+            try:
+                vp = Path(cache.video_path)
+            except Exception:
+                continue
+            if _sidecar_has_ja(vp):
+                cache.lamp_stt = 1
+                updated += 1
+        if updated:
+            session.commit()
+        else:
+            session.rollback()
+        _LAMP_STT_REPAIR_DONE = True
+    except Exception:
+        try:
+            session.rollback()
+        except Exception:
+            pass
+        raise
+    finally:
+        session.close()
+    return {"checked": checked, "updated": updated, "skipped": 0}
+
+
+def schedule_lamp_flag_repair(*, need_sub: bool = True, need_stt: bool = True) -> None:
+    """자막 필터 API를 막지 않도록 캐시 수리를 백그라운드에서 1회 실행.
+
+    이미 수리 스레드가 돌고 있어도 추가 need_* 는 큐에 쌓아 이어서 처리한다.
+    """
+    global _LAMP_REPAIR_THREAD, _LAMP_REPAIR_PENDING_SUB, _LAMP_REPAIR_PENDING_STT
+    with _LAMP_REPAIR_LOCK:
+        if need_sub and not _LAMP_SUB_REPAIR_DONE:
+            _LAMP_REPAIR_PENDING_SUB = True
+        if need_stt and not _LAMP_STT_REPAIR_DONE:
+            _LAMP_REPAIR_PENDING_STT = True
+        if not _LAMP_REPAIR_PENDING_SUB and not _LAMP_REPAIR_PENDING_STT:
+            return
+        t = _LAMP_REPAIR_THREAD
+        if t is not None and t.is_alive():
+            return
+
+        def _run() -> None:
+            global _LAMP_REPAIR_PENDING_SUB, _LAMP_REPAIR_PENDING_STT
+            while True:
+                with _LAMP_REPAIR_LOCK:
+                    do_sub = _LAMP_REPAIR_PENDING_SUB
+                    do_stt = _LAMP_REPAIR_PENDING_STT
+                    _LAMP_REPAIR_PENDING_SUB = False
+                    _LAMP_REPAIR_PENDING_STT = False
+                if not do_sub and not do_stt:
+                    break
+                if do_sub:
+                    try:
+                        repair_stale_lamp_sub_flags()
+                    except Exception:
+                        pass
+                if do_stt:
+                    try:
+                        repair_stale_lamp_stt_flags()
+                    except Exception:
+                        pass
+
+        thread = threading.Thread(target=_run, name="lamp-flag-repair", daemon=True)
+        _LAMP_REPAIR_THREAD = thread
+        thread.start()
+
+
+def invalidate_lamp_sub_repair_cache() -> None:
+    """호환용 — 자막 생성 후 다음 필터에서 재검사하도록 한다."""
+    invalidate_lamp_flag_repair_cache()
+
+
+def invalidate_lamp_flag_repair_cache() -> None:
+    """자막/STT 생성 후 다음 필터에서 lamp_sub·lamp_stt 재검사."""
+    global _LAMP_SUB_REPAIR_DONE, _LAMP_STT_REPAIR_DONE
+    _LAMP_SUB_REPAIR_DONE = False
+    _LAMP_STT_REPAIR_DONE = False
