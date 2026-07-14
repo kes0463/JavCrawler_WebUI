@@ -5,6 +5,7 @@ import {
   addToProcessingQueue,
   cancelProcessingQueue,
   clearProcessingFinished,
+  clearProcessingQueue,
   createProcessingWS,
   fetchProcessingQueue,
   removeProcessingItem,
@@ -182,10 +183,11 @@ export default function ProcessingView() {
     if (event.type === "item_cancelled") {
       setState(prev => ({
         ...prev,
-        [event.kind]: {
-          ...prev[event.kind],
-          items: prev[event.kind].items.filter(i => i.id !== event.id),
-        },
+        [event.kind]: patchItem(prev[event.kind], event.id, {
+          status: "pending",
+          progress: 0,
+          message: "대기 중...",
+        }),
       }));
     }
   }, [pushLog]);
@@ -359,6 +361,23 @@ export default function ProcessingView() {
     }
   };
 
+  const handleClearAll = async (kind: ProcessingKind) => {
+    const label = kind === "stt" ? "STT" : "번역";
+    const n = state[kind].items.length;
+    if (!n) {
+      showToast(`${label} 큐가 이미 비어 있습니다`, "info");
+      return;
+    }
+    try {
+      const res = await clearProcessingQueue(kind);
+      const snap = await fetchProcessingQueue();
+      setState(snap);
+      showToast(`${label} 큐 ${res.removed}건 전체 삭제`, "success");
+    } catch (e) {
+      showToast(e instanceof Error ? e.message : "전체 삭제 실패", "error");
+    }
+  };
+
   const runningCount =
     state.stt.items.filter(i => i.status === "running").length
     + state.subtitle.items.filter(i => i.status === "running").length;
@@ -502,6 +521,15 @@ export default function ProcessingView() {
                 >
                   완료 삭제
                 </ActionButton>
+                <ActionButton
+                  variant="ghost"
+                  size="sm"
+                  icon={<Trash2 className="w-4 h-4" />}
+                  disabled={sttRows.length === 0}
+                  onClick={() => void handleClearAll("stt")}
+                >
+                  전체 삭제
+                </ActionButton>
               </div>
             }
           >
@@ -512,7 +540,6 @@ export default function ProcessingView() {
                     key={item.id}
                     item={item}
                     onRemove={id => void handleRemove("stt", id)}
-                    disabled={state.stt.running}
                   />
                 ))}
           </QueueAccordionCard>
@@ -552,6 +579,15 @@ export default function ProcessingView() {
                 >
                   완료 삭제
                 </ActionButton>
+                <ActionButton
+                  variant="ghost"
+                  size="sm"
+                  icon={<Trash2 className="w-4 h-4" />}
+                  disabled={subRows.length === 0}
+                  onClick={() => void handleClearAll("subtitle")}
+                >
+                  전체 삭제
+                </ActionButton>
               </div>
             }
           >
@@ -562,7 +598,6 @@ export default function ProcessingView() {
                     key={item.id}
                     item={item}
                     onRemove={id => void handleRemove("subtitle", id)}
-                    disabled={state.subtitle.running}
                   />
                 ))}
           </QueueAccordionCard>

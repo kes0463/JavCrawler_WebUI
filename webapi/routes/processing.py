@@ -144,6 +144,16 @@ async def clear_finished(body: ProcessingKindRequest):
     return {"ok": True, "removed": removed}
 
 
+@router.post("/clear")
+async def clear_queue(body: ProcessingKindRequest):
+    try:
+        removed = await processing_queue.clear_queue(body.kind)
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from None
+    await _broadcast_state()
+    return {"ok": True, "removed": removed}
+
+
 @router.websocket("/ws")
 async def processing_ws(ws: WebSocket):
     await ws.accept()

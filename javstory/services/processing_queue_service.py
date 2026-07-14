@@ -65,6 +65,7 @@ class ProcessingQueueService:
         self._broadcast: Optional[BroadcastFn] = None
         self._main_loop: Optional[asyncio.AbstractEventLoop] = None
         self._cancel_ids: set[str] = set()
+        self._abort: dict[ProcessingKind, bool] = {"stt": False, "subtitle": False}
         self._run_locks: dict[ProcessingKind, asyncio.Lock] = {
             "stt": asyncio.Lock(),
             "subtitle": asyncio.Lock(),
@@ -190,11 +191,26 @@ class ProcessingQueueService:
         return item
 
     async def cancel(self, kind: ProcessingKind) -> None:
+        """실행 중 큐를 중지한다. 항목은 삭제하지 않고 pending으로 되돌린다."""
         if not self._running[kind]:
             raise RuntimeError("not_running")
+        self._abort[kind] = True
+        cancelled_ids: list[str] = []
         for item in self._queue(kind):
             if item.status == "running":
                 self._cancel_ids.add(item.id)
+                cancelled_ids.append(item.id)
+                # UI/목록 유지를 위해 즉시 pending 복원 (백그라운드 잡은 cancel로 종료)
+                self._reset_item_to_pending(item)
+        self.persist_queue()
+        for item_id in cancelled_ids:
+            await self._emit({"type": "item_cancelled", "kind": kind, "id": item_id})
+        await self._emit({"type": "state", **self.snapshot()})
+
+    def _reset_item_to_pending(self, item: ProcessingQueueItem) -> None:
+        item.status = "pending"
+        item.progress = 0
+        item.message = "대기 중..."
 
     def clear_finished(self, kind: ProcessingKind) -> int:
         before = len(self._queue(kind))
@@ -202,6 +218,24 @@ class ProcessingQueueService:
         removed = before - len(self._queues[kind])
         if removed:
             self.persist_queue()
+        return removed
+
+    async def clear_queue(self, kind: ProcessingKind) -> int:
+        """해당 kind 큐를 전부 비운다. 실행 중이면 중지도 요청한다."""
+        if kind not in KINDS:
+            raise ValueError(f"invalid kind: {kind}")
+        items = list(self._queue(kind))
+        removed = len(items)
+        if not removed:
+            return 0
+        if self._running[kind]:
+            self._abort[kind] = True
+            for item in items:
+                if item.status == "running":
+                    self._cancel_ids.add(item.id)
+        self._queues[kind] = []
+        self.persist_queue()
+        await self._emit({"type": "state", **self.snapshot()})
         return removed
 
     def persist_queue(self) -> None:
@@ -244,6 +278,7 @@ class ProcessingQueueService:
         pending = [i for i in self._queue(kind) if i.status == "pending"]
         if not pending:
             raise RuntimeError("empty")
+        self._abort[kind] = False
         self._running[kind] = True
         await self._emit({"type": "queue_started", "kind": kind})
         asyncio.create_task(self._run_queue(kind))
@@ -254,16 +289,22 @@ class ProcessingQueueService:
         async with lock:
             try:
                 while True:
+                    if self._abort[kind]:
+                        break
                     pending = [i for i in self._queue(kind) if i.status == "pending"]
                     if not pending:
                         break
                     for item in pending:
+                        if self._abort[kind]:
+                            break
                         await self._process_item(kind, item)
                         self.persist_queue()
             finally:
                 self._running[kind] = False
+                self._abort[kind] = False
                 self.persist_queue()
                 await self._emit({"type": "queue_finished", "kind": kind})
+                await self._emit({"type": "state", **self.snapshot()})
 
     async def _process_item(self, kind: ProcessingKind, item: ProcessingQueueItem) -> None:
         if item.status != "pending":
@@ -275,6 +316,8 @@ class ProcessingQueueService:
         await self._emit({"type": "content_clear", "kind": kind, "id": item.id})
 
         def progress_cb(msg: str, pct: int) -> None:
+            if item.id in self._cancel_ids:
+                return
             if pct >= 0:
                 item.progress = pct
             item.message = msg
@@ -293,6 +336,8 @@ class ProcessingQueueService:
                 )
 
         def log_cb(level: str, text: str) -> None:
+            if item.id in self._cancel_ids:
+                return
             if self._main_loop and self._broadcast:
                 ts = datetime.now().strftime("%H:%M:%S")
                 asyncio.run_coroutine_threadsafe(
@@ -301,6 +346,8 @@ class ProcessingQueueService:
                 )
 
         def content_cb(payload: dict[str, object]) -> None:
+            if item.id in self._cancel_ids:
+                return
             if self._main_loop and self._broadcast:
                 ts = datetime.now().strftime("%H:%M:%S")
                 asyncio.run_coroutine_threadsafe(
@@ -346,12 +393,18 @@ class ProcessingQueueService:
                     ),
                 )
 
-            if should_cancel():
-                item.status = "error"
-                item.message = "취소됨"
+            still_queued = any(i.id == item.id for i in self._queue(kind))
+            if not still_queued:
+                self._cancel_ids.discard(item.id)
+                return
+
+            if should_cancel() or item.status == "pending":
+                # 중지면 삭제하지 않고 대기 상태로 복원
+                if item.status != "pending":
+                    self._reset_item_to_pending(item)
                 self._cancel_ids.discard(item.id)
                 await self._emit({"type": "item_cancelled", "kind": kind, "id": item.id})
-                self._queues[kind] = [i for i in self._queue(kind) if i.id != item.id]
+                await self._emit({"type": "state", **self.snapshot()})
                 return
 
             if result.ok:
@@ -374,6 +427,8 @@ class ProcessingQueueService:
                     {"type": "item_error", "kind": kind, "id": item.id, "message": item.message}
                 )
         except Exception as e:
+            if not any(i.id == item.id for i in self._queue(kind)):
+                return
             item.status = "error"
             item.message = str(e)
             await self._emit(

@@ -83,6 +83,11 @@ export const clearProcessingFinished = (
 ): Promise<{ ok: boolean; removed: number }> =>
   post("/api/processing/clear-finished", { kind }, PROCESSING_TIMEOUT_MS);
 
+export const clearProcessingQueue = (
+  kind: ProcessingKind,
+): Promise<{ ok: boolean; removed: number }> =>
+  post("/api/processing/clear", { kind }, PROCESSING_TIMEOUT_MS);
+
 export function createProcessingWS(
   onMessage: (event: ProcessingWsEvent) => void,
   onClose?: () => void,

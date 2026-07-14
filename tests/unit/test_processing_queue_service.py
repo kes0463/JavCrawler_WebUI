@@ -88,6 +88,34 @@ def test_clear_finished(svc: ProcessingQueueService, video_file: Path, monkeypat
     assert svc.snapshot()["stt"]["items"] == []
 
 
+def test_clear_queue_removes_all(
+    svc: ProcessingQueueService,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "javstory.services.processing_queue_service.is_video_file",
+        lambda p: True,
+    )
+    v1 = tmp_path / "A.mp4"
+    v2 = tmp_path / "B.mp4"
+    v1.write_bytes(b"x")
+    v2.write_bytes(b"x")
+    svc.add_paths("stt", [str(v1), str(v2)])
+    svc._queues["stt"][0].status = "done"
+
+    async def _run() -> None:
+        async def _broadcast(_event: dict) -> None:
+            pass
+
+        svc.set_broadcast(_broadcast)
+        removed = await svc.clear_queue("stt")
+        assert removed == 2
+        assert svc.snapshot()["stt"]["items"] == []
+
+    asyncio.run(_run())
+
+
 def test_start_runs_stt_job(
     svc: ProcessingQueueService,
     video_file: Path,
@@ -128,7 +156,7 @@ def test_start_runs_stt_job(
     asyncio.run(_run())
 
 
-def test_cancel_marks_running_item(
+def test_cancel_keeps_items_as_pending(
     svc: ProcessingQueueService,
     video_file: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -166,7 +194,109 @@ def test_cancel_marks_running_item(
                 break
             await asyncio.sleep(0.05)
 
-        assert svc.snapshot()["stt"]["items"] == []
+        items = svc.snapshot()["stt"]["items"]
+        assert len(items) == 1
+        assert items[0]["status"] == "pending"
+
+    asyncio.run(_run())
+
+
+def test_cancel_stops_queue_but_keeps_remaining(
+    svc: ProcessingQueueService,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "javstory.services.processing_queue_service.is_video_file",
+        lambda p: True,
+    )
+    v1 = tmp_path / "ABF-001 a.mp4"
+    v2 = tmp_path / "ABF-002 b.mp4"
+    v1.write_bytes(b"\x00" * 64)
+    v2.write_bytes(b"\x00" * 64)
+    started: list[str] = []
+
+    async def _run() -> None:
+        async def _broadcast(_event: dict) -> None:
+            pass
+
+        svc.set_broadcast(_broadcast)
+        svc.set_main_loop(asyncio.get_running_loop())
+
+        def slow_stt(path, should_cancel=None, **_k):
+            import time
+
+            started.append(str(path))
+            for _ in range(200):
+                if should_cancel and should_cancel():
+                    return SttJobResult(False, "취소됨")
+                time.sleep(0.02)
+            return SttJobResult(True, "done")
+
+        monkeypatch.setattr("javstory.services.processing_queue_service.run_stt_job", slow_stt)
+
+        svc.add_paths("stt", [str(v1), str(v2)])
+        await svc.start("stt")
+        await asyncio.sleep(0.08)
+        await svc.cancel("stt")
+
+        for _ in range(100):
+            if not svc._running["stt"]:
+                break
+            await asyncio.sleep(0.05)
+
+        items = svc.snapshot()["stt"]["items"]
+        assert len(items) == 2
+        assert all(i["status"] == "pending" for i in items)
+        assert len(started) == 1
+
+    asyncio.run(_run())
+
+
+def test_remove_pending_while_running(
+    svc: ProcessingQueueService,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "javstory.services.processing_queue_service.is_video_file",
+        lambda p: True,
+    )
+    v1 = tmp_path / "A.mp4"
+    v2 = tmp_path / "B.mp4"
+    v1.write_bytes(b"x")
+    v2.write_bytes(b"x")
+
+    async def _run() -> None:
+        async def _broadcast(_event: dict) -> None:
+            pass
+
+        svc.set_broadcast(_broadcast)
+        svc.set_main_loop(asyncio.get_running_loop())
+
+        def slow_stt(*_a, should_cancel=None, **_k):
+            import time
+
+            for _ in range(80):
+                if should_cancel and should_cancel():
+                    return SttJobResult(False, "취소됨")
+                time.sleep(0.02)
+            return SttJobResult(True, "done")
+
+        monkeypatch.setattr("javstory.services.processing_queue_service.run_stt_job", slow_stt)
+        svc.add_paths("stt", [str(v1), str(v2)])
+        await svc.start("stt")
+        await asyncio.sleep(0.05)
+
+        pending_id = next(i.id for i in svc._queues["stt"] if i.status == "pending")
+        svc.remove_item("stt", pending_id)
+        assert len(svc.snapshot()["stt"]["items"]) == 1
+
+        await svc.cancel("stt")
+        for _ in range(80):
+            if not svc._running["stt"]:
+                break
+            await asyncio.sleep(0.05)
 
     asyncio.run(_run())
 
