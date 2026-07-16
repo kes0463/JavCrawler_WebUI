@@ -122,6 +122,74 @@ def stt_engine_options() -> list[dict[str, Any]]:
     return out
 
 
+FW_XXL_DEFAULTS: dict[str, Any] = {
+    "language": "ja",
+    "vad_filter": True,
+    "vad_threshold": 0.6,
+    "vad_min_speech_duration_ms": 400,
+    "vad_max_speech_duration_s": 18,
+    "condition_on_previous_text": False,
+    "no_speech_threshold": 0.6,
+    "beam_size": 7,
+    "best_of": 5,
+    "temperature": 0.0,
+    "temperature_increment_on_fallback": 0.2,
+    "hallucination_silence_threshold": 1.5,
+    "compute_type": "float16",
+    "batch_size": 8,
+    "word_timestamps": True,
+    "repetition_penalty": 1.2,
+}
+
+_FW_XXL_ENV: dict[str, str] = {
+    "language": "JAVSTORY_FW_LANGUAGE",
+    "vad_filter": "JAVSTORY_FW_VAD_FILTER",
+    "vad_threshold": "JAVSTORY_FW_VAD_THRESHOLD",
+    "vad_min_speech_duration_ms": "JAVSTORY_FW_VAD_MIN_SPEECH_MS",
+    "vad_max_speech_duration_s": "JAVSTORY_FW_VAD_MAX_SPEECH_S",
+    "condition_on_previous_text": "JAVSTORY_FW_CONDITION_ON_PREVIOUS_TEXT",
+    "no_speech_threshold": "JAVSTORY_FW_NO_SPEECH_THRESHOLD",
+    "beam_size": "JAVSTORY_FW_BEAM_SIZE",
+    "best_of": "JAVSTORY_FW_BEST_OF",
+    "temperature": "JAVSTORY_FW_TEMPERATURE",
+    "temperature_increment_on_fallback": "JAVSTORY_FW_TEMPERATURE_INCREMENT",
+    "hallucination_silence_threshold": "JAVSTORY_FW_HALLUCINATION_SILENCE",
+    "compute_type": "JAVSTORY_FW_COMPUTE_TYPE",
+    "batch_size": "JAVSTORY_FW_BATCH_SIZE",
+    "word_timestamps": "JAVSTORY_FW_WORD_TIMESTAMPS",
+    "repetition_penalty": "JAVSTORY_FW_REPETITION_PENALTY",
+}
+
+
+def fw_xxl_env_key(field: str) -> str | None:
+    return _FW_XXL_ENV.get(field)
+
+
+def fw_xxl_options_from_env() -> dict[str, Any]:
+    out: dict[str, Any] = {}
+    for field, default in FW_XXL_DEFAULTS.items():
+        env_key = _FW_XXL_ENV[field]
+        raw = (os.environ.get(env_key, "") or "").strip()
+        if not raw:
+            out[field] = default
+            continue
+        if isinstance(default, bool):
+            out[field] = raw.lower() in ("1", "true", "yes", "on")
+        elif isinstance(default, int):
+            try:
+                out[field] = int(float(raw))
+            except ValueError:
+                out[field] = default
+        elif isinstance(default, float):
+            try:
+                out[field] = float(raw)
+            except ValueError:
+                out[field] = default
+        else:
+            out[field] = raw
+    return out
+
+
 def stt_settings_snapshot() -> dict[str, Any]:
     return {
         "engine": stt_engine_from_env(),
@@ -130,5 +198,6 @@ def stt_settings_snapshot() -> dict[str, Any]:
         "hf_whisper_model": hf_whisper_model_from_env(),
         "vad_threshold": vad_threshold_from_env(),
         "dialogue_only": dialogue_only_from_env(),
+        "fw_xxl": fw_xxl_options_from_env(),
         "engine_options": stt_engine_options(),
     }

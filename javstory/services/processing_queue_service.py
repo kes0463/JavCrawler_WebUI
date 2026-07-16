@@ -41,6 +41,7 @@ class ProcessingQueueItem:
     progress: int = 0
     message: str = "대기 중..."
     file_name: str = ""
+    collect_grok: bool = True
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -51,6 +52,7 @@ class ProcessingQueueItem:
             "progress": self.progress,
             "message": self.message,
             "file_name": self.file_name,
+            "collect_grok": self.collect_grok,
         }
 
 
@@ -189,6 +191,22 @@ class ProcessingQueueService:
         self._queues[kind] = [i for i in self._queue(kind) if i.id != item_id]
         self.persist_queue()
         return item
+
+    def set_item_collect_grok(self, kind: ProcessingKind, item_id: str, collect_grok: bool) -> ProcessingQueueItem:
+        item = next((i for i in self._queue(kind) if i.id == item_id), None)
+        if not item:
+            raise KeyError(item_id)
+        item.collect_grok = bool(collect_grok)
+        self.persist_queue()
+        return item
+
+    def set_all_collect_grok(self, kind: ProcessingKind, collect_grok: bool) -> int:
+        n = 0
+        for item in self._queue(kind):
+            item.collect_grok = bool(collect_grok)
+            n += 1
+        self.persist_queue()
+        return n
 
     async def cancel(self, kind: ProcessingKind) -> None:
         """실행 중 큐를 중지한다. 항목은 삭제하지 않고 pending으로 되돌린다."""
@@ -363,6 +381,24 @@ class ProcessingQueueService:
                     self._main_loop,
                 )
 
+        def note_cb(payload: dict[str, object]) -> None:
+            if item.id in self._cancel_ids:
+                return
+            if self._main_loop and self._broadcast:
+                ts = datetime.now().strftime("%H:%M:%S")
+                asyncio.run_coroutine_threadsafe(
+                    self._emit(
+                        {
+                            "type": "work_note",
+                            "kind": kind,
+                            "id": item.id,
+                            "ts": ts,
+                            **payload,
+                        }
+                    ),
+                    self._main_loop,
+                )
+
         def should_cancel() -> bool:
             return item.id in self._cancel_ids
 
@@ -390,6 +426,8 @@ class ProcessingQueueService:
                         on_log=log_cb,
                         on_content_line=content_cb,
                         should_cancel=should_cancel,
+                        collect_grok=item.collect_grok,
+                        on_translation_note=note_cb,
                     ),
                 )
 

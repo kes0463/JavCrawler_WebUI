@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { Bell, BookOpen, Bookmark, FileAudio, FolderOpen, FolderX, Heart, ImagePlus, Languages, Link2, Loader2, Pause, Pencil, Play, RefreshCw, Save, Sparkles, Upload, X } from "lucide-react";
+import { Bell, BookOpen, Bookmark, FileAudio, FolderOpen, FolderX, Heart, ImagePlus, Languages, Link2, Loader2, Pause, Pencil, Play, RefreshCw, Save, Sparkles, StickyNote, Upload, X } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { GlassCard } from "@/components/ui/GlassCard";
 import { Skeleton } from "@/components/ui/Skeleton";
+import { TextArea } from "@/components/ui/SettingsControls";
 import { useToast } from "@/contexts/ToastContext";
 import { useNavigation } from "@/contexts/NavigationContext";
 import {
@@ -14,6 +15,7 @@ import {
   fetchLibraryDetail,
   hasRealLibraryMetadata,
   openLibraryFolder,
+  saveWorkTranslationNote,
   startGrokStory,
   toggleLibraryLike,
   toggleLibraryWatchLater,
@@ -303,6 +305,9 @@ export function LibraryDetailPanel({
   const [monitoringToggling, setMonitoringToggling] = useState(false);
   const [coverLightboxOpen, setCoverLightboxOpen] = useState(false);
   const [snapshotStackOpen, setSnapshotStackOpen] = useState(false);
+  const [workNote, setWorkNote] = useState("");
+  const [workNoteSaved, setWorkNoteSaved] = useState("");
+  const [workNoteSaving, setWorkNoteSaving] = useState(false);
   const coverInputRef = useRef<HTMLInputElement>(null);
   const recrawlPollRef = useRef<number | null>(null);
   const backdropCloseReadyRef = useRef(false);
@@ -334,10 +339,27 @@ export function LibraryDetailPanel({
       .then(d => {
         setDetail(d);
         setFolderDraft(d.folder_path ?? "");
+        setWorkNote(d.translation_note ?? "");
+        setWorkNoteSaved(d.translation_note ?? "");
       })
       .finally(() => setLoading(false));
     return () => window.clearTimeout(timer);
   }, [code]);
+
+  const workNoteDirty = workNote !== workNoteSaved;
+  const handleSaveWorkNote = useCallback(async () => {
+    setWorkNoteSaving(true);
+    try {
+      const updated = await saveWorkTranslationNote(code, workNote);
+      setDetail(updated);
+      setWorkNoteSaved(updated.translation_note ?? workNote);
+      showToast("작품 번역 노트가 저장되었습니다.", "success");
+    } catch (e) {
+      showToast(e instanceof Error ? e.message : "번역 노트 저장 실패", "error");
+    } finally {
+      setWorkNoteSaving(false);
+    }
+  }, [code, workNote, showToast]);
 
   const handleBackdropClose = useCallback(() => {
     if (!backdropCloseReadyRef.current) return;
@@ -1056,6 +1078,42 @@ export function LibraryDetailPanel({
                   )}
                 </>
               )}
+
+              <div className="mt-5">
+                <div className="flex items-center justify-between gap-2 mb-2">
+                  <p className="text-xl font-semibold text-slate-300 flex items-center gap-2">
+                    <StickyNote className="w-5 h-5 text-muted-foreground" />
+                    작품 번역 노트
+                  </p>
+                  <button
+                    type="button"
+                    onClick={() => void handleSaveWorkNote()}
+                    disabled={workNoteSaving || !workNoteDirty}
+                    className={cn(
+                      "inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-base font-medium transition-colors disabled:opacity-40",
+                      workNoteDirty
+                        ? "bg-emerald-500/20 text-emerald-300 hover:bg-emerald-500/30"
+                        : "bg-white/[0.06] text-muted-foreground",
+                    )}
+                  >
+                    {workNoteSaving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
+                    {workNoteDirty ? "저장" : "저장됨"}
+                  </button>
+                </div>
+                <p className="text-lg text-slate-400 mb-2">
+                  이 작품 번역에만 적용됩니다(배우·전역 노트보다 우선).{" "}
+                  <code className="text-violet-300/90">[등장 인물 요약]</code>으로 관계·성별을 명시하거나,{" "}
+                  <code className="text-violet-300/90">[용어 사전]</code>에{" "}
+                  <code className="text-violet-300/90">원어 =&gt; 번역어</code>를 적으면 번역 후 강제 치환됩니다.
+                </p>
+                <TextArea
+                  value={workNote}
+                  onChange={setWorkNote}
+                  rows={6}
+                  placeholder={'[등장 인물 요약]\n- 켄지: 남, 유이의 남동생. "누나"라고 부름\n\n[용어 사전]\n언니 => 오빠'}
+                  className="text-lg"
+                />
+              </div>
             </div>
 
             {!editMode && detail.scenes && detail.scenes.length > 0 ? (

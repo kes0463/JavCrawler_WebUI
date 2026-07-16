@@ -10,6 +10,8 @@ from javstory.services.processing_queue_service import processing_queue
 from webapi.schemas import (
     AddProcessingProductsRequest,
     AddProcessingRequest,
+    PatchProcessingCollectGrokRequest,
+    PatchProcessingItemRequest,
     ProcessingFolderRequest,
     ProcessingKindRequest,
     ProcessingQueueItem,
@@ -112,6 +114,25 @@ async def remove_item(kind: str, item_id: str):
         raise HTTPException(400, "실행 중인 항목은 삭제할 수 없습니다. 취소 API를 사용하세요.") from None
     await _broadcast_state()
     return {"ok": True}
+
+
+@router.patch("/item/{kind}/{item_id}/collect-grok", response_model=ProcessingQueueResponse)
+async def patch_item_collect_grok(kind: str, item_id: str, body: PatchProcessingItemRequest):
+    if kind not in ("stt", "subtitle"):
+        raise HTTPException(400, "kind must be stt or subtitle")
+    try:
+        processing_queue.set_item_collect_grok(kind, item_id, body.collect_grok)
+    except KeyError:
+        raise HTTPException(404, "항목을 찾을 수 없습니다") from None
+    await _broadcast_state()
+    return _queue_response(processing_queue.snapshot())
+
+
+@router.patch("/collect-grok", response_model=ProcessingQueueResponse)
+async def patch_all_collect_grok(body: PatchProcessingCollectGrokRequest):
+    processing_queue.set_all_collect_grok(body.kind, body.collect_grok)
+    await _broadcast_state()
+    return _queue_response(processing_queue.snapshot())
 
 
 @router.post("/start")

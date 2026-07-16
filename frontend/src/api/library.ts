@@ -68,6 +68,7 @@ export interface LibraryItemDetail extends LibraryItem {
   snapshot_count?: number;
   has_grok_story?: boolean;
   grok_story_running?: boolean;
+  translation_note?: string | null;
 }
 
 export interface LibraryItemUpdate {
@@ -184,6 +185,11 @@ export const backfillLibraryEmbeddings = (batchSize = 4): Promise<{
   queued: number;
   message: string;
 }> => post(`/api/library/embeddings/backfill?batch_size=${batchSize}`);
+
+export const rescanLibraryFlags = (
+  productCodes?: string[],
+): Promise<{ ok: boolean; scanned: number }> =>
+  post("/api/library/rescan-flags", { product_codes: productCodes ?? null });
 
 export const startGrokStory = (
   code: string,
@@ -554,6 +560,12 @@ export const updateLibraryItem = (
   body: LibraryItemUpdate,
 ): Promise<LibraryItemDetail> =>
   patch(`/api/library/${code}`, body);
+
+export const saveWorkTranslationNote = (
+  code: string,
+  translationNote: string,
+): Promise<LibraryItemDetail> =>
+  patch(`/api/library/${code}/translation-note`, { translation_note: translationNote });
 
 export const openLibraryFolder = (code: string): Promise<{ ok: boolean; path?: string }> =>
   post(`/api/library/${code}/open-folder`);

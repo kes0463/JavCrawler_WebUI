@@ -1,4 +1,4 @@
-import { X, Loader2, CheckCircle, AlertCircle, Clock } from "lucide-react";
+import { X, Loader2, CheckCircle, AlertCircle, Clock, Sparkles } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { ProgressIndicator } from "@/components/ui/ProgressIndicator";
 
@@ -8,11 +8,13 @@ export interface QueueItem {
   status: "pending" | "running" | "done" | "error";
   progress?: number;
   message?: string;
+  collect_grok?: boolean;
 }
 
 interface QueueItemRowProps {
   item: QueueItem;
   onRemove?: (id: string) => void;
+  onToggleGrok?: (id: string, next: boolean) => void;
   disabled?: boolean;
 }
 
@@ -30,7 +32,7 @@ const STATUS_LABEL: Record<QueueItem["status"], string> = {
   error:   "오류",
 };
 
-export function QueueItemRow({ item, onRemove, disabled }: QueueItemRowProps) {
+export function QueueItemRow({ item, onRemove, onToggleGrok, disabled }: QueueItemRowProps) {
   const isRunning = item.status === "running";
   const isDone    = item.status === "done";
   const isError   = item.status === "error";
@@ -87,6 +89,25 @@ export function QueueItemRow({ item, onRemove, disabled }: QueueItemRowProps) {
         <span className="text-sm tabular-nums text-indigo-400 font-medium shrink-0 min-w-[2.5rem] text-right">
           {item.progress ?? 0}%
         </span>
+      )}
+
+      {onToggleGrok && (
+        <button
+          onClick={() => onToggleGrok(item.id, !item.collect_grok)}
+          disabled={disabled}
+          title={item.collect_grok ? "Grok 컨텍스트 수집 켜짐 (클릭 시 끄기)" : "Grok 컨텍스트 수집 꺼짐 (클릭 시 켜기)"}
+          className={cn(
+            "h-6 px-2 rounded-lg shrink-0 flex items-center gap-1",
+            "text-xs font-medium transition-all duration-150",
+            "disabled:opacity-25 disabled:pointer-events-none",
+            item.collect_grok
+              ? "text-amber-300 bg-amber-500/15 hover:bg-amber-500/25"
+              : "text-zinc-600 hover:text-zinc-300 hover:bg-white/[0.07]",
+          )}
+        >
+          <Sparkles className="w-3 h-3" />
+          Grok
+        </button>
       )}
 
       {!isRunning && onRemove && (

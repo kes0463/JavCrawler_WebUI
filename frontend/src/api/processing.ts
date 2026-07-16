@@ -1,4 +1,4 @@
-import { get, post, del, WS_BASE } from "./client";
+import { get, post, del, patch, WS_BASE } from "./client";
 
 const PROCESSING_TIMEOUT_MS = 120_000;
 
@@ -12,6 +12,7 @@ export interface ProcessingQueueItem {
   progress: number;
   message: string;
   file_name: string;
+  collect_grok: boolean;
 }
 
 export interface ProcessingQueueSection {
@@ -67,6 +68,27 @@ export const removeProcessingItem = (
   id: string,
 ): Promise<{ ok: boolean }> =>
   del(`/api/processing/item/${kind}/${id}`, PROCESSING_TIMEOUT_MS);
+
+export const setItemCollectGrok = (
+  kind: ProcessingKind,
+  id: string,
+  collectGrok: boolean,
+): Promise<ProcessingQueueResponse> =>
+  patch(
+    `/api/processing/item/${kind}/${id}/collect-grok`,
+    { collect_grok: collectGrok },
+    PROCESSING_TIMEOUT_MS,
+  );
+
+export const setAllCollectGrok = (
+  kind: ProcessingKind,
+  collectGrok: boolean,
+): Promise<ProcessingQueueResponse> =>
+  patch(
+    "/api/processing/collect-grok",
+    { kind, collect_grok: collectGrok },
+    PROCESSING_TIMEOUT_MS,
+  );
 
 export const startProcessingQueue = (
   kind: ProcessingKind,
@@ -136,6 +158,14 @@ export type ProcessingWsEvent =
       index?: number;
       ts: string;
     }
+  | {
+      type: "work_note";
+      kind: ProcessingKind;
+      id: string;
+      product_code: string;
+      text: string;
+      ts: string;
+    }
   | { type: "content_clear"; kind: ProcessingKind; id: string };
 
 export function toQueueRow(item: ProcessingQueueItem) {
@@ -145,5 +175,6 @@ export function toQueueRow(item: ProcessingQueueItem) {
     status: item.status,
     progress: item.progress,
     message: item.message,
+    collect_grok: item.collect_grok,
   };
 }

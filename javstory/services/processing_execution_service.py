@@ -14,6 +14,7 @@ ProgressFn = Callable[[str, int], None]
 CancelFn = Callable[[], bool]
 LogFn = Callable[[str, str], None]
 ContentLineFn = Callable[[dict[str, object]], None]
+TranslationNoteFn = Callable[[dict[str, object]], None]
 
 
 @dataclass
@@ -183,6 +184,8 @@ def run_subtitle_job(
     on_log: LogFn | None = None,
     on_content_line: ContentLineFn | None = None,
     should_cancel: CancelFn | None = None,
+    collect_grok: bool = True,
+    on_translation_note: TranslationNoteFn | None = None,
 ) -> SubtitleJobResult:
     from javstory.llm.engine import AllTiersExhaustedError
     from javstory.transcription.stt_types import STTCancelled
@@ -235,6 +238,8 @@ def run_subtitle_job(
             "should_cancel": should_cancel or (lambda: False),
             "logger_func": _logger,
             "on_content_line": on_content_line,
+            "collect_grok": collect_grok,
+            "on_translation_note": on_translation_note,
         }
 
         async def _run_subtitle() -> None:

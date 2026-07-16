@@ -17,8 +17,9 @@ call "%~dp0venv\Scripts\activate.bat"
 if errorlevel 1 exit /b 1
 
 if not defined JAVSTORY_WEBAPI_PORT set JAVSTORY_WEBAPI_PORT=8765
-REM 5173 is often blocked on Windows (Hyper-V/WSL excluded port ranges e.g. 5117-5216).
-if not defined JAVSTORY_VITE_PORT set JAVSTORY_VITE_PORT=4173
+REM Windows Hyper-V/WSL reserves dynamic TCP ranges (netsh interface ipv4 show excludedportrange).
+REM 4173 and 5173 often fall inside those blocks → listen EACCES. Prefer 5500.
+if not defined JAVSTORY_VITE_PORT set JAVSTORY_VITE_PORT=5500
 
 echo Stopping any process on port %JAVSTORY_WEBAPI_PORT% ...
 :kill_port_loop

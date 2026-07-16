@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type DragEvent } from "react";
-import { Play, FileAudio, FolderOpen, Ban, Trash2, Loader2, Upload, Save, StickyNote } from "lucide-react";
+import { Play, FileAudio, FolderOpen, Ban, Trash2, Loader2, Upload, Save, StickyNote, Sparkles } from "lucide-react";
 import {
   addProcessingFolder,
   addToProcessingQueue,
@@ -9,6 +9,8 @@ import {
   createProcessingWS,
   fetchProcessingQueue,
   removeProcessingItem,
+  setAllCollectGrok,
+  setItemCollectGrok,
   startProcessingQueue,
   toQueueRow,
   type LogEntry,
@@ -76,6 +78,9 @@ export default function ProcessingView() {
   const [noteSaved, setNoteSaved] = useState("");
   const [noteLoading, setNoteLoading] = useState(true);
   const [noteSaving, setNoteSaving] = useState(false);
+  const [generatedNotes, setGeneratedNotes] = useState<
+    { id: string; productCode: string; text: string; ts: string }[]
+  >([]);
   const dragDepthRef = useRef(0);
   const wsRef = useRef<WebSocket | null>(null);
 
@@ -135,6 +140,13 @@ export default function ProcessingView() {
         },
       ].slice(-800));
       setActiveSentenceItemId(event.id);
+      return;
+    }
+    if (event.type === "work_note") {
+      setGeneratedNotes(prev => [
+        { id: event.id, productCode: event.product_code, text: event.text, ts: event.ts },
+        ...prev.filter(n => n.id !== event.id),
+      ].slice(0, 20));
       return;
     }
     if (event.type === "item_started") {
@@ -350,6 +362,31 @@ export default function ProcessingView() {
     }
   };
 
+  const handleToggleItemGrok = async (kind: ProcessingKind, id: string, next: boolean) => {
+    setState(prev => ({ ...prev, [kind]: patchItem(prev[kind], id, { collect_grok: next }) }));
+    try {
+      const res = await setItemCollectGrok(kind, id, next);
+      setState(res);
+    } catch (e) {
+      showToast(e instanceof Error ? e.message : "Grok 설정 변경 실패", "error");
+      try {
+        setState(await fetchProcessingQueue());
+      } catch {
+        // ignore
+      }
+    }
+  };
+
+  const handleToggleAllGrok = async (kind: ProcessingKind, next: boolean) => {
+    try {
+      const res = await setAllCollectGrok(kind, next);
+      setState(res);
+      showToast(`Grok 컨텍스트 수집 전체 ${next ? "켬" : "끔"}`, "success");
+    } catch (e) {
+      showToast(e instanceof Error ? e.message : "Grok 설정 변경 실패", "error");
+    }
+  };
+
   const handleClearFinished = async (kind: ProcessingKind) => {
     try {
       const res = await clearProcessingFinished(kind);
@@ -384,6 +421,7 @@ export default function ProcessingView() {
 
   const sttRows = state.stt.items.map(toQueueRow);
   const subRows = state.subtitle.items.map(toQueueRow);
+  const allSubtitleGrokOn = subRows.length > 0 && subRows.every(i => i.collect_grok);
 
   return (
     <div
@@ -574,6 +612,16 @@ export default function ProcessingView() {
                 <ActionButton
                   variant="ghost"
                   size="sm"
+                  icon={<Sparkles className="w-4 h-4" />}
+                  disabled={subRows.length === 0}
+                  onClick={() => void handleToggleAllGrok("subtitle", !allSubtitleGrokOn)}
+                  title={allSubtitleGrokOn ? "전체 항목의 Grok 수집을 끕니다" : "전체 항목의 Grok 수집을 켭니다"}
+                >
+                  {allSubtitleGrokOn ? "Grok 전체 끄기" : "Grok 전체 켜기"}
+                </ActionButton>
+                <ActionButton
+                  variant="ghost"
+                  size="sm"
                   icon={<Trash2 className="w-4 h-4" />}
                   onClick={() => void handleClearFinished("subtitle")}
                 >
@@ -598,6 +646,7 @@ export default function ProcessingView() {
                     key={item.id}
                     item={item}
                     onRemove={id => void handleRemove("subtitle", id)}
+                    onToggleGrok={(id, next) => void handleToggleItemGrok("subtitle", id, next)}
                   />
                 ))}
           </QueueAccordionCard>
@@ -641,6 +690,29 @@ export default function ProcessingView() {
                 placeholder={"독백은 반말로 번역.\n古明地こいし=코메이지 코이시"}
                 className="text-sm"
               />
+            )}
+            {generatedNotes.length > 0 && (
+              <div className="pt-3 mt-1 border-t border-white/[0.08] space-y-2">
+                <h4 className="text-xs font-semibold uppercase tracking-widest text-muted-foreground/70">
+                  자동 생성된 작품 노트
+                </h4>
+                <div className="space-y-2 max-h-64 overflow-y-auto pr-1">
+                  {generatedNotes.map(n => (
+                    <div
+                      key={n.id}
+                      className="rounded-lg bg-bg-surface border border-white/[0.06] px-3 py-2"
+                    >
+                      <div className="flex items-center justify-between gap-2 mb-1">
+                        <span className="font-mono text-xs text-indigo-300/90">{n.productCode}</span>
+                        <span className="text-xs text-muted-foreground">{n.ts}</span>
+                      </div>
+                      <p className="text-sm text-muted-foreground whitespace-pre-wrap">
+                        {n.text || "(생성 실패 — 노트 없음)"}
+                      </p>
+                    </div>
+                  ))}
+                </div>
+              </div>
             )}
           </GlassCard>
 

@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { Search, SlidersHorizontal, FolderOpen, FolderX, RefreshCw, Subtitles, Layers, Heart, Bookmark, Loader2, SquareCheck, Square, X } from "lucide-react";
 import { cn } from "@/lib/utils";
-import { fetchLibraryListed, fetchLibraryGenresResilient, fetchLibraryStats, coverUrl, previewUrl, openLibraryFolder, hasRealLibraryMetadata, clearLibraryGenreScanCache, probeLibraryGenreFilterSupport, prefetchLibraryClientIndex, isClientLibraryIndexReady, backfillLibraryEmbeddings, startGrokStory, startGrokStoryBatch, toggleLibraryLike, toggleLibraryWatchLater } from "@/api/library";
+import { fetchLibraryListed, fetchLibraryGenresResilient, fetchLibraryStats, coverUrl, previewUrl, openLibraryFolder, hasRealLibraryMetadata, clearLibraryGenreScanCache, probeLibraryGenreFilterSupport, prefetchLibraryClientIndex, isClientLibraryIndexReady, backfillLibraryEmbeddings, rescanLibraryFlags, startGrokStory, startGrokStoryBatch, toggleLibraryLike, toggleLibraryWatchLater } from "@/api/library";
 import type { LibraryItem, LibraryStats, LibraryQuery, LibraryGenreItem, LibrarySearchMode } from "@/api/library";
 import { GlassCard } from "@/components/ui/GlassCard";
 import { Skeleton } from "@/components/ui/Skeleton";
@@ -492,6 +492,21 @@ export default function LibraryView() {
     refreshStats(false);
   }, [refreshStats]);
 
+  const [flagsRescanning, setFlagsRescanning] = useState(false);
+  const handleRescanFlags = useCallback(() => {
+    setFlagsRescanning(true);
+    rescanLibraryFlags()
+      .then(res => {
+        showToast(`자막/파일 상태 재스캔 완료 (${res.scanned}건)`, "success");
+        loadItems(query, false, { silent: true });
+        refreshStats(false);
+      })
+      .catch(err =>
+        showToast(err instanceof Error ? err.message : "재스캔 실패", "error"),
+      )
+      .finally(() => setFlagsRescanning(false));
+  }, [query, loadItems, refreshStats, showToast]);
+
   const coverCacheKey = useCallback((item: LibraryItem) => {
     const pc = item.product_code.toUpperCase();
     return coverRev[pc] ?? item.updated_at ?? item.cover_image_local_path ?? undefined;
@@ -554,6 +569,14 @@ export default function LibraryView() {
           className="h-9 w-9 shrink-0 rounded-xl flex items-center justify-center bg-bg-surface border border-white/[0.08] text-muted-foreground hover:text-white hover:border-white/[0.16] transition-all"
         >
           <RefreshCw className={cn("w-3.5 h-3.5", statsRefreshing && "animate-spin")} />
+        </button>
+        <button
+          onClick={handleRescanFlags}
+          disabled={flagsRescanning}
+          title="폴더에서 자막을 지우거나 바꾼 뒤 반영이 안 될 때 — 자막/파일 상태 전체 재스캔"
+          className="h-9 w-9 shrink-0 rounded-xl flex items-center justify-center bg-bg-surface border border-white/[0.08] text-muted-foreground hover:text-white hover:border-white/[0.16] transition-all disabled:opacity-50"
+        >
+          <Subtitles className={cn("w-3.5 h-3.5", flagsRescanning && "animate-pulse")} />
         </button>
       </div>
 

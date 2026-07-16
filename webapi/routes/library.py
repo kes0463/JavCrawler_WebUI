@@ -22,8 +22,11 @@ from webapi.schemas import (
     LibraryGenreItem,
     LibraryStats,
     OpenFolderResponse,
+    RescanFlagsRequest,
+    RescanFlagsResponse,
     SceneSummary,
     WatchFlagsResponse,
+    WorkTranslationNotePatch,
 )
 
 router = APIRouter()
@@ -244,6 +247,28 @@ def start_grok_story_batch(body: GrokStoryStartRequest):
     )
 
 
+@router.post("/rescan-flags", response_model=RescanFlagsResponse)
+def rescan_library_flags(body: RescanFlagsRequest):
+    """폴더에서 자막이 지워지거나 바뀐 뒤 UI가 안 따라오는 문제 — file_flag_cache 강제 재스캔.
+
+    product_codes가 없으면 라이브러리 전체를 재스캔한다.
+    """
+    from javstory.harvest.database import JAVMetadata, get_db_session_ctx
+    from javstory.library.file_flag_scanner import bulk_scan_and_save
+
+    codes = [c.strip().upper() for c in (body.product_codes or []) if c and c.strip()]
+    with get_db_session_ctx() as db:
+        q = db.query(JAVMetadata)
+        if codes:
+            q = q.filter(JAVMetadata.product_code.in_(codes))
+        items = [
+            (row.product_code, row.folder_path, bool(row.is_hardcoded))
+            for row in q.all()
+        ]
+    scanned = bulk_scan_and_save(items)
+    return RescanFlagsResponse(ok=True, scanned=scanned)
+
+
 @router.post("/{code}/like", response_model=WatchFlagsResponse)
 def toggle_library_like(code: str):
     row = _library.get_by_code(code)
@@ -416,6 +441,7 @@ def _to_detail(row: JAVMetadata, code: str) -> LibraryItemDetail:
     media = _library.media_flags_for(row, flags_map.get(row.product_code))
     watch = _library.load_watch_flags_for([code]).get(code.upper()) or {}
     from javstory.services.grok_story_service import grok_story_status
+    from javstory.translation.translation_notes import load_work_translation_note
 
     grok_st = grok_story_status(code)
     return base.model_copy(
@@ -435,6 +461,7 @@ def _to_detail(row: JAVMetadata, code: str) -> LibraryItemDetail:
             "grok_story_running": bool(grok_st.get("running")),
             "user_liked": bool(watch.get("user_liked")),
             "watch_later": bool(watch.get("watch_later")),
+            "translation_note": load_work_translation_note(code),
             **_folder_watch_flags(code),
         }
     )
@@ -445,6 +472,25 @@ def get_detail(code: str):
     row = _library.get_by_code(code)
     if not row:
         raise HTTPException(404, "작품을 찾을 수 없습니다")
+    # 상세 진입 시점 파일 상태 재스캔 — 폴더에서 자막을 지우거나 바꿔도
+    # file_flag_cache가 안 따라오던 문제 (캐시를 매번 그냥 반환만 하던 경로).
+    try:
+        from javstory.library.file_flag_scanner import upsert_one_flag
+
+        upsert_one_flag(row.product_code, row.folder_path, bool(row.is_hardcoded))
+    except Exception:
+        pass
+    return _to_detail(row, code)
+
+
+@router.patch("/{code}/translation-note", response_model=LibraryItemDetail)
+def patch_work_translation_note(code: str, body: WorkTranslationNotePatch):
+    from javstory.translation.translation_notes import save_work_translation_note
+
+    row = _library.get_by_code(code)
+    if not row:
+        raise HTTPException(404, "작품을 찾을 수 없습니다")
+    save_work_translation_note(code, body.translation_note)
     return _to_detail(row, code)
 
 

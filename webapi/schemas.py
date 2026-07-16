@@ -74,6 +74,11 @@ class LibraryItemDetail(LibraryItem):
     snapshot_count: int = 0
     has_grok_story: bool = False
     grok_story_running: bool = False
+    translation_note: Optional[str] = None
+
+
+class WorkTranslationNotePatch(BaseModel):
+    translation_note: str
 
 
 class GrokStoryStartRequest(BaseModel):
@@ -125,6 +130,15 @@ class EmbeddingsWarmupResponse(BaseModel):
     ok: bool
     queued: int = 0
     message: str = ""
+
+
+class RescanFlagsRequest(BaseModel):
+    product_codes: Optional[list[str]] = None
+
+
+class RescanFlagsResponse(BaseModel):
+    ok: bool
+    scanned: int = 0
 
 
 class LibraryStats(BaseModel):
