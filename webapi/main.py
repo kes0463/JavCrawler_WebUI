@@ -90,6 +90,23 @@ async def lifespan(app: FastAPI):
 
     threading.Thread(target=_embeddings_backfill_on_start, daemon=True, name="EmbeddingsBackfill").start()
 
+    def _purge_translation_chunk_cache() -> None:
+        if (os.environ.get("JAVSTORY_TRANSLATION_CHUNK_CACHE_PURGE_ON_START", "1") or "").strip().lower() in {
+            "0",
+            "false",
+            "off",
+            "no",
+        }:
+            return
+        try:
+            from javstory.translation.ko_translation_chunk import purge_stale_translation_chunk_cache
+
+            purge_stale_translation_chunk_cache()
+        except Exception:
+            pass
+
+    threading.Thread(target=_purge_translation_chunk_cache, daemon=True, name="TranslationChunkCachePurge").start()
+
     try:
         from javstory.folder_watch.service import get_folder_watch_service
 

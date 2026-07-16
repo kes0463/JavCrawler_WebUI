@@ -26,14 +26,17 @@ STT_ENGINE_IMPLEMENTED: dict[str, bool] = {
 
 STT_ENGINE_LABELS: dict[str, str] = {
     STT_ENGINE_STABLE_TS: "Stable TS (PyTorch)",
-    STT_ENGINE_STABLE_TS_FW: "Stable TS + Faster-Whisper",
+    STT_ENGINE_STABLE_TS_FW: "Faster-Whisper XXL (Native)",
     STT_ENGINE_ANIME_WHISPER: "Anime-Whisper + Stable TS",
     STT_ENGINE_WHISPERX: "WhisperX (예정)",
 }
 
 STT_ENGINE_DESCRIPTIONS: dict[str, str] = {
     STT_ENGINE_STABLE_TS: "OpenAI Whisper large-v2/v3 + stable-ts VAD·싱크 보정",
-    STT_ENGINE_STABLE_TS_FW: "CTranslate2(faster-whisper) GPU 가속 + stable-ts 후처리",
+    STT_ENGINE_STABLE_TS_FW: (
+        "CTranslate2(faster-whisper) 순정 파이프라인 — ffmpeg 추출 → transcribe() → SRT. "
+        "stable-ts VAD/후처리 없음(참조 Faster-Whisper-XXL 툴과 동일 형태)"
+    ),
     STT_ENGINE_ANIME_WHISPER: "litagin/anime-whisper 일본어 연기 도메인 + stable-ts 후처리",
     STT_ENGINE_WHISPERX: "아직 미구현 — forced alignment 전용",
 }

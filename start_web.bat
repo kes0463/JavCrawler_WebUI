@@ -48,10 +48,12 @@ if "%VITE_FOUND%"=="1" (
 timeout /t 1 /nobreak >nul
 
 echo Starting webapi on port %JAVSTORY_WEBAPI_PORT% ...
+REM stdout/stderr are saved to webapi.log (overwritten each run) so tracebacks/hangs
+REM survive after the minimized console window closes/scrolls.
 if /I "%JAVSTORY_WEBAPI_RELOAD%"=="1" (
-  start "JAVSTORY webapi" /MIN /D "%~dp0." "%~dp0venv\Scripts\python.exe" -m uvicorn webapi.main:app --host 127.0.0.1 --port %JAVSTORY_WEBAPI_PORT% --reload
+  start "JAVSTORY webapi" /MIN /D "%~dp0." cmd /c ""%~dp0venv\Scripts\python.exe" -m uvicorn webapi.main:app --host 127.0.0.1 --port %JAVSTORY_WEBAPI_PORT% --reload > "%~dp0webapi.log" 2>&1"
 ) else (
-  start "JAVSTORY webapi" /MIN /D "%~dp0." "%~dp0venv\Scripts\python.exe" -m uvicorn webapi.main:app --host 127.0.0.1 --port %JAVSTORY_WEBAPI_PORT%
+  start "JAVSTORY webapi" /MIN /D "%~dp0." cmd /c ""%~dp0venv\Scripts\python.exe" -m uvicorn webapi.main:app --host 127.0.0.1 --port %JAVSTORY_WEBAPI_PORT% > "%~dp0webapi.log" 2>&1"
 )
 
 timeout /t 3 /nobreak >nul

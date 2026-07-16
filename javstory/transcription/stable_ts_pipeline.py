@@ -24,12 +24,13 @@ from javstory.transcription.stt_config import (
     STT_ENGINE_WHISPERX,
     dialogue_only_from_env,
     faster_whisper_model_from_env,
+    fw_xxl_options_from_env,
     hf_whisper_model_from_env,
     stt_engine_from_env,
     vad_threshold_from_env,
     whisper_model_from_env,
 )
-from javstory.transcription.stt_types import STTCancelled, STTProgressEvent
+from javstory.transcription.stt_types import STTCancelled, STTProgressEvent, safe_console_print
 from javstory.utils.ffmpeg_path import bootstrap_path_env, get_ffmpeg
 
 OptionalLogger = Optional[Callable[[str], None]]
@@ -74,6 +75,7 @@ def _load_model_for_engine(
     device: str,
     download_root: Path,
     logger: OptionalLogger = None,
+    compute_type: str | None = None,
 ):
     if engine == STT_ENGINE_WHISPERX:
         raise NotImplementedError(
@@ -81,12 +83,16 @@ def _load_model_for_engine(
         )
     if engine == STT_ENGINE_STABLE_TS_FW:
         fw_name = faster_whisper_model_from_env()
+        compute = compute_type or "float16"
+        if device == "cpu" and compute in ("float16", "int8_float16"):
+            compute = "int8"
         if logger:
-            logger(f"faster-whisper 모델 로드: {fw_name} ({device})")
+            logger(f"faster-whisper 모델 로드: {fw_name} ({device}, {compute})")
         return stable_whisper.load_faster_whisper(
             fw_name,
             device=device,
             download_root=str(download_root),
+            compute_type=compute,
         )
     if engine == STT_ENGINE_ANIME_WHISPER:
         hf_id = hf_whisper_model_from_env()
@@ -148,12 +154,16 @@ def run_stt(
     eng = engine or stt_engine_from_env()
     if model_name:
         os.environ["JAVSTORY_WHISPER_MODEL"] = model_name
+    fw = fw_xxl_options_from_env() if eng == STT_ENGINE_STABLE_TS_FW else None
 
     def emit(stage: str, pct: int, msg: str) -> None:
         if progress:
             progress(STTProgressEvent(stage, pct, msg))
         if logger:
             logger(f"[P:{pct}] {msg}")
+        # 콘솔/webapi.log에도 남겨서, WS 콜백을 안 거치고도 어느 엔진이 로드됐는지·
+        # 어디서 멈췄는지 로그만으로 확인 가능하게 함.
+        safe_console_print(f"[STT:{stage}:{pct}] {msg}")
 
     def check_cancel() -> None:
         if should_cancel and should_cancel():
@@ -171,7 +181,13 @@ def run_stt(
     emit("init", 12, f"STT 엔진: {_engine_label(eng)} ({device})")
     check_cancel()
 
-    model = _load_model_for_engine(eng, device=device, download_root=droot, logger=logger)
+    model = _load_model_for_engine(
+        eng,
+        device=device,
+        download_root=droot,
+        logger=logger,
+        compute_type=(fw["compute_type"] if fw else None),
+    )
 
     last_seek = [0.0]
     last_total = [1.0]
@@ -201,15 +217,56 @@ def run_stt(
         "vad_threshold": vad,
         "verbose": False,
         "regroup": True,
+        "suppress_silence": True,
         "progress_callback": transcribe_progress,
-        "ignore_compatibility": ignore_compat,
     }
     if eng == STT_ENGINE_STABLE_TS:
+        # ignore_compatibility는 원본 openai-whisper 래퍼(original_whisper.py)에만 있는
+        # 인자라 다른 엔진(FW/anime-whisper)에 그대로 넘기면 TypeError가 남.
+        transcribe_kw["ignore_compatibility"] = ignore_compat
         transcribe_kw["fp16"] = use_fp16
         transcribe_kw["beam_size"] = int(os.environ.get("JAVSTORY_WHISPER_BEAM_SIZE", "5"))
+    elif eng == STT_ENGINE_STABLE_TS_FW:
+        # stable-ts 자체 vad=True는 torch.hub의 별도 Silero VAD(버전/런타임이 다름)로
+        # 타임스탬프 억제 마스크를 만드는 후처리라 일부 콘텐츠(VR 등)에서 거의 다
+        # 무음으로 판정하는 문제가 있었음. faster-whisper 네이티브 vad_filter(자체
+        # onnxruntime CPU 기반, ctranslate2 디코드와 무관 — XXL 참조 툴과 동일 경로)로
+        # 교체하고, 이중 억제를 막기 위해 stable-ts 쪽 vad/suppress_silence는 끈다.
+        transcribe_kw["vad"] = False
+        transcribe_kw["suppress_silence"] = False
+        transcribe_kw["language"] = fw["language"] or "ja"
+        transcribe_kw["word_timestamps"] = bool(fw["word_timestamps"])
+        transcribe_kw["vad_filter"] = bool(fw["vad_filter"])
+        transcribe_kw["vad_parameters"] = {
+            "threshold": float(fw["vad_threshold"]),
+            "min_speech_duration_ms": int(fw["vad_min_speech_duration_ms"]),
+            "max_speech_duration_s": float(fw["vad_max_speech_duration_s"]),
+        }
+        transcribe_kw["condition_on_previous_text"] = bool(fw["condition_on_previous_text"])
+        transcribe_kw["no_speech_threshold"] = float(fw["no_speech_threshold"])
+        transcribe_kw["beam_size"] = int(fw["beam_size"])
+        transcribe_kw["best_of"] = int(fw["best_of"])
+        transcribe_kw["repetition_penalty"] = float(fw["repetition_penalty"])
+        hall = float(fw["hallucination_silence_threshold"])
+        if hall > 0:
+            transcribe_kw["hallucination_silence_threshold"] = hall
+        t0 = float(fw["temperature"])
+        t_inc = float(fw["temperature_increment_on_fallback"])
+        if t_inc > 0:
+            temps = []
+            t = t0
+            while t <= 1.0 + 1e-6:
+                temps.append(round(t, 2))
+                t += t_inc
+            transcribe_kw["temperature"] = temps
+        else:
+            transcribe_kw["temperature"] = t0
+        # batch_size는 의도적으로 안 넘김: faster-whisper의 BatchedInferencePipeline은
+        # no_speech_threshold/condition_on_previous_text/hallucination_silence_threshold를
+        # 문서상 "Unused Arguments"로 조용히 무시함. 참조 XXL 툴도 실측상 순차 처리로
+        # 동작했음(로그: "Starting sequential faster-whisper inference"). 순차 유지.
 
     try:
-        transcribe_kw["suppress_silence"] = True
         result = model.transcribe(str(wav_path), **transcribe_kw)
     except TypeError:
         transcribe_kw.pop("suppress_silence", None)

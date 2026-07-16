@@ -364,6 +364,37 @@ def _safe_cache_part(value: str) -> str:
     return text[:80] or "unknown"
 
 
+def purge_stale_translation_chunk_cache(*, ttl_days: float | None = None) -> int:
+    """`subtitle_translation_chunks` 캐시에서 TTL(기본 30일)보다 오래된 파일을 삭제.
+
+    fingerprint(프롬프트/모델 버전 등)가 바뀌면 캐시가 재사용되지 않고 계속 새로
+    쌓이기만 하는 구조라, 정리 코드가 없으면 작품 수·재처리 횟수에 비례해
+    파일 수가 무한정 증가한다. 반환값은 삭제한 파일 수.
+    """
+    if ttl_days is None:
+        raw = os.environ.get("JAVSTORY_TRANSLATION_CHUNK_CACHE_TTL_DAYS", "30").strip()
+        try:
+            ttl_days = float(raw) if raw else 30.0
+        except ValueError:
+            ttl_days = 30.0
+    if ttl_days <= 0:
+        return 0
+    cutoff = time.time() - ttl_days * 86400.0
+    removed = 0
+    try:
+        cache_dir = _translation_chunk_cache_dir()
+        for entry in cache_dir.glob("*.json"):
+            try:
+                if entry.stat().st_mtime < cutoff:
+                    entry.unlink()
+                    removed += 1
+            except OSError:
+                continue
+    except Exception:
+        pass
+    return removed
+
+
 def _translation_chunk_cache_path(product_code: str, fingerprint: Dict[str, Any]) -> Path | None:
     if not _translation_chunk_cache_enabled():
         return None

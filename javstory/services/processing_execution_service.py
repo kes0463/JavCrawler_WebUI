@@ -66,7 +66,6 @@ def run_stt_job(
     should_cancel: CancelFn | None = None,
 ) -> SttJobResult:
     from javstory.transcription.engine import (
-        STT_PRESET_DEFAULT,
         clear_vram,
         process_video_to_segments,
     )
@@ -147,7 +146,6 @@ def run_stt_job(
             logger_func=log_bridge,
             progress_callback=progress_event_bridge,
             on_content_line=on_content_line,
-            stt_preset=STT_PRESET_DEFAULT,
             should_cancel=should_cancel,
         )
         ja_srt = base_name + ".ja.srt"

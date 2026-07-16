@@ -23,8 +23,13 @@ from javstory.transcription.stt_types import (
     SimpleSegment,
     STT_PRESET_DEFAULT,
 )
-from javstory.transcription.stt_config import stt_engine_from_env, STT_ENGINE_LABELS
+from javstory.transcription.stt_config import (
+    stt_engine_from_env,
+    STT_ENGINE_LABELS,
+    STT_ENGINE_STABLE_TS_FW,
+)
 from javstory.transcription.stable_ts_pipeline import run_stt
+from javstory.transcription.fw_xxl_native import run_fw_native
 
 # stt_worker 호환 re-export
 __all__ = [
@@ -146,14 +151,26 @@ def process_video_to_segments(
         engine = normalize_stt_engine(stt_preset)
     label = STT_ENGINE_LABELS.get(engine, engine)
     prog(STTProgressEvent("init", 5, f"STT 파이프라인 시작 ({label})"))
-    interim_srt, _ = run_stt(
-        video_path=video_path,
-        work_dir=out_dir,
-        logger=log,
-        progress=prog,
-        should_cancel=should_cancel,
-        engine=engine,
-    )
+    if engine == STT_ENGINE_STABLE_TS_FW:
+        # 참조 Faster-Whisper-XXL 툴과 동일한 형태: ffmpeg 추출 → WhisperModel.transcribe()
+        # 직접 호출 → SRT. stable-ts VAD/후처리를 안 거침(별도 Silero VAD·재분할이
+        # 근접 무음 결과의 원인 후보였음).
+        interim_srt, _ = run_fw_native(
+            video_path=video_path,
+            work_dir=out_dir,
+            logger=log,
+            progress=prog,
+            should_cancel=should_cancel,
+        )
+    else:
+        interim_srt, _ = run_stt(
+            video_path=video_path,
+            work_dir=out_dir,
+            logger=log,
+            progress=prog,
+            should_cancel=should_cancel,
+            engine=engine,
+        )
 
     # 부분 쓰기 방지: 동일 디렉터리에 임시 파일로 쓴 뒤 원자적 교체
     tmp_dir = os.path.dirname(ja_srt_final) or "."

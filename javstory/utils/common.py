@@ -2,13 +2,24 @@
 
 from __future__ import annotations
 
+import sys
 import time
 from typing import Any, Callable
 
 
+def safe_console_print(text: str) -> None:
+    """print()가 콘솔 코드페이지(예: Windows cp949)에서 인코딩 못 하는 문자(이모지,
+    em-dash 등)를 만나도 죽지 않게 함 — 로그 한 줄 때문에 작업 전체가 실패하면 안 됨."""
+    try:
+        print(text, flush=True)
+    except UnicodeEncodeError:
+        enc = getattr(sys.stdout, "encoding", None) or "utf-8"
+        print(text.encode(enc, errors="replace").decode(enc, errors="replace"), flush=True)
+
+
 def log_ts(msg: str, *, tag: str = "") -> None:
     prefix = f" [{tag}]" if tag else ""
-    print(f"[{time.strftime('%H:%M:%S')}]{prefix} {msg}", flush=True)
+    safe_console_print(f"[{time.strftime('%H:%M:%S')}]{prefix} {msg}")
 
 
 def dedupe_preserve_order(

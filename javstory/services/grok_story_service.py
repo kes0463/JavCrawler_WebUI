@@ -12,6 +12,7 @@ from javstory.translation.story_grok_module import (
     run_story_grok_after_harvest_async,
     story_context_cache_path_grok,
 )
+from javstory.utils.common import safe_console_print
 
 _LOCK = threading.Lock()
 _RUNNING: set[str] = set()
@@ -87,7 +88,7 @@ def start_grok_story_generation(
             try:
 
                 def _log(msg: str, _pc: str = pc) -> None:
-                    print(f"[GrokStory][{_pc}] {msg}")
+                    safe_console_print(f"[GrokStory][{_pc}] {msg}")
 
                 asyncio.run(
                     run_story_grok_after_harvest_async(
@@ -98,7 +99,7 @@ def start_grok_story_generation(
                     )
                 )
             except Exception as e:
-                print(f"[GrokStory][{pc}] failed: {e}")
+                safe_console_print(f"[GrokStory][{pc}] failed: {e}")
             finally:
                 with _LOCK:
                     _RUNNING.discard(pc)

@@ -99,3 +99,7 @@ claude/
 # 폰트 (바이너리 대용량, 빌드 시 재다운로드)
 gui/fonts/*.ttf
 gui/fonts/*.otf
+
+# Crash dumps (수백 MB, 디버깅용 로컬 산출물)
+crashdumps/
+*.dmp

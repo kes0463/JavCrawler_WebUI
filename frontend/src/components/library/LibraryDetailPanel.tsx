@@ -1069,7 +1069,7 @@ export function LibraryDetailPanel({
                   </div>
 
                   {(detail.overall_summary || detail.synopsis_ko || detail.synopsis_ja) && (
-                    <div className="mt-5 flex-1 min-h-0">
+                    <div className="mt-5">
                       <p className="text-xl font-semibold text-slate-300 mb-2">시놉시스</p>
                       <p className="text-2xl text-[#e8e8f4] leading-relaxed whitespace-pre-wrap">
                         {detail.overall_summary || detail.synopsis_ko || detail.synopsis_ja}

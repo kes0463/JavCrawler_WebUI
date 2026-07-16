@@ -246,6 +246,15 @@ export default function SettingsView() {
     setSttDraft(d => ({ ...d, fw_xxl: { ...d.fw_xxl, [key]: value } }));
   };
 
+  const handleResetFwXxlDefaults = () => {
+    setSttDraft(d => ({
+      ...d,
+      fw_xxl: fwXxlToDraft(DEFAULT_FW_XXL),
+      vad_threshold: String(DEFAULT_FW_XXL.vad_threshold),
+    }));
+    showToast("Faster-Whisper-XXL 옵션을 기본값으로 초기화했습니다 (저장 필요)", "info");
+  };
+
   const engineOptions = (stt?.engine_options ?? [])
     .filter(o => o.implemented)
     .map(o => ({ label: o.label, value: o.id }));
@@ -593,11 +602,21 @@ export default function SettingsView() {
                   />
                 </SettingsRow>
 
-                <div className="pt-2 pb-1 border-t border-white/5">
-                  <p className="text-sm font-medium text-white/90">Faster-Whisper-XXL 세부 옵션</p>
-                  <p className="text-xs text-muted-foreground mt-0.5">
-                    language=ja · VAD·beam·temperature 등 XXL CLI 대응 값
-                  </p>
+                <div className="pt-2 pb-1 border-t border-white/5 flex items-start justify-between gap-3">
+                  <div>
+                    <p className="text-sm font-medium text-white/90">Faster-Whisper-XXL 세부 옵션</p>
+                    <p className="text-xs text-muted-foreground mt-0.5">
+                      language=ja · VAD·beam·temperature 등 XXL CLI 대응 값
+                    </p>
+                  </div>
+                  <ActionButton
+                    variant="ghost"
+                    size="sm"
+                    icon={<RotateCcw className="w-3.5 h-3.5" />}
+                    onClick={handleResetFwXxlDefaults}
+                  >
+                    기본값으로 초기화
+                  </ActionButton>
                 </div>
 
                 <SettingsRow label="Language" hint="--language">
