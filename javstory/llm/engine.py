@@ -455,14 +455,22 @@ class MultiTierRouter:
             model_id = tier["model"]
             temperature = float(tier.get("temperature", 0.3))
             max_tokens = tier.get("max_tokens", None)
+            try:
+                max_attempts = int(tier.get("max_retries", 4) or 4)
+            except (TypeError, ValueError):
+                max_attempts = 4
+            max_attempts = max(1, min(4, max_attempts))
 
-            for attempt in range(4):
+            for attempt in range(max_attempts):
                 try:
                     # [로깅 고도화] 매 시도마다 시각적 피드백 제공
                     if attempt == 0:
                         self.logger(f"  [Router] 사용 중: {model_name} ({model_id})")
                     else:
-                        self.logger(f"  [Router] 사용 중: {model_name} | {attempt+1}/4회차 재시도 중...")
+                        self.logger(
+                            f"  [Router] 사용 중: {model_name} | "
+                            f"{attempt+1}/{max_attempts}회차 재시도 중..."
+                        )
 
                     content = await self.call_model(
                         tier,

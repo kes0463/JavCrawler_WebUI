@@ -1,3 +1,4 @@
+import asyncio
 import json
 import keyring
 from typing import Optional
@@ -9,7 +10,13 @@ if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
 from javstory.llm.engine import MultiTierRouter
-from javstory.config.app_config import KEYRING_SERVICE_NAME, KEYRING_ACCOUNT_OPENROUTER, harvest_translation_llm_tier
+from javstory.config.app_config import (
+    KEYRING_SERVICE_NAME,
+    KEYRING_ACCOUNT_OPENROUTER,
+    harvest_translation_llm_tier,
+    harvest_translation_timeout_sec,
+)
+from javstory.utils.common import safe_console_print
 
 class MetadataTranslator:
     """
@@ -24,7 +31,7 @@ class MetadataTranslator:
         if not api_key:
             api_key = keyring.get_password(KEYRING_SERVICE_NAME, KEYRING_ACCOUNT_OPENROUTER)
 
-        self.logger = logger_func if logger_func else print
+        self.logger = logger_func if logger_func else safe_console_print
         # llama.cpp / Ollama는 OpenRouter 키 없이도 동작
         self.router = MultiTierRouter(api_key or "local", logger_func=self.logger)
 
@@ -72,16 +79,42 @@ Return ONLY a valid JSON object. No markdown code blocks.
 
         messages = [
             {"role": "system", "content": system_prompt},
-            {"role": "user", "content": json.dumps(user_content, ensure_ascii=False)}
+            {
+                "role": "user",
+                # /no_think: Qwen3 계열은 기본적으로 답변 전에 내부 사고(thinking) 블록을
+                # 먼저 생성함 — JSON 출력만 필요한 번역 작업엔 불필요하고, 그 사고 과정에
+                # 토큰/시간 예산을 다 써버려 실제 JSON(특히 마지막 synopsis_ko 필드)이
+                # 타임아웃에 잘리는 원인이었다. Qwen3 공식 컨벤션으로 억제.
+                "content": json.dumps(user_content, ensure_ascii=False) + "\n\n/no_think",
+            }
         ]
 
+        tier = harvest_translation_llm_tier()
+        # Outer hard budget so a stuck llama-server cannot freeze harvest forever.
+        hard_timeout = float(tier.get("timeout") or harvest_translation_timeout_sec()) + 20.0
+        self.logger(
+            f"[Translator] {product_code} → {tier.get('provider')}:{tier.get('model')} "
+            f"(timeout={tier.get('timeout')}s, max_tokens={tier.get('max_tokens')}, "
+            f"retries={tier.get('max_retries', 1)})"
+        )
         try:
-            raw_res = await self.router.route(messages, tier_override=harvest_translation_llm_tier())
+            raw_res = await asyncio.wait_for(
+                self.router.route(messages, tier_override=tier),
+                timeout=hard_timeout,
+            )
             json_str = self._extract_json(raw_res)
             parsed = json.loads(json_str)
             if not isinstance(parsed, dict):
                 raise ValueError(f"번역 결과가 dict가 아님: {type(parsed).__name__}")
             return parsed
+        except asyncio.TimeoutError:
+            self.logger(
+                f"[Translator] 일괄 번역 타임아웃 ({product_code}, {hard_timeout:.0f}s) — "
+                "제목만 저장하고 계속합니다. "
+                "JAVSTORY_HARVEST_TRANSLATION_MODEL 을 더 작은 모델로 바꾸거나 "
+                "OpenRouter를 쓰면 빨라집니다."
+            )
+            return {}
         except Exception as e:
             self.logger(f"[Translator] 일괄 번역 실패 ({product_code}): {type(e).__name__}: {e}")
             return {}

@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback, useRef } from "react";
 import { Search, SlidersHorizontal, FolderOpen, FolderX, RefreshCw, Subtitles, Layers, Heart, Bookmark, Loader2, SquareCheck, Square, X } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { fetchLibraryListed, fetchLibraryGenresResilient, fetchLibraryStats, coverUrl, previewUrl, openLibraryFolder, hasRealLibraryMetadata, clearLibraryGenreScanCache, probeLibraryGenreFilterSupport, prefetchLibraryClientIndex, isClientLibraryIndexReady, backfillLibraryEmbeddings, rescanLibraryFlags, startGrokStory, startGrokStoryBatch, toggleLibraryLike, toggleLibraryWatchLater } from "@/api/library";
+import { addToQueue, recrawlProducts } from "@/api/harvest";
 import type { LibraryItem, LibraryStats, LibraryQuery, LibraryGenreItem, LibrarySearchMode } from "@/api/library";
 import { GlassCard } from "@/components/ui/GlassCard";
 import { Skeleton } from "@/components/ui/Skeleton";
@@ -396,6 +397,18 @@ export default function LibraryView() {
   const handleAddToProcessing = useCallback((codes: string[], kind: ProcessingKind) => {
     void enqueueLibraryProducts(codes, kind);
   }, [enqueueLibraryProducts]);
+
+  const handleCrawl = useCallback((codes: string[]) => {
+    void addToQueue(codes, true)
+      .then(() => showToast(codes.length === 1 ? `${codes[0]} 크롤링 시작` : `${codes.length}개 크롤링 시작`, "success"))
+      .catch(err => showToast(err instanceof Error ? err.message : "크롤링 시작 실패", "error"));
+  }, [showToast]);
+
+  const handleRecrawl = useCallback((codes: string[]) => {
+    void recrawlProducts(codes, true)
+      .then(() => showToast(codes.length === 1 ? `${codes[0]} 재크롤링 시작` : `${codes.length}개 재크롤링 시작`, "success"))
+      .catch(err => showToast(err instanceof Error ? err.message : "재크롤링 시작 실패", "error"));
+  }, [showToast]);
 
   const handleGrokStory = useCallback((codes: string[]) => {
     const run =
@@ -932,6 +945,8 @@ export default function LibraryView() {
             onPlay={item.folder_path ? () => handlePlay(item.product_code) : undefined}
             onOpenFolder={() => handleOpenFolder(item.product_code)}
             onAddToProcessing={(kind, codes) => handleAddToProcessing(codes, kind)}
+            onCrawl={codes => handleCrawl(codes)}
+            onRecrawl={codes => handleRecrawl(codes)}
             onGrokStory={codes => handleGrokStory(codes)}
             onToggleLike={codes => handleToggleLike(codes)}
             onToggleWatchLater={codes => handleToggleWatchLater(codes)}

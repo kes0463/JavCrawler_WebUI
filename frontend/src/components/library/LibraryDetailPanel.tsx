@@ -1070,7 +1070,14 @@ export function LibraryDetailPanel({
 
                   {(detail.overall_summary || detail.synopsis_ko || detail.synopsis_ja) && (
                     <div className="mt-5">
-                      <p className="text-xl font-semibold text-slate-300 mb-2">시놉시스</p>
+                      <p className="text-xl font-semibold text-slate-300 mb-2">
+                        시놉시스
+                        {!detail.overall_summary &&
+                        !(detail.synopsis_ko || "").trim() &&
+                        (detail.synopsis_ja || "").trim()
+                          ? " (일본어 원문 · KO 번역 없음)"
+                          : ""}
+                      </p>
                       <p className="text-2xl text-[#e8e8f4] leading-relaxed whitespace-pre-wrap">
                         {detail.overall_summary || detail.synopsis_ko || detail.synopsis_ja}
                       </p>

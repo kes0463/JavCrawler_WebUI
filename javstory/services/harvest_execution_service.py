@@ -40,7 +40,9 @@ def resolve_sku(entry: HarvestEntry) -> str:
 
 
 def _default_log(level: str, text: str) -> None:
-    print(f"[{level}] {text}", flush=True)
+    from javstory.utils.common import safe_console_print
+
+    safe_console_print(f"[{level}] {text}")
 
 
 def _translation_queue_available() -> bool:

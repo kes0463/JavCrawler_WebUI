@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 from javstory.config.app_config import ENV_DB_V2_READ
 from javstory.harvest.database import JAVMetadata, Product, VideoFile, get_db_session_ctx
 from javstory.library.media_parts import build_video_part_refs
+from javstory.utils.common import safe_console_print as print  # noqa: A001 - Windows cp949 콘솔 안전 print
 
 
 def normalize_sku(product_code: str) -> str:

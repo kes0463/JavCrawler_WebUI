@@ -6,6 +6,7 @@ import asyncio
 from urllib.parse import urlparse
 
 from javstory.config.app_config import E_MEDIA_ROOT, MEDIA_ROOT, WESERV_IMAGE_PROXY
+from javstory.utils.common import safe_console_print as print  # noqa: A001 - Windows cp949 콘솔 안전 print
 
 class MetadataAssetsHandler:
     """

@@ -645,6 +645,48 @@ def _harvest_translation_model_default() -> str:
     return "openrouter:deepseek/deepseek-v3.2"
 
 
+def harvest_translation_timeout_sec() -> int:
+    """Harvest title/synopsis translation hard budget (seconds).
+
+    Default 90 — large local models (e.g. qwen3-14b) otherwise sit on GPU for
+    10+ minutes with 4 router retries and freeze the machine.
+    Override: JAVSTORY_HARVEST_TRANSLATION_TIMEOUT
+    """
+    raw = (os.environ.get("JAVSTORY_HARVEST_TRANSLATION_TIMEOUT", "") or "").strip()
+    try:
+        n = int(raw) if raw else 90
+    except ValueError:
+        n = 90
+    return max(30, min(300, n))
+
+
+def harvest_translation_max_tokens() -> int:
+    """Title+synopsis JSON is small; cap generation length for speed/VRAM."""
+    raw = (os.environ.get("JAVSTORY_HARVEST_TRANSLATION_MAX_TOKENS", "") or "").strip()
+    try:
+        n = int(raw) if raw else 1024
+    except ValueError:
+        n = 1024
+    return max(256, min(4096, n))
+
+
+def _apply_harvest_translation_budget(tier: dict) -> dict:
+    """Clamp timeout / max_tokens / retries for harvest metadata translation only."""
+    t = dict(tier)
+    budget = harvest_translation_timeout_sec()
+    # Prefer harvest budget over translation_llm_tier_llamacpp()'s 600s default
+    prev = int(t.get("timeout") or budget)
+    t["timeout"] = min(prev, budget)
+    t["max_tokens"] = harvest_translation_max_tokens()
+    # 1 attempt only — no 4× backoff thrash on a 14B local load
+    t["max_retries"] = int(t.get("max_retries") or 1)
+    if t["max_retries"] < 1:
+        t["max_retries"] = 1
+    if t["max_retries"] > 2:
+        t["max_retries"] = 2
+    return t
+
+
 def harvest_translation_llm_tier() -> dict:
     raw = platform_env_value(
         "JAVSTORY_HARVEST_TRANSLATION_MODEL",
@@ -656,29 +698,33 @@ def harvest_translation_llm_tier() -> dict:
         model = raw.split(":", 1)[1].strip() if ":" in raw else "gemini-2.0-flash"
         model = model or "gemini-2.0-flash"
         meta = GEMINI_MODELS.get(model, {})
-        return {
-            "rank": 99,
-            "name": "harvest_translation_gemini",
-            "model": model,
-            "provider": "gemini",
-            "cost_tier": "high" if meta.get("is_pro") else "low",
-            "uncensored": False,
-            "timeout": 120,
-            "max_ctx": 1_000_000,
-        }
+        return _apply_harvest_translation_budget(
+            {
+                "rank": 99,
+                "name": "harvest_translation_gemini",
+                "model": model,
+                "provider": "gemini",
+                "cost_tier": "high" if meta.get("is_pro") else "low",
+                "uncensored": False,
+                "timeout": 120,
+                "max_ctx": 1_000_000,
+            }
+        )
 
     if v.startswith("ollama:"):
         model = raw.split(":", 1)[1].strip() if ":" in raw else "gemma4:e4b"
-        return {
-            "rank": 99,
-            "name": "harvest_translation_ollama",
-            "model": model or "gemma4:e4b",
-            "provider": "ollama",
-            "cost_tier": "free",
-            "uncensored": False,
-            "timeout": 300,
-            "max_ctx": 8192,
-        }
+        return _apply_harvest_translation_budget(
+            {
+                "rank": 99,
+                "name": "harvest_translation_ollama",
+                "model": model or "gemma4:e4b",
+                "provider": "ollama",
+                "cost_tier": "free",
+                "uncensored": False,
+                "timeout": 120,
+                "max_ctx": 8192,
+            }
+        )
 
     if v.startswith("llamacpp:"):
         model = raw.split(":", 1)[1].strip() if ":" in raw else "gemma-4-e4b"
@@ -689,20 +735,22 @@ def harvest_translation_llm_tier() -> dict:
         tier["model"] = preset.serve_alias or preset.id
         tier["llamacpp_preset"] = preset.id
         tier["name"] = "harvest_translation_llamacpp"
-        return tier
+        return _apply_harvest_translation_budget(tier)
 
     if v.startswith("openrouter:"):
         model = raw.split(":", 1)[1].strip() if ":" in raw else "deepseek/deepseek-v3.2"
-        return {
-            "rank": 99,
-            "name": "harvest_translation_openrouter",
-            "model": model or "deepseek/deepseek-v3.2",
-            "provider": "openrouter",
-            "cost_tier": "low",
-            "uncensored": False,
-            "timeout": 180,
-            "max_ctx": 64000,
-        }
+        return _apply_harvest_translation_budget(
+            {
+                "rank": 99,
+                "name": "harvest_translation_openrouter",
+                "model": model or "deepseek/deepseek-v3.2",
+                "provider": "openrouter",
+                "cost_tier": "low",
+                "uncensored": False,
+                "timeout": 120,
+                "max_ctx": 64000,
+            }
+        )
 
     # fallback: plain preset id → llama.cpp
     from javstory.llm.llamacpp_backend import resolve_llamacpp_preset
@@ -713,7 +761,7 @@ def harvest_translation_llm_tier() -> dict:
     tier["model"] = preset.serve_alias or preset.id
     tier["llamacpp_preset"] = preset.id
     tier["name"] = "harvest_translation_llamacpp"
-    return tier
+    return _apply_harvest_translation_budget(tier)
 
 
 # ============================================================

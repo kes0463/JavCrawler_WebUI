@@ -8,6 +8,7 @@ from javstory.utils.actress_profile import (
     normalize_actor_name_key,
 )
 from javstory.utils.common import dedupe_preserve_order
+from javstory.utils.common import safe_console_print as print  # noqa: A001 - Windows cp949 콘솔 안전 print
 
 
 def _display_names_from_row(row: Actress, crawled_name: str) -> tuple[str, str, str]:

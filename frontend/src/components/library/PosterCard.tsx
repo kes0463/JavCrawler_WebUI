@@ -43,6 +43,8 @@ interface PosterCardProps {
   onPlay?: () => void;
   onActorClick?: (name: string) => void;
   onAddToProcessing?: (kind: ProcessingKind, codes: string[]) => void;
+  onCrawl?: (codes: string[]) => void;
+  onRecrawl?: (codes: string[]) => void;
   onGrokStory?: (codes: string[]) => void;
   onToggleLike?: (codes: string[]) => void;
   onToggleWatchLater?: (codes: string[]) => void;
@@ -81,6 +83,8 @@ export const PosterCard = memo(function PosterCard({
   onPlay,
   onActorClick,
   onAddToProcessing,
+  onCrawl,
+  onRecrawl,
   onGrokStory,
   onToggleLike,
   onToggleWatchLater,
@@ -323,6 +327,8 @@ export const PosterCard = memo(function PosterCard({
           onClose={() => setMenuOpen(false)}
           onAddStt={() => onAddToProcessing("stt", menuCodes)}
           onAddSubtitle={() => onAddToProcessing("subtitle", menuCodes)}
+          onCrawl={onCrawl ? () => onCrawl(menuCodes) : undefined}
+          onRecrawl={onRecrawl ? () => onRecrawl(menuCodes) : undefined}
           onGrokStory={onGrokStory ? () => onGrokStory(menuCodes) : undefined}
           onToggleLike={onToggleLike ? () => onToggleLike(menuCodes) : undefined}
           onToggleWatchLater={onToggleWatchLater ? () => onToggleWatchLater(menuCodes) : undefined}

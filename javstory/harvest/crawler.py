@@ -40,6 +40,10 @@ try:
     from javstory.harvest.scrapers import avwiki
 except Exception:  # pragma: no cover
     avwiki = None  # type: ignore
+try:
+    from javstory.harvest.scrapers import av_wiki_net_scraper
+except Exception:  # pragma: no cover
+    av_wiki_net_scraper = None  # type: ignore
 
 # njavtv.com 정밀 셀렉터 (nth-child 체인 금지)
 NJAV_TITLE_SELECTORS = ("css:h1.text-nord6", "tag:h1")
@@ -384,12 +388,23 @@ def _merge_empty_only(base: dict[str, Any], extra: dict[str, Any], *, source: st
 
 
 def _needs_fallback(d: dict[str, Any]) -> bool:
-    """title·cover가 없거나 제목이 리다이렉트 안내 문구일 때만 다음 소스 시도."""
+    """title·cover·synopsis 중 하나라도 없거나 제목이 리다이렉트 안내 문구일 때 다음 소스 시도.
+
+    synopsis 누락은 과거엔 폴백 트리거가 아니었음 — 1순위 소스가 title/cover만
+    채우고 시놉시스가 비면 그 상태로 체인이 조기 종료돼, 시놉시스 없는 작품이
+    "정상 수집"으로 저장되는 문제가 있었다. `_merge_empty_only`가 이미 필드 단위로
+    빈 값만 채우므로, 이미 채워진 title/cover/actors 등은 다음 소스로 덮어써지지 않는다.
+
+    njavtv(Playwright/DrissionPage) 단계는 건당 수 분이 걸릴 수 있지만, synopsis만
+    빠진 경우에도 의도적으로 계속 시도한다(사용자 확인 — 느리더라도 njavtv를
+    건너뛰지 말 것).
+    """
     from javstory.harvest.scrapers.av123_scraper import _is_boilerplate_title
 
     title = str(d.get("title") or "").strip()
     cover = str(d.get("cover_url") or "").strip()
-    if (not title) or (not cover) or title == "제목 없음" or cover == "이미지 누락":
+    synopsis = str(d.get("synopsis") or "").strip()
+    if (not title) or (not cover) or (not synopsis) or title == "제목 없음" or cover == "이미지 누락":
         return True
     if _is_boilerplate_title(title):
         return True
@@ -473,6 +488,36 @@ def _scrape_avwiki(product_code: str, *, use_playwright: bool = False) -> dict[s
         "maker": str(getattr(info, "maker", "") or "").strip(),
         "_source": "avwiki_pw" if use_playwright else "avwiki",
     }
+
+def _needs_actress_fallback(d: dict[str, Any]) -> bool:
+    """av-wiki.net(5순위, 최종 폴백)을 시도할지 — 배우 식별 전문 사이트라 시놉시스가
+    없으므로, synopsis 누락만으로는 트리거하지 않고 배우 정보가 비어있을 때만 시도한다.
+    """
+    actors = _ensure_list_str(d.get("actors"))
+    if not actors:
+        return True
+    title = str(d.get("title") or "").strip()
+    cover = str(d.get("cover_url") or "").strip()
+    return (not title) or (not cover)
+
+
+def _scrape_avwikinet(product_code: str) -> dict[str, Any]:
+    if av_wiki_net_scraper is None:
+        return {}
+    info = av_wiki_net_scraper.fetch_actress_info(product_code)
+    from javstory.utils.actress_profile import dedupe_crawled_actor_tokens
+
+    actors = dedupe_crawled_actor_tokens([a for a in (info.actresses or []) if a])
+    return {
+        # av-wiki.net 제목은 "{작품 요약}...에 출연한 AV여배우는 누구? 이름은?" 형식의
+        # 블로그 헤드라인이라 작품 제목으로 부적합 — title/synopsis는 채우지 않음.
+        "cover_url": str(info.cover_url or "").strip(),
+        "actors": actors,
+        "release_date": str(info.release_date or "").strip(),
+        "maker": str(info.maker or "").strip(),
+        "_source": "avwikinet",
+    }
+
 
 class HybridJavCrawler:
     def __init__(self) -> None:
@@ -710,7 +755,7 @@ class HybridJavCrawler:
 
         if _needs_fallback(out):
             log_ts(f"[Hybrid] 4순위(njavtv): 최종 재시도(Headless) : {code}")
-            await asyncio.sleep(4)
+            await asyncio.sleep(2)
             for nj_url in njavtv_detail_urls(code):
                 raw3 = await asyncio.to_thread(
                     self.get_local_page_data,
@@ -723,6 +768,15 @@ class HybridJavCrawler:
                     nj3["_final_url"] = raw3.get("_final_url") or raw3.get("final_url")
                     out = _merge_empty_only(out, nj3, source="njavtv_dp_retry")
                     break
+
+        # 5) av-wiki.net (배우 식별 전문 — 최종 폴백, 시놉시스 없음)
+        if _needs_actress_fallback(out):
+            log_ts(f"[Hybrid] 5순위(av-wiki.net): 배우/커버 보완 시도: {code}")
+            try:
+                d = await asyncio.to_thread(_scrape_avwikinet, code)
+                out = _merge_empty_only(out, d, source="avwikinet")
+            except Exception:
+                pass
 
         # 최소 결과 검증: title/synopsis/cover_url 중 하나라도 있어야 성공으로 취급
         if not _raw_has_any_content(out):

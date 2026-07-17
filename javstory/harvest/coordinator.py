@@ -66,6 +66,28 @@ def _looks_like_ja(text: str) -> bool:
     return (cnt["hiragana"] + cnt["katakana"]) > 0 or (cnt["cjk"] > 0 and cnt["hangul"] == 0 and cnt["latin"] == 0)
 
 
+def _is_proper_korean(text: str, *, min_hangul: int = 2) -> bool:
+    """한국어 KO 필드 적합성: 한글이 있고, 일본어 가나가 실질적으로 없어야 함.
+
+    로컬 LLM이 synopsis_ko에 일본어 원문을 그대로 넣는 경우가 있어,
+    '한글 2글자 이상'만으로는 부족하고 가나 혼입을 거부한다.
+    """
+    t = (text or "").strip()
+    if not t:
+        return False
+    if not _looks_like_ko(t, min_hangul=min_hangul):
+        return False
+    cnt = _script_counts(t)
+    # 히라/가타 3자 이상이면 일본어 시놉시스로 간주 (한자+가나)
+    if cnt["hiragana"] + cnt["katakana"] >= 3:
+        return False
+    # 한글이 가나+한자보다 현저히 적으면 KO로 보지 않음
+    ja_weight = cnt["hiragana"] + cnt["katakana"] + max(0, cnt["cjk"] // 2)
+    if cnt["hangul"] < 2 and ja_weight >= 4:
+        return False
+    return True
+
+
 def _harvest_should_run_story_context(explicit: bool | None) -> bool:
     """None이면 `JAVSTORY_STORY_ANALYSIS_ENABLED`와 동일(자막 오케스트레이터 기본과 맞춤)."""
     if explicit is False:
@@ -205,17 +227,25 @@ async def run_crawler_for_video_path(
                     # [핵심] KO 필드가 "비어있지 않음"만으로는 불충분.
                     # 일본어 원문이 KO 칼럼에 들어간 경우(마이그레이션/초기 저장) 번역을 재시도해야 한다.
                     ko_title_ok = (
+                        _is_proper_korean(title_ko, min_hangul=1)
+                        and not _is_boilerplate_title(title_ko)
+                    ) or (
+                        # 제목은 짧은 경우가 있어 hangul 1 + 가나 거의 없음도 허용
                         _looks_like_ko(title_ko, min_hangul=1)
+                        and not _looks_like_ja(title_ko)
                         and not _is_boilerplate_title(title_ko)
                     )
-                    ko_syn_ok = _looks_like_ko(syn_ko, min_hangul=2)  # 시놉시스는 2글자 이상 한글 기대
+                    ko_syn_ok = _is_proper_korean(syn_ko, min_hangul=2)
                     ko_is_probably_ja = _looks_like_ja(title_ko) or _looks_like_ja(syn_ko)
                     has_ko_ok = bool(has_ko_raw and ko_title_ok and ko_syn_ok and (not ko_is_probably_ja))
 
                     # KO 필드가 채워져 있어도 "정해진 언어(한국어)"로 보이지 않으면 번역 필요로 간주
                     if has_ko_raw and (not has_ko_ok):
                         needs_translation = True
-                        log_ts(f"⚠️ {code} KO 필드가 한국어로 보이지 않아 번역을 재시도합니다.")
+                        log_ts(
+                            f"⚠️ {code} KO 필드가 한국어로 보이지 않아 번역을 재시도합니다. "
+                            f"(title_ko_ok={ko_title_ok}, synopsis_ko_ok={ko_syn_ok})"
+                        )
 
                     # DB에 JA 원본 + KO가 한국어로 올바르게 저장돼 있으면 번역은 스킵(초기값이 True여도 무조건 스킵)
                     if has_ja_text and has_ko_ok and not force_rebuild_story_context and not meta_title_bad:
@@ -342,7 +372,7 @@ async def run_crawler_for_video_path(
                     title_for_translation = ja_candidate
 
             raw_syn = str(raw_synopsis or "").strip()
-            syn_already_ko = bool(raw_syn) and _looks_like_ko(raw_syn, min_hangul=2)
+            syn_already_ko = bool(raw_syn) and _is_proper_korean(raw_syn, min_hangul=2)
             # 제목·시놉시스가 이미 한국어면 LLM 생략
             if scrape_title_ko and (not raw_syn or syn_already_ko):
                 trans_res = {
@@ -357,7 +387,24 @@ async def run_crawler_for_video_path(
                 }
                 log_ts(f"✅ {code} 수집 메타가 이미 한국어라 AI 번역을 생략합니다.")
             else:
-                log_ts(f"🚀 AI 한국어 번역 중…")
+                try:
+                    from javstory.config.app_config import harvest_translation_llm_tier
+                    from javstory.transcription.stt_runtime import is_cuda_decode_busy
+
+                    _ht = harvest_translation_llm_tier()
+                    log_ts(
+                        f"🚀 AI 한국어 번역 중… "
+                        f"({_ht.get('provider')}:{_ht.get('model')}, "
+                        f"timeout={_ht.get('timeout')}s)"
+                    )
+                    if is_cuda_decode_busy():
+                        log_ts(
+                            f"⚠️ {code} STT/GPU 디코드가 아직 바쁨 — "
+                            "로컬 대모델 번역이 매우 느려질 수 있습니다. "
+                            "가능하면 STT 종료 후 재수확하세요."
+                        )
+                except Exception:
+                    log_ts(f"🚀 AI 한국어 번역 중…")
                 if progress_cb:
                     progress_cb(code, "AI 한국어 번역 중…", 45)
                 trans_res = await translator.translate_metadata_batch(
@@ -380,6 +427,37 @@ async def run_crawler_for_video_path(
                             if original_title and not _is_boilerplate_title(original_title)
                             else title_for_translation
                         )
+
+                # 시놉시스 KO가 일본어로 나온 경우 1회만 재시도.
+                # 첫 호출이 완전 실패(빈 dict)면 재시도하지 않음 — 대모델 이중 로드로 PC 정지 방지.
+                _syn_try = str(trans_res.get("synopsis_ko") or "").strip()
+                if (
+                    trans_res
+                    and raw_syn
+                    and (not _is_proper_korean(_syn_try, min_hangul=2))
+                ):
+                    log_ts(
+                        f"⚠️ {code} synopsis_ko가 한국어가 아님 — 시놉시스 번역 1회 재시도"
+                    )
+                    if progress_cb:
+                        progress_cb(code, "시놉시스 한국어 재번역…", 48)
+                    retry = await translator.translate_metadata_batch(
+                        code,
+                        title_for_translation,
+                        raw_synopsis,
+                        actors=raw_actors,
+                        genres=raw_genres,
+                        maker=raw_maker,
+                        approved_terms=approved_terms,
+                    )
+                    if isinstance(retry, dict) and retry:
+                        r_syn = str(retry.get("synopsis_ko") or "").strip()
+                        if _is_proper_korean(r_syn, min_hangul=2):
+                            trans_res["synopsis_ko"] = r_syn
+                        if not (trans_res.get("title_ko") or "").strip():
+                            trans_res["title_ko"] = str(retry.get("title_ko") or "").strip()
+                        if not (trans_res.get("synopsis_ja") or "").strip() and retry.get("synopsis_ja"):
+                            trans_res["synopsis_ja"] = str(retry.get("synopsis_ja") or "").strip()
 
                 # LLM 실패 시: 이미 있는 한국어/원문·폴더명으로 부분 폴백 (전체 실패 방지)
                 if not trans_res:
@@ -410,7 +488,8 @@ async def run_crawler_for_video_path(
                             else (title_for_translation if not _has_hangul(title_for_translation) else "")
                         ),
                         "title_ko": fb_title_ko,
-                        "synopsis_ja": raw_syn if raw_syn and not _looks_like_ko(raw_syn, min_hangul=2) else "",
+                        "synopsis_ja": raw_syn if raw_syn and not _is_proper_korean(raw_syn, min_hangul=2) else "",
+                        # 일본어 원문을 synopsis_ko에 넣지 않음 (UI가 일본어로 보이는 원인)
                         "synopsis_ko": raw_syn if syn_already_ko else "",
                     }
                     log_ts(
@@ -419,7 +498,7 @@ async def run_crawler_for_video_path(
 
             # 검증:
             # - 제목 KO는 필수
-            # - 시놉시스 KO는 "원문 시놉시스가 비어있던 케이스"면 비어있어도 부분 성공으로 허용
+            # - 시놉시스 KO는 한국어여야 함. 일본어면 비워 synopsis_ja만 남김
             _title_ko = str((trans_res or {}).get("title_ko") or "").strip()
             _syn_ko = str((trans_res or {}).get("synopsis_ko") or "").strip()
             _raw_syn = str(raw_synopsis or "").strip()
@@ -428,10 +507,20 @@ async def run_crawler_for_video_path(
                 log_ts(f"❌ {code} 번역 실패: KO 제목이 비어 있습니다.")
                 return {"error": "translation_failed_missing_ko", "product_code": code}
 
+            if _raw_syn and _syn_ko and not _is_proper_korean(_syn_ko, min_hangul=2):
+                log_ts(
+                    f"⚠️ {code} synopsis_ko가 여전히 일본어/비한국어 — "
+                    "synopsis_ko를 비우고 synopsis_ja만 보존합니다."
+                )
+                trans_res["synopsis_ko"] = ""
+                if not (trans_res.get("synopsis_ja") or "").strip():
+                    trans_res["synopsis_ja"] = _raw_syn
+                _syn_ko = ""
+
             if (not _syn_ko) and (not _raw_syn):
                 pass
             elif not _syn_ko:
-                if _looks_like_ko(_raw_syn, min_hangul=2):
+                if _is_proper_korean(_raw_syn, min_hangul=2):
                     trans_res["synopsis_ko"] = _raw_syn
                 else:
                     # 원문 시놉시스는 있으나 KO 번역 실패 → 제목만이라도 저장
@@ -481,7 +570,12 @@ async def run_crawler_for_video_path(
             }
             synopses = {
                 "synopsis_ja": _s_ja,
-                "synopsis_ko": trans_res.get("synopsis_ko", raw_synopsis),
+                # trans_res.get(..., raw_synopsis) 폴백은 KO 번역이 실패했을 때(dict에
+                # 키가 없을 때) 미번역 일본어 원문을 "번역 결과"인 것처럼 synopsis_ko에
+                # 그대로 저장하는 버그였다 — 번역 안 됐으면 빈 문자열로 남겨야
+                # UI(LibraryDetailPanel)의 overall_summary/synopsis_ko/synopsis_ja
+                # 폴백 체인이 정상적으로 synopsis_ja를 보여준다.
+                "synopsis_ko": trans_res.get("synopsis_ko") or "",
                 "synopsis_en": _s_ja,
                 "synopsis_zh_cn": _s_ja,
                 "synopsis_zh_tw": _s_ja,
@@ -535,6 +629,9 @@ async def run_crawler_for_video_path(
                 folder_path=(stored_folder_path or db_folder_path),
                 favorite_score=db_favorite_score,
                 favorite_sources=db_favorite_sources,
+                # 정상 저장 경로이므로 이전 실패(FAILED_CRAWL) 흔적을 지운다 — 안 그러면
+                # 재크롤이 성공해도 라이브러리에서 계속 "미수집"으로 표시된다.
+                analysis_status=None,
             )
 
             # 폴더/영상 경로가 확정되는 시점에 1회 마커 감지 후 DB 저장

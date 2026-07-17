@@ -1,6 +1,6 @@
 import { useEffect, useRef, type ReactNode } from "react";
 import { createPortal } from "react-dom";
-import { Bookmark, FileAudio, FolderOpen, Heart, Languages, Play, ScanEye, Sparkles } from "lucide-react";
+import { Bookmark, Download, FileAudio, FolderOpen, Heart, Languages, Play, RefreshCw, ScanEye, Sparkles } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 export interface PosterCardContextMenuProps {
@@ -13,6 +13,8 @@ export interface PosterCardContextMenuProps {
   onClose: () => void;
   onAddStt: () => void;
   onAddSubtitle: () => void;
+  onCrawl?: () => void;
+  onRecrawl?: () => void;
   onGrokStory?: () => void;
   onToggleLike?: () => void;
   onToggleWatchLater?: () => void;
@@ -66,6 +68,8 @@ export function PosterCardContextMenu({
   onClose,
   onAddStt,
   onAddSubtitle,
+  onCrawl,
+  onRecrawl,
   onGrokStory,
   onToggleLike,
   onToggleWatchLater,
@@ -143,6 +147,27 @@ export function PosterCardContextMenu({
           onClick={() => {
             onClose();
             onGrokStory();
+          }}
+        />
+      )}
+      {(onCrawl || onRecrawl) && <MenuDivider />}
+      {onCrawl && (
+        <MenuItem
+          icon={<Download className="w-4 h-4 text-emerald-300 shrink-0" />}
+          label={multi ? `${labelPrefix} 크롤링` : "크롤링"}
+          onClick={() => {
+            onClose();
+            onCrawl();
+          }}
+        />
+      )}
+      {onRecrawl && (
+        <MenuItem
+          icon={<RefreshCw className="w-4 h-4 text-orange-300 shrink-0" />}
+          label={multi ? `${labelPrefix} 재크롤링` : "재크롤링"}
+          onClick={() => {
+            onClose();
+            onRecrawl();
           }}
         />
       )}

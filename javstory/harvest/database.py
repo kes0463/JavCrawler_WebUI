@@ -1203,8 +1203,12 @@ def upsert_jav_metadata(session, product_code, merge_empty_only=False, **kwargs)
     for key, value in kwargs.items():
         if hasattr(row, key):
             if merge_mode:
-                # favorite 필드는 항상 최신값으로 덮어씀 (비어있음 여부 무관)
-                if key in {"favorite_score", "favorite_sources"}:
+                # favorite 필드·analysis_status는 항상 최신값으로 덮어씀 (비어있음 여부 무관).
+                # analysis_status는 이전 실패(FAILED_CRAWL) 흔적일 수 있어, 호출자가 명시적으로
+                # 값을 넘기면(성공 경로에서 None으로 정리하는 등) merge_mode에서도 반영돼야 한다 —
+                # 안 그러면 "제목은 있는데 계속 미수집" 처럼 재크롤 성공 후에도 이전 실패 상태가
+                # 영구히 남는 문제가 생긴다.
+                if key in {"favorite_score", "favorite_sources", "analysis_status"}:
                     setattr(row, key, value)
                     continue
                 existing_val = getattr(row, key)

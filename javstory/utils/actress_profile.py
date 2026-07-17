@@ -16,6 +16,7 @@ from PIL.Image import Resampling
 
 from javstory.config.app_config import DATA_ROOT, E_DATA_ROOT
 from javstory.harvest.database import get_db_session, get_db_session_ctx, Actress, ActressImage, ActressAlias, ActressWork
+from javstory.utils.common import safe_console_print as print  # noqa: A001 - Windows cp949 콘솔 안전 print
 
 
 def _looks_like_ja(text: str) -> bool:
