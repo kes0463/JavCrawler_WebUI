@@ -13,6 +13,7 @@ from javstory.config.app_config import (
     OPENROUTER_BASE_URL, OLLAMA_BASE_URL, GEMINI_BASE_URL,
 )
 from javstory.llm.llamacpp_backend import llamacpp_openai_base_url
+from javstory.translation.translation_config import omniroute_url_from_env
 
 
 async def ollama_unload_model(
@@ -233,6 +234,12 @@ class MultiTierRouter:
             api_key="llamacpp",
             timeout=httpx.Timeout(600.0, connect=5.0),
         )
+        # OmniRoute (사용자가 로컬에서 직접 띄운 OpenAI 호환 LLM 라우터) — 인증 불필요, 더미 키 사용
+        self.omni_client = AsyncOpenAI(
+            base_url=omniroute_url_from_env(),
+            api_key="omniroute",
+            timeout=httpx.Timeout(300.0, connect=5.0),
+        )
         # Gemini 비동기 클라이언트 (API 키 미설정 시 None)
         import os as _os
         _gemini_key = (_os.environ.get("JAVSTORY_GEMINI_API_KEY") or "").strip()
@@ -250,7 +257,7 @@ class MultiTierRouter:
         asyncio.run() 종료 직후 백그라운드 aclose가 루프 종료와 맞물리면
         Event loop is closed 가 날 수 있어 무시합니다.
         """
-        for cl in (self.or_client, self.ol_client, self.lc_client, self.gemini_client):
+        for cl in (self.or_client, self.ol_client, self.lc_client, self.omni_client, self.gemini_client):
             if cl is None:
                 continue
             try:
@@ -313,7 +320,10 @@ class MultiTierRouter:
         elif provider == "ollama":
             client = self.ol_client
         elif provider == "llamacpp":
-            from javstory.llm.llamacpp_backend import ensure_llamacpp_server_ready
+            from javstory.llm.llamacpp_backend import (
+                ensure_llamacpp_server_ready,
+                llamacpp_openai_base_url,
+            )
 
             resolved = await asyncio.to_thread(
                 ensure_llamacpp_server_ready,
@@ -322,7 +332,18 @@ class MultiTierRouter:
             )
             if resolved:
                 model_cfg["model"] = resolved
+            # ensure_llamacpp_server_ready() can relocate the server to a different
+            # port mid-session (Windows Hyper-V dynamic port exclusion). self.lc_client
+            # was built once in __init__ with whatever base_url was active then, so
+            # without this refresh every call after a relocation fails with
+            # "Connection error." against the now-dead old port.
+            self.lc_client.base_url = llamacpp_openai_base_url()
             client = self.lc_client
+        elif provider == "omniroute":
+            # URL can be changed at runtime via Settings without an app restart,
+            # so re-resolve it on every call rather than trusting the __init__ snapshot.
+            self.omni_client.base_url = omniroute_url_from_env()
+            client = self.omni_client
         else:
             client = self.or_client
 
@@ -366,6 +387,12 @@ class MultiTierRouter:
             
             kwargs["extra_body"] = eb
         elif provider == "llamacpp":
+            # Local models (esp. Qwen3 on explicit/adult content) can fall into a
+            # degenerate repetition loop (e.g. the same syllable hundreds of times),
+            # burning the whole max_tokens budget and leaving the JSON string
+            # unterminated. A mild frequency penalty keeps generation from looping.
+            if "frequency_penalty" not in kwargs:
+                kwargs["frequency_penalty"] = 0.3
             xb = model_cfg.get("llamacpp_extra_body") or {}
             if isinstance(xb, dict) and xb:
                 kwargs["extra_body"] = dict(xb)

@@ -309,6 +309,15 @@ def enqueue_product_embedding(
     if not pc or not embeddings_enabled_from_env():
         return False
 
+    from javstory.library.embeddings.harvest_coordination import (
+        defer_product_embedding,
+        embeddings_pause_during_harvest_from_env,
+        is_embedding_harvest_paused,
+    )
+
+    if embeddings_pause_during_harvest_from_env() and is_embedding_harvest_paused():
+        return defer_product_embedding(pc)
+
     # Prefer GUI dashboard queue when the desktop app is running.
     try:
         from gui.models.embedding_queue_model import EmbeddingQueueController

@@ -496,7 +496,7 @@ class LibraryService:
         genres: Optional[list[str]] = None,
         genre_mode: str = "and",
     ) -> dict[str, Any]:
-        """Keyword ILIKE or hybrid (BM25+embedding+RRF) search with LibraryItem hydration."""
+        """Keyword ILIKE or hybrid (embedding∪BM25, keyword fallback) search with LibraryItem hydration."""
         from javstory.library.embeddings.pipeline import embeddings_enabled_from_env
         from javstory.search.library_search import HybridLibrarySearch
 
@@ -537,20 +537,73 @@ class LibraryService:
                 "hit_meta": {},
             }
 
-        # 자연어/하이브리드 UI 경로는 임베딩 히트만 사용 (BM25·메타 혼합·건수 고정 없음).
+        # 자연어/하이브리드: 임베딩 고유사도 ∪ BM25, 필요 시 키워드 ILIKE 보강/대체.
         searcher = HybridLibrarySearch()
-        hits = searcher.search_by_embedding(term)
+        hits = searcher.search_embedding_union_bm25(term)
         emb_diag = dict(getattr(searcher, "last_embedding_diag", None) or {})
-        hit_meta = {
-            str(h.get("id") or "").strip().upper(): {
+        hit_meta: dict[str, dict[str, Any]] = {}
+        ranked_codes: list[str] = []
+        for h in hits:
+            code = str(h.get("id") or "").strip().upper()
+            if not code or code in hit_meta:
+                continue
+            hit_meta[code] = {
                 "score": float(h.get("score") or 0),
-                "source": "embedding",
+                "source": str(h.get("source") or "embedding"),
             }
-            for h in hits
-            if str(h.get("id") or "").strip()
-        }
-        ranked_codes = [c for c in hit_meta.keys()]
-        embedding_used = bool(ranked_codes) and str(emb_diag.get("status") or "") == "ok"
+            ranked_codes.append(code)
+
+        emb_hit_n = int(emb_diag.get("embedding_n") or 0)
+        if emb_hit_n <= 0:
+            emb_hit_n = sum(1 for m in hit_meta.values() if m.get("source") == "embedding")
+        embedding_used = emb_hit_n > 0 and str(emb_diag.get("status") or "") == "ok"
+
+        kw_filter_kwargs = dict(
+            has_folder=has_folder,
+            has_metadata=has_metadata,
+            has_subtitle=has_subtitle,
+            subtitle_filter=subtitle_filter,
+            has_mosaic_removed=has_mosaic_removed,
+            user_liked=user_liked,
+            watch_later=watch_later,
+            genres=genres,
+            genre_mode=genre_mode,
+        )
+        need_keyword = (not ranked_codes) or self._should_union_keyword(term)
+        keyword_codes: list[str] = []
+        keyword_fallback_used = False
+        if need_keyword:
+            kw_page_size = min(200, max(int(per_page or 40), 40))
+            kw_result = self.list_items(
+                q=term,
+                page=1,
+                per_page=kw_page_size,
+                sort=sort,
+                order=order,
+                include_total=False,
+                **kw_filter_kwargs,
+            )
+            for row in kw_result.get("items") or []:
+                code = str(getattr(row, "product_code", "") or "").strip().upper()
+                if code and code not in keyword_codes:
+                    keyword_codes.append(code)
+
+            if keyword_codes:
+                if not ranked_codes:
+                    ranked_codes = list(keyword_codes)
+                    hit_meta = {
+                        c: {"score": 0.0, "source": "keyword"} for c in ranked_codes
+                    }
+                    keyword_fallback_used = True
+                    embedding_used = False
+                elif self._looks_like_product_code(term):
+                    ranked_codes = self._unique_codes(keyword_codes + ranked_codes)
+                    for code in keyword_codes:
+                        hit_meta.setdefault(code, {"score": 0.0, "source": "keyword"})
+                else:
+                    ranked_codes = self._unique_codes(ranked_codes + keyword_codes)
+                    for code in keyword_codes:
+                        hit_meta.setdefault(code, {"score": 0.0, "source": "keyword"})
 
         if not ranked_codes:
             msg = "검색 결과가 없습니다."
@@ -562,16 +615,39 @@ class LibraryService:
                 if status == "query_failed" and (
                     "ConnectError" in err or "connection" in err.lower() or "ConnectTimeout" in err
                 ):
-                    msg = (
-                        "Ollama에 연결할 수 없어 시맨틱 검색을 할 수 없습니다. "
-                        "Ollama 앱을 실행하거나 `ollama serve` 후 다시 검색하세요 "
-                        f"(URL: {(emb_diag.get('url') or 'http://localhost:11434')})."
-                    )
+                    backend = str(emb_diag.get("backend") or "")
+                    endpoint = emb_diag.get("url") or emb_diag.get("endpoint") or ""
+                    if backend == "llamacpp":
+                        msg = (
+                            "임베딩 llama-server에 연결할 수 없습니다. "
+                            f"서버·포트({endpoint or 'http://127.0.0.1:8082'})와 "
+                            "data/logs/llama-server-embeddings.log 를 확인하세요."
+                        )
+                    else:
+                        msg = (
+                            "Ollama에 연결할 수 없어 시맨틱 검색을 할 수 없습니다. "
+                            "Ollama 앱을 실행하거나 `ollama serve` 후 다시 검색하세요 "
+                            f"(URL: {endpoint or 'http://localhost:11434'})."
+                        )
                 elif status == "query_failed":
-                    msg = (
-                        "검색어 임베딩에 실패했습니다. "
-                        f"Ollama 모델({emb_diag.get('model') or 'embeddings'})과 로그를 확인하세요."
-                    )
+                    backend = str(emb_diag.get("backend") or "")
+                    model_name = emb_diag.get("model") or "embeddings"
+                    err_short = (err or "").strip()
+                    if backend == "llamacpp":
+                        msg = (
+                            "검색어 임베딩에 실패했습니다. "
+                            f"llama-server 모델({model_name})과 "
+                            "data/logs/llama-server-embeddings.log 를 확인하세요."
+                        )
+                    else:
+                        msg = (
+                            "검색어 임베딩에 실패했습니다. "
+                            f"Ollama 모델({model_name})과 로그를 확인하세요."
+                        )
+                    if err_short and "Pooling" in err_short:
+                        msg += " (pooling 설정이 필요할 수 있습니다)"
+                    elif err_short:
+                        msg += f" ({err_short[:120]})"
                 elif int(emb_diag.get("scored_n") or 0) == 0:
                     msg = (
                         "임베딩 캐시가 없어 시맨틱 검색 결과가 없습니다. "
@@ -684,10 +760,23 @@ class LibraryService:
                 page_rows = [by_code[c] for c in page_codes if c in by_code]
 
         message = None
-        if not embedding_used:
+        if keyword_fallback_used:
+            status = str(emb_diag.get("status") or "")
+            if not embeddings_on:
+                message = "임베딩이 꺼져 있어 키워드 검색으로 대체했습니다."
+            elif status == "query_failed":
+                message = "시맨틱 검색에 실패해 키워드 검색으로 대체했습니다."
+            elif int(emb_diag.get("scored_n") or 0) == 0:
+                message = (
+                    "임베딩 캐시가 없어 키워드 검색으로 대체했습니다. "
+                    "설정에서 임베딩 워밍업을 실행해 보세요."
+                )
+            else:
+                message = "유사도 높은 작품이 없어 키워드 검색으로 대체했습니다."
+        elif not embedding_used:
             message = (
                 "시맨틱 채널이 결과에 반영되지 않았습니다. "
-                "설정에서 임베딩 워밍업을 실행해 보세요."
+                "키워드·BM25 결과만 표시합니다. 설정에서 임베딩 워밍업을 실행해 보세요."
             )
 
         return {
@@ -701,6 +790,37 @@ class LibraryService:
             "search_message": message,
             "hit_meta": hit_meta,
         }
+
+    @staticmethod
+    def _looks_like_product_code(text: str) -> bool:
+        t = (text or "").strip()
+        if not t:
+            return False
+        return bool(re.match(r"^[A-Za-z]{1,10}-?\d{2,6}[A-Za-z0-9\-]*$", t))
+
+    @classmethod
+    def _should_union_keyword(cls, text: str) -> bool:
+        """품번·짧은 단일 토큰은 ILIKE로 정확 매칭을 보강한다."""
+        t = (text or "").strip()
+        if not t:
+            return False
+        if cls._looks_like_product_code(t):
+            return True
+        if re.search(r"\s", t):
+            return False
+        return not cls._looks_like_natural_language(t)
+
+    @staticmethod
+    def _unique_codes(codes: list[str]) -> list[str]:
+        out: list[str] = []
+        seen: set[str] = set()
+        for raw in codes:
+            code = str(raw or "").strip().upper()
+            if not code or code in seen:
+                continue
+            seen.add(code)
+            out.append(code)
+        return out
 
     @staticmethod
     def _looks_like_natural_language(text: str) -> bool:

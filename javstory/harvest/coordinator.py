@@ -259,7 +259,12 @@ async def run_crawler_for_video_path(
         if needs_crawling or force_rebuild_story_context:
             if progress_cb:
                 progress_cb(code, "웹 메타데이터 수집 중…", 25)
-            res = await crawler.fetch_metadata_smart(code)
+
+            def _crawl_progress(msg: str, pct: int = 25) -> None:
+                if progress_cb:
+                    progress_cb(code, msg, pct)
+
+            res = await crawler.fetch_metadata_smart(code, progress_cb=_crawl_progress)
             if not res:
                 log_ts(f"⚠️ {code} 크롤링 실패 (데이터 없음). 로컬 표지 및 뼈대 정보 생성 중...")
 
@@ -329,6 +334,14 @@ async def run_crawler_for_video_path(
             db_favorite_sources = ",".join(
                 f"{site}:{score}" for site, score in _fav_parts.items() if score
             ) or None
+            import json as _json
+
+            _field_sources = res.get("_field_sources") or {}
+            db_crawl_sources = (
+                _json.dumps(_field_sources, ensure_ascii=False)
+                if isinstance(_field_sources, dict) and _field_sources
+                else None
+            )
 
         # 2. 배우/장르/제작사 해결 (Mapping)
         from javstory.utils.actress_resolver import dedupe_crawled_actor_names
@@ -629,6 +642,7 @@ async def run_crawler_for_video_path(
                 folder_path=(stored_folder_path or db_folder_path),
                 favorite_score=db_favorite_score,
                 favorite_sources=db_favorite_sources,
+                crawl_sources_json=db_crawl_sources,
                 # 정상 저장 경로이므로 이전 실패(FAILED_CRAWL) 흔적을 지운다 — 안 그러면
                 # 재크롤이 성공해도 라이브러리에서 계속 "미수집"으로 표시된다.
                 analysis_status=None,

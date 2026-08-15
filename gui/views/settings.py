@@ -180,13 +180,20 @@ class SettingsView(QWidget):
         card.add_widget(HorizontalSeparator(self))
 
         self.embed_switch = SwitchButton(self)
-        card.add_row("Ollama 임베딩(메타+캐노니컬+자막)", self.embed_switch)
-        embed_note = CaptionLabel("저장 시 data/cache/embeddings/ 에 벡터 캐시 생성 (옵트인)", self)
+        card.add_row("시맨틱 임베딩 (llama-server)", self.embed_switch)
+        embed_note = CaptionLabel("저장 시 data/cache/embeddings/ 에 벡터 캐시 생성 (기본 llama-server :8082)", self)
         card.add_widget(embed_note)
 
         self.embed_model_input = LineEdit(self)
         self.embed_model_input.setPlaceholderText("nomic-embed-text")
         card.add_row("임베딩 모델", self.embed_model_input)
+
+        self.embed_gguf_combo = ComboBox(self)
+        self.embed_gguf_combo.setMinimumWidth(320)
+        card.add_row("임베딩 GGUF", self.embed_gguf_combo)
+        card.add_widget(CaptionLabel("D:\\Models(스캔 경로)의 .gguf 목록에서 선택", self))
+        self._embed_gguf_paths: list[str] = []
+        self.embed_gguf_combo.currentIndexChanged.connect(self._on_embed_gguf_changed)
 
         card.add_widget(HorizontalSeparator(self))
 
@@ -233,13 +240,50 @@ class SettingsView(QWidget):
 
         emb_enabled = os.environ.get("JAVSTORY_EMBEDDINGS_ENABLED", "0").strip().lower()
         self.embed_switch.setChecked(emb_enabled in ("1", "true", "yes", "on"))
-        self.embed_model_input.setText(os.environ.get("JAVSTORY_EMBEDDINGS_OLLAMA_MODEL", "nomic-embed-text"))
+        self.embed_model_input.setText(
+            os.environ.get("JAVSTORY_EMBEDDINGS_MODEL")
+            or os.environ.get("JAVSTORY_EMBEDDINGS_OLLAMA_MODEL", "nomic-embed-text")
+        )
+        self._reload_embed_gguf_combo(
+            os.environ.get("JAVSTORY_EMBEDDINGS_LLAMACPP_GGUF", "")
+        )
 
         self.dpi_switch.setChecked(False)
 
         theme = theme_manager.get_theme()
         theme_idx = {AppTheme.WIN11_NATIVE: 0, AppTheme.PRETTY_WHITE: 1, AppTheme.ELEGANT_DARK: 2}
         self.theme_combo.setCurrentIndex(theme_idx.get(theme, 0))
+
+    def _reload_embed_gguf_combo(self, current_path: str = "") -> None:
+        try:
+            from javstory.llm.llamacpp_embeddings import list_embeddings_gguf_options
+
+            opts = list_embeddings_gguf_options()
+        except Exception:
+            opts = [{"id": "", "label": "(자동 탐색)", "gguf_path": ""}]
+        self.embed_gguf_combo.blockSignals(True)
+        self.embed_gguf_combo.clear()
+        self._embed_gguf_paths = []
+        sel = 0
+        cur = (current_path or "").strip()
+        for i, o in enumerate(opts):
+            label = str(o.get("label") or o.get("gguf_path") or "(unnamed)")
+            path = str(o.get("gguf_path") or "")
+            self.embed_gguf_combo.addItem(label)
+            self._embed_gguf_paths.append(path)
+            if cur and path == cur:
+                sel = i
+        self.embed_gguf_combo.setCurrentIndex(sel)
+        self.embed_gguf_combo.blockSignals(False)
+
+    def _on_embed_gguf_changed(self, index: int) -> None:
+        if index < 0 or index >= len(self._embed_gguf_paths):
+            return
+        path = self._embed_gguf_paths[index]
+        if path:
+            stem = Path(path).stem
+            if stem:
+                self.embed_model_input.setText(stem)
 
     # ── 저장 핸들러 ─────────────────────────────────────────
     def _save_api_key(self):
@@ -278,7 +322,13 @@ class SettingsView(QWidget):
 
         os.environ["JAVSTORY_STORY_ANALYSIS_ENABLED"] = "1" if self.grok_switch.isChecked() else "0"
         os.environ["JAVSTORY_EMBEDDINGS_ENABLED"] = "1" if self.embed_switch.isChecked() else "0"
-        os.environ["JAVSTORY_EMBEDDINGS_OLLAMA_MODEL"] = (self.embed_model_input.text().strip() or "nomic-embed-text")
+        model = (self.embed_model_input.text().strip() or "nomic-embed-text")
+        os.environ["JAVSTORY_EMBEDDINGS_MODEL"] = model
+        os.environ["JAVSTORY_EMBEDDINGS_OLLAMA_MODEL"] = model
+        os.environ["JAVSTORY_EMBEDDINGS_BACKEND"] = "llamacpp"
+        idx = self.embed_gguf_combo.currentIndex()
+        gguf = self._embed_gguf_paths[idx] if 0 <= idx < len(self._embed_gguf_paths) else ""
+        os.environ["JAVSTORY_EMBEDDINGS_LLAMACPP_GGUF"] = gguf
 
         InfoBar.success("저장 완료", "옵션이 적용되었습니다.", parent=self,
                         duration=3000, position=InfoBarPosition.TOP)

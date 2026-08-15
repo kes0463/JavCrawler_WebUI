@@ -28,9 +28,19 @@ from javstory.harvest.database import JAVMetadata, get_db_session_ctx
 from javstory.library.embeddings.pipeline import (
     embeddings_enabled_from_env,
     embeddings_ollama_model_from_env,
+    embed_texts,
 )
-from javstory.library.embeddings.similarity import _cosine, _iter_embedding_payloads, _pick_representative_vector
-from javstory.llm.ollama_embeddings import ollama_embed_text
+from javstory.library.embeddings.query_format import (
+    blend_embedding_lexical_score,
+    concept_coverage,
+    expand_query_concepts,
+    format_search_query_for_embedding,
+)
+from javstory.library.embeddings.similarity import (
+    _iter_embedding_payloads,
+    max_doc_cosine,
+    payload_doc_text_blob,
+)
 
 _DEFAULT_WEIGHTS = (0.3, 0.5, 0.2)
 _WEIGHTS_ENV = "JAVSTORY_HYBRID_SEARCH_WEIGHTS"
@@ -136,17 +146,18 @@ def _weights_from_env(default: tuple[float, float, float] = _DEFAULT_WEIGHTS) ->
     return (parts[0] / total, parts[1] / total, parts[2] / total)
 
 
-def _embedding_min_score_from_env(default: float = 0.28) -> float:
+def _embedding_min_score_from_env(default: float = 0.36) -> float:
     raw = (os.environ.get(_EMBED_MIN_SCORE_ENV, "") or "").strip()
     if not raw:
         return default
     try:
-        return float(raw)
+        value = float(raw)
     except ValueError:
         return default
+    return min(0.95, max(0.05, value))
 
 
-def _embedding_relative_ratio_from_env(default: float = 0.74) -> float:
+def _embedding_relative_ratio_from_env(default: float = 0.84) -> float:
     raw = (os.environ.get(_EMBED_REL_RATIO_ENV, "") or "").strip()
     if not raw:
         return default
@@ -157,7 +168,7 @@ def _embedding_relative_ratio_from_env(default: float = 0.74) -> float:
     return min(0.99, max(0.05, value))
 
 
-def _embedding_max_gap_from_env(default: float = 0.12) -> float:
+def _embedding_max_gap_from_env(default: float = 0.10) -> float:
     """1등 대비 허용 점수 하락폭. 작을수록 상위 유사도만 유지."""
     raw = (os.environ.get(_EMBED_MAX_GAP_ENV, "") or "").strip()
     if not raw:
@@ -168,6 +179,14 @@ def _embedding_max_gap_from_env(default: float = 0.12) -> float:
         return default
     return min(0.5, max(0.01, value))
 
+
+def embedding_search_thresholds_from_env() -> dict[str, float]:
+    """Settings/API용 자연어 검색 컷오프 스냅샷."""
+    return {
+        "search_min_score": round(_embedding_min_score_from_env(), 4),
+        "search_relative_ratio": round(_embedding_relative_ratio_from_env(), 4),
+        "search_max_gap": round(_embedding_max_gap_from_env(), 4),
+    }
 
 def _embed_result_cache_ttl() -> float:
     raw = (os.environ.get("JAVSTORY_EMBEDDING_SEARCH_CACHE_TTL", "") or "").strip()
@@ -187,8 +206,9 @@ def _embed_search_cache_key(
     relative_ratio: float,
     max_gap: float,
 ) -> str:
+    # v2: e5 instruct + max-doc + concept coverage
     raw = (
-        f"{model}|{min_score:.4f}|{relative_ratio:.4f}|{max_gap:.4f}|"
+        f"v2|{model}|{min_score:.4f}|{relative_ratio:.4f}|{max_gap:.4f}|"
         f"{(query or '').strip()}"
     )
     return hashlib.sha1(raw.encode("utf-8")).hexdigest()
@@ -242,15 +262,26 @@ def _filter_relevant_embedding_hits(
     if top < min_score:
         return []
 
+    mid = scores[len(scores) // 2]
+    # 상위가 코퍼스와 거의 안 갈라지면(평탄 분포) 강하게 자른다
+    discrimination = top - mid
+    effective_ratio = relative_ratio
+    effective_gap = max_gap
+    if discrimination < 0.08:
+        effective_ratio = max(effective_ratio, 0.90)
+        effective_gap = min(effective_gap, 0.05)
+    elif discrimination < 0.12:
+        effective_ratio = max(effective_ratio, 0.87)
+        effective_gap = min(effective_gap, 0.07)
+
     mean = sum(scores) / len(scores)
     var = sum((s - mean) ** 2 for s in scores) / len(scores)
     std = math.sqrt(var)
-    # 코퍼스 평균대는 버리되, 관련 밴드는 이전보다 넓게
-    dist_floor = mean + max(0.04, 0.75 * std)
+    dist_floor = mean + max(0.05, 0.9 * std)
     floor = max(
         min_score,
-        top * relative_ratio,
-        top - max_gap,
+        top * effective_ratio,
+        top - effective_gap,
         dist_floor,
     )
     floor = min(floor, top)
@@ -259,17 +290,19 @@ def _filter_relevant_embedding_hits(
     if len(selected) <= 1:
         return selected
 
-    # 큰 급락에서만 절단 (작은 점수 차이는 허용)
     cut: List[_SearchResult] = [selected[0]]
-    cliff = max(0.028, top * 0.055)
-    tight = top * relative_ratio
+    cliff = max(0.018, top * 0.04)
+    tight = top * effective_ratio
     for prev, cur in zip(selected, selected[1:]):
         drop = float(prev.raw_score) - float(cur.raw_score)
         if drop >= cliff and float(cur.raw_score) < tight:
             break
-        if (top - float(cur.raw_score)) > max_gap:
+        if (top - float(cur.raw_score)) > effective_gap:
             break
         cut.append(cur)
+    # 평탄 분포면 상위 소수만
+    if discrimination < 0.08:
+        return cut[:12]
     return cut
 
 
@@ -352,6 +385,76 @@ class HybridLibrarySearch:
         if str(diag.get("status") or "") == "ok" or results:
             _store_cached_embed_search(cache_key, results, diag)
         return results
+
+    def search_embedding_union_bm25(
+        self,
+        query: str,
+        *,
+        bm25_top_k: int = 40,
+        min_score: float | None = None,
+        relative_ratio: float | None = None,
+        max_gap: float | None = None,
+    ) -> list:
+        """
+        라이브러리 UI용: 임베딩 고유사도 밴드를 유지한 채 BM25 히트를 뒤에 덧붙인다.
+        RRF로 점수를 섞지 않아 시맨틱 top 밴드가 희석되지 않는다.
+        """
+        q = (query or "").strip()
+        if not q:
+            return []
+        emb_hits = self.search_by_embedding(
+            q,
+            min_score=min_score,
+            relative_ratio=relative_ratio,
+            max_gap=max_gap,
+        )
+        emb_diag = dict(self.last_embedding_diag or {})
+        bm25_top = max(1, min(200, int(bm25_top_k or 40)))
+        bm25_hits: list[dict[str, Any]] = []
+        docs = self._load_docs()
+        if docs:
+            for item in self._search_bm25(q, docs, top_k=bm25_top):
+                pid = str(item.id or "").strip().upper()
+                if not pid:
+                    continue
+                bm25_hits.append(
+                    {
+                        "id": pid,
+                        "title": item.title,
+                        "score": round(float(item.raw_score), 6),
+                        "source": "bm25",
+                    }
+                )
+
+        merged: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for hit in emb_hits:
+            pid = str(hit.get("id") or "").strip().upper()
+            if not pid or pid in seen:
+                continue
+            seen.add(pid)
+            merged.append(
+                {
+                    "id": pid,
+                    "title": hit.get("title") or pid,
+                    "score": float(hit.get("score") or 0),
+                    "source": "embedding",
+                }
+            )
+        for hit in bm25_hits:
+            pid = str(hit.get("id") or "").strip().upper()
+            if not pid or pid in seen:
+                continue
+            seen.add(pid)
+            merged.append(hit)
+
+        self.last_embedding_diag = {
+            **emb_diag,
+            "embedding_n": len(emb_hits),
+            "bm25_n": len(bm25_hits),
+            "union_n": len(merged),
+        }
+        return merged
 
     def search_with_fusion(
         self,
@@ -441,13 +544,16 @@ class HybridLibrarySearch:
             self.last_embedding_diag = {"status": "disabled"}
             return []
         model = embeddings_ollama_model_from_env()
+        embed_input = format_search_query_for_embedding(query, model=model)
         try:
-            query_vec = asyncio.run(ollama_embed_text(text=query, model=model, timeout_sec=60.0))
+            vecs = asyncio.run(embed_texts([embed_input], model=model))
+            query_vec = vecs[0] if vecs else None
             embed_err = None
         except RuntimeError:
             loop = asyncio.new_event_loop()
             try:
-                query_vec = loop.run_until_complete(ollama_embed_text(text=query, model=model, timeout_sec=60.0))
+                vecs = loop.run_until_complete(embed_texts([embed_input], model=model))
+                query_vec = vecs[0] if vecs else None
                 embed_err = None
             except Exception as e:
                 query_vec = None
@@ -459,37 +565,79 @@ class HybridLibrarySearch:
             embed_err = f"{type(e).__name__}:{e}"
 
         if query_vec is None:
-            try:
-                from javstory.llm.ollama_serve import ollama_base_url
+            from javstory.library.embeddings.pipeline import embeddings_backend_from_env
 
-                _ollama_url = ollama_base_url()
+            backend = embeddings_backend_from_env()
+            try:
+                if backend == "ollama":
+                    from javstory.llm.ollama_serve import ollama_base_url
+                    endpoint = ollama_base_url()
+                else:
+                    from javstory.llm.llamacpp_embeddings import embeddings_llamacpp_base_url
+                    endpoint = embeddings_llamacpp_base_url()
             except Exception:
-                _ollama_url = "http://localhost:11434"
+                endpoint = "llama-server" if backend != "ollama" else "http://localhost:11434"
             self.last_embedding_diag = {
                 "status": "query_failed",
+                "backend": backend,
+                "endpoint": endpoint,
                 "model": model,
                 "error": (embed_err or "")[:300],
-                "url": _ollama_url,
+                "url": endpoint,
             }
             return []
 
         title_by_code = {doc.product_code: doc.title for doc in docs}
+        concepts = expand_query_concepts(query)
+        concept_n = len(concepts)
         results: List[_SearchResult] = []
-        for _path, payload in _iter_embedding_payloads(model=model):
-            pc = str(payload.get("product_code") or "").strip().upper()
-            if not pc:
-                continue
-            vec = _pick_representative_vector(payload)
-            score = _cosine(query_vec, vec or [])
-            if math.isfinite(score):
-                results.append(_SearchResult(pc, title_by_code.get(pc, pc), "embedding", float(score)))
+        ann_used = False
+        try:
+            from javstory.library.embeddings.ann_index import (
+                ann_enabled_from_env,
+                search_ann_max_cosine,
+            )
+
+            if ann_enabled_from_env():
+                ann_hits, text_by_code = search_ann_max_cosine(query_vec, model=model)
+                if ann_hits:
+                    ann_used = True
+                    for pc, cosine in ann_hits:
+                        if not math.isfinite(cosine):
+                            continue
+                        blob = text_by_code.get(pc, "") if concepts else ""
+                        cov = concept_coverage(blob, concepts) if concepts else 0.0
+                        score = blend_embedding_lexical_score(cosine, cov, concept_n=concept_n)
+                        if math.isfinite(score):
+                            results.append(
+                                _SearchResult(pc, title_by_code.get(pc, pc), "embedding", float(score))
+                            )
+        except Exception:
+            ann_used = False
+            results = []
+
+        if not ann_used:
+            for _path, payload in _iter_embedding_payloads(model=model):
+                pc = str(payload.get("product_code") or "").strip().upper()
+                if not pc:
+                    continue
+                cosine = max_doc_cosine(query_vec, payload)
+                if not math.isfinite(cosine):
+                    continue
+                cov = concept_coverage(payload_doc_text_blob(payload), concepts) if concepts else 0.0
+                score = blend_embedding_lexical_score(cosine, cov, concept_n=concept_n)
+                if math.isfinite(score):
+                    results.append(_SearchResult(pc, title_by_code.get(pc, pc), "embedding", float(score)))
         results.sort(key=lambda item: item.raw_score, reverse=True)
         out = results if top_k is None else results[: max(1, int(top_k))]
         self.last_embedding_diag = {
             "status": "ok",
             "model": model,
+            "query_format": "e5_instruct" if embed_input != query else "raw",
+            "concept_n": concept_n,
             "returned_n": len(out),
             "scored_n": len(results),
+            "ann_used": ann_used,
         }
         return out
 
@@ -546,4 +694,8 @@ class HybridLibrarySearch:
         return fused
 
 
-__all__ = ["HybridLibrarySearch", "clear_embed_search_cache"]
+__all__ = [
+    "HybridLibrarySearch",
+    "clear_embed_search_cache",
+    "embedding_search_thresholds_from_env",
+]

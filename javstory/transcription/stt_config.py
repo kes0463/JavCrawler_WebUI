@@ -140,8 +140,10 @@ FW_XXL_DEFAULTS: dict[str, Any] = {
     "hallucination_silence_threshold": 1.5,
     "compute_type": "float16",
     "batch_size": 8,
-    "word_timestamps": True,
+    "word_timestamps": False,
     "repetition_penalty": 1.2,
+    "log_prob_threshold": -1.0,
+    "compression_ratio_threshold": 2.4,
 }
 
 _FW_XXL_ENV: dict[str, str] = {
@@ -161,6 +163,8 @@ _FW_XXL_ENV: dict[str, str] = {
     "batch_size": "JAVSTORY_FW_BATCH_SIZE",
     "word_timestamps": "JAVSTORY_FW_WORD_TIMESTAMPS",
     "repetition_penalty": "JAVSTORY_FW_REPETITION_PENALTY",
+    "log_prob_threshold": "JAVSTORY_FW_LOG_PROB_THRESHOLD",
+    "compression_ratio_threshold": "JAVSTORY_FW_COMPRESSION_RATIO_THRESHOLD",
 }
 
 

@@ -1,7 +1,7 @@
 """
 Embedding pipeline:
 - Build docs (meta + canonical + subtitles)
-- Embed with Ollama
+- Embed with llama-server (default) or Ollama
 - Persist to data/cache/embeddings
 """
 
@@ -12,12 +12,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from javstory.llm.engine import ollama_ensure_model
-from javstory.llm.ollama_embeddings import ollama_embed_texts
 from javstory.library.canonical.schema import LibraryCanonical
 from javstory.library.detail_persist import apply_jav_metadata_row_to_canonical_meta, load_canonical_for_product
 from javstory.library.embeddings.document_builder import build_embedding_documents
 from javstory.library.embeddings.store import embeddings_cache_path, write_embeddings_json
+from javstory.llm.llamacpp_embeddings import embeddings_model_from_env as _llamacpp_model_from_env
 from javstory.translation.story_grok_module import story_context_cache_path_grok
 
 
@@ -32,9 +31,24 @@ def embeddings_enabled_from_env() -> bool:
     return v in ("1", "true", "yes", "on")
 
 
+def embeddings_backend_from_env() -> str:
+    """llamacpp (기본) | ollama."""
+    raw = (os.environ.get("JAVSTORY_EMBEDDINGS_BACKEND", "") or "").strip().lower()
+    if raw in ("ollama", "o"):
+        return "ollama"
+    if raw in ("llamacpp", "llama", "llama.cpp", "llama-server", "gguf"):
+        return "llamacpp"
+    # 미설정 → llama-server
+    return "llamacpp"
+
+
+def embeddings_model_from_env() -> str:
+    return _llamacpp_model_from_env()
+
+
 def embeddings_ollama_model_from_env() -> str:
-    # Reasonable default (user can override). Must exist in Ollama.
-    return (os.environ.get("JAVSTORY_EMBEDDINGS_OLLAMA_MODEL", "") or "").strip() or "nomic-embed-text"
+    """하위 호환 별칭 — 실제로는 embeddings_model_from_env 와 동일."""
+    return embeddings_model_from_env()
 
 
 def _story_context_newer_than_embedding(product_code: str, embedding_path: Path) -> bool:
@@ -71,6 +85,40 @@ def _enrich_canonical_from_db(state: LibraryCanonical, product_code: str) -> Lib
     return state
 
 
+async def _embed_texts(texts: List[str], *, model: str, logger_func: Any = None) -> List[List[float]]:
+    import asyncio
+
+    log = logger_func or (lambda *_a, **_k: None)
+    backend = embeddings_backend_from_env()
+    if backend == "ollama":
+        from javstory.llm.engine import ollama_ensure_model
+        from javstory.llm.ollama_embeddings import ollama_embed_texts
+
+        log(f"🔢 임베딩 백엔드: Ollama ({model})")
+        await ollama_ensure_model(model, logger_func=log)
+        return await ollama_embed_texts(texts=texts, model=model)
+
+    from javstory.llm.llamacpp_embeddings import (
+        ensure_embeddings_llamacpp_ready,
+        llamacpp_embed_texts,
+    )
+
+    log(f"🔢 임베딩 백엔드: llama-server ({model})")
+    await asyncio.to_thread(ensure_embeddings_llamacpp_ready, logger_func=log)
+    return await llamacpp_embed_texts(texts=texts, model=model)
+
+
+async def embed_texts(
+    texts: List[str],
+    *,
+    model: str | None = None,
+    logger_func: Any = None,
+) -> List[List[float]]:
+    """백엔드(llama-server/Ollama)에 맞춰 텍스트 임베딩."""
+    m = (model or "").strip() or embeddings_model_from_env()
+    return await _embed_texts(texts, model=m, logger_func=logger_func)
+
+
 async def build_and_store_embeddings_for_product(
     product_code: str,
     *,
@@ -88,7 +136,7 @@ async def build_and_store_embeddings_for_product(
     if not pc:
         return None
 
-    m = (model or "").strip() or embeddings_ollama_model_from_env()
+    m = (model or "").strip() or embeddings_model_from_env()
     out_path = embeddings_cache_path(pc, model=m)
 
     if out_path.is_file() and not force:
@@ -100,17 +148,32 @@ async def build_and_store_embeddings_for_product(
     st = state if state is not None else load_canonical_for_product(pc)
     st = _enrich_canonical_from_db(st, pc)
 
-    docs = build_embedding_documents(st, include_subtitles=include_subtitles)
+    subtitles_max_chars = 200_000
+    if embeddings_backend_from_env() == "llamacpp":
+        from javstory.llm.llamacpp_embeddings import embedding_max_input_chars
+
+        subtitles_max_chars = embedding_max_input_chars()
+
+    docs = build_embedding_documents(
+        st,
+        include_subtitles=include_subtitles,
+        subtitles_max_chars=subtitles_max_chars,
+    )
+    if embeddings_backend_from_env() == "llamacpp":
+        from javstory.llm.llamacpp_embeddings import truncate_embedding_input
+
+        for doc in docs:
+            doc["text"] = truncate_embedding_input(str(doc.get("text") or ""))
     if not docs:
         log("⚠️ 임베딩 스킵: 문서가 비어 있습니다.")
         return None
 
-    await ollama_ensure_model(m, logger_func=log)
-    vectors = await ollama_embed_texts(texts=[d["text"] for d in docs], model=m)
+    vectors = await _embed_texts([d["text"] for d in docs], model=m, logger_func=log)
 
     payload: Dict[str, Any] = {
         "product_code": pc,
         "model": m,
+        "backend": embeddings_backend_from_env(),
         "generated_at": _utc_now_iso(),
         "docs": [
             {
@@ -131,7 +194,9 @@ async def build_and_store_embeddings_for_product(
 
 __all__ = [
     "embeddings_enabled_from_env",
+    "embeddings_backend_from_env",
+    "embeddings_model_from_env",
     "embeddings_ollama_model_from_env",
+    "embed_texts",
     "build_and_store_embeddings_for_product",
 ]
-

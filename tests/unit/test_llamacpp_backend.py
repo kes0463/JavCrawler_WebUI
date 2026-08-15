@@ -399,3 +399,42 @@ def test_tier_from_env_uses_gguf_alias(tmp_path, monkeypatch):
     tier = tier_from_llamacpp_env()
     assert tier["llamacpp_preset"] == gid
     assert tier["model"] == "Qwen2.5-14B-Instruct-Q5_K_M"
+
+
+def test_harvest_slot_ctx_from_env(monkeypatch):
+    from javstory.llm.llamacpp_backend import harvest_slot_ctx_from_env
+
+    monkeypatch.delenv("JAVSTORY_HARVEST_LLAMACPP_SLOT_CTX", raising=False)
+    assert harvest_slot_ctx_from_env() is None
+    monkeypatch.setenv("JAVSTORY_HARVEST_LLAMACPP_SLOT_CTX", "4096")
+    assert harvest_slot_ctx_from_env() == 4096
+
+
+def test_from_env_uses_harvest_slot_ctx(monkeypatch, tmp_path):
+    from javstory.llm.llamacpp_backend import LlamaCppServerConfig, resolve_llamacpp_preset
+
+    gguf = tmp_path / "model.gguf"
+    gguf.write_bytes(b"x")
+    preset = resolve_llamacpp_preset("gemma-4-e4b")
+    monkeypatch.setenv("JAVSTORY_HARVEST_CONCURRENCY", "5")
+    monkeypatch.setenv("JAVSTORY_HARVEST_LLAMACPP_SLOT_CTX", "4096")
+    monkeypatch.delenv("JAVSTORY_LLAMACPP_CTX", raising=False)
+    monkeypatch.delenv("JAVSTORY_LLAMACPP_PARALLEL", raising=False)
+    cfg = LlamaCppServerConfig.from_env(preset)
+    assert cfg.parallel == 5
+    assert cfg.ctx_size == 4096 * 5
+
+
+def test_server_config_fingerprint_changes_with_parallel(monkeypatch, tmp_path):
+    from javstory.llm.llamacpp_backend import (
+        LlamaCppServerConfig,
+        resolve_llamacpp_preset,
+        server_config_fingerprint,
+    )
+
+    gguf = tmp_path / "model.gguf"
+    gguf.write_bytes(b"x")
+    preset = resolve_llamacpp_preset("gemma-4-e4b")
+    cfg1 = LlamaCppServerConfig(parallel=3, ctx_size=12288)
+    cfg2 = LlamaCppServerConfig(parallel=5, ctx_size=20480)
+    assert server_config_fingerprint(cfg1, gguf) != server_config_fingerprint(cfg2, gguf)

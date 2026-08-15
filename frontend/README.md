@@ -7,7 +7,7 @@ React + TypeScript + Tailwind + Vite 브라우저 UI입니다.
 | 항목 | 내용 |
 |------|------|
 | 데스크톱 운영 UI | [`main.py`](../main.py) → PySide6 + QML |
-| WebUI API | [`webapi/`](../webapi/) (FastAPI, port 8765) |
+| WebUI API | [`webapi/`](../webapi/) (FastAPI, port 18765) |
 | 동결 레거시 | [`api/`](../api/) — **사용하지 않음** |
 
 ## 실행
@@ -19,7 +19,7 @@ start_web.bat
 또는 터미널 2개:
 
 ```bat
-uvicorn webapi.main:app --host 127.0.0.1 --port 8765 --reload
+uvicorn webapi.main:app --host 127.0.0.1 --port 18765 --reload
 cd frontend && npm run dev
 ```
 
@@ -59,7 +59,7 @@ cd frontend && npm run dev
 
 | 변수 | 기본값 |
 |------|--------|
-| `VITE_API_BASE` | `http://127.0.0.1:8765` |
+| `VITE_API_BASE` | `http://127.0.0.1:18765` |
 
 ## 빌드
 

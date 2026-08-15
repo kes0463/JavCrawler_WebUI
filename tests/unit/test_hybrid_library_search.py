@@ -119,10 +119,46 @@ def test_search_by_embedding_keeps_high_similarity_band(monkeypatch):
 
     results = search.search_by_embedding("비 오는 날")
     ids = [r["id"] for r in results]
-    assert "HI-001" in ids and "HI-002" in ids and "MID-002" in ids
+    assert "HI-001" in ids and "HI-002" in ids
+    assert "MID-002" not in ids
     assert "FAR-003" not in ids
     assert all(not i.startswith("LO-") for i in ids)
     assert all(r["source"] == "embedding" for r in results)
+
+
+def test_search_embedding_union_bm25_keeps_embedding_first(monkeypatch):
+    from javstory.search.library_search import HybridLibrarySearch, _LibraryDoc, _SearchResult
+
+    docs = [
+        _LibraryDoc("EMB-001", "임베딩", "분위기", "배우"),
+        _LibraryDoc("BM-002", "키워드", "마사지 긴장감", "배우"),
+    ]
+    search = HybridLibrarySearch()
+    monkeypatch.setattr(search, "_load_docs", lambda: docs)
+    monkeypatch.setattr(
+        search,
+        "search_by_embedding",
+        lambda query, **kwargs: [
+            {"id": "EMB-001", "title": "임베딩", "score": 0.81, "source": "embedding"},
+        ],
+    )
+    monkeypatch.setattr(
+        search,
+        "_search_bm25",
+        lambda query, docs, top_k: [
+            _SearchResult("BM-002", "키워드", "bm25", 2.5),
+            _SearchResult("EMB-001", "임베딩", "bm25", 1.0),
+        ],
+    )
+    search.last_embedding_diag = {"status": "ok", "scored_n": 1}
+
+    results = search.search_embedding_union_bm25("마사지")
+    assert [r["id"] for r in results] == ["EMB-001", "BM-002"]
+    assert results[0]["source"] == "embedding"
+    assert results[1]["source"] == "bm25"
+    assert search.last_embedding_diag.get("embedding_n") == 1
+    assert search.last_embedding_diag.get("bm25_n") == 2
+    assert search.last_embedding_diag.get("union_n") == 2
 
 
 def test_search_by_embedding_caches_results_for_pagination(monkeypatch):

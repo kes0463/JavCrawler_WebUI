@@ -103,7 +103,13 @@ Return ONLY a valid JSON object. No markdown code blocks.
                 timeout=hard_timeout,
             )
             json_str = self._extract_json(raw_res)
-            parsed = json.loads(json_str)
+            try:
+                parsed = json.loads(json_str)
+            except json.JSONDecodeError:
+                # Local models sometimes emit literal newlines inside synopsis text
+                # instead of escaping them as \n, which strict JSON rejects even
+                # though the structure is otherwise fine — retry permissively.
+                parsed = json.loads(json_str, strict=False)
             if not isinstance(parsed, dict):
                 raise ValueError(f"번역 결과가 dict가 아님: {type(parsed).__name__}")
             return parsed

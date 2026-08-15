@@ -12,6 +12,18 @@ llama.cpp + TurboQuant KV 캐시 — subprocess ``llama-server`` + OpenAI 호환
   JAVSTORY_LLAMACPP_FIT          on|off (기본 on, N_GPU 미설정 시)
   JAVSTORY_LLAMACPP_CTX          (-c, 기본 8192 × parallel 슬롯 수)
   JAVSTORY_LLAMACPP_PARALLEL     (--parallel, 미지정 시 JAVSTORY_HARVEST_CONCURRENCY 값 사용, 기본 1)
+  JAVSTORY_HARVEST_LLAMACPP_SLOT_CTX  Harvest 번역 슬롯당 ctx (미설정 시 preset.default_ctx × parallel)
+  JAVSTORY_HARVEST_CONCURRENCY   Harvest 동시 실행 수 (1~5, parallel 기본 연동)
+  JAVSTORY_EMBEDDINGS_PAUSE_DURING_HARVEST  Harvest 중 임베딩 일시정지 (기본 1)
+
+Harvest 성능 튜닝 (12GB VRAM, 5병렬 예시):
+  JAVSTORY_HARVEST_CONCURRENCY=5
+  JAVSTORY_LLAMACPP_PARALLEL=5
+  JAVSTORY_HARVEST_LLAMACPP_SLOT_CTX=4096   # total ctx = 20480 (5×4096)
+  JAVSTORY_LLAMACPP_N_GPU_LAYERS=99         # Gemma-4-E4B Q4; Qwen3-14B는 parallel 3 권장
+  JAVSTORY_LLAMACPP_FIT=off
+  JAVSTORY_EMBEDDINGS_PAUSE_DURING_HARVEST=1
+  env 변경 후 llama-server.exe 종료 후 재시작 필요
   JAVSTORY_TRANSLATION_LLAMACPP_MAX_TOKENS / JAVSTORY_CORRECTION_LLAMACPP_MAX_TOKENS (기본 3072)
   JAVSTORY_LLAMACPP_STOP_AFTER_JOB  1|0 (작업 완료 후 llama-server 종료, 기본 0 — 유휴 타임아웃으로 자동 종료)
   JAVSTORY_LLAMACPP_IDLE_SHUTDOWN   1|0 (미사용 시 자동 종료, 기본 1)
@@ -56,6 +68,7 @@ _idle_stop_event = threading.Event()
 _idle_shutdown_logged = False
 _idle_managed_port: int | None = None
 _reuse_log_base: str | None = None
+_active_server_config_key: str | None = None
 
 LoggerFunc = Callable[[str], Any]
 
@@ -152,6 +165,63 @@ def llamacpp_idle_timeout_sec_from_env() -> int:
     return max(30, _env_int("JAVSTORY_LLAMACPP_IDLE_TIMEOUT_SEC", 300))
 
 
+def harvest_slot_ctx_from_env() -> int | None:
+    """Per-slot ctx for Harvest translation when JAVSTORY_LLAMACPP_CTX is unset."""
+    raw = (os.environ.get("JAVSTORY_HARVEST_LLAMACPP_SLOT_CTX", "") or "").strip()
+    if not raw:
+        return None
+    try:
+        return max(512, int(raw))
+    except ValueError:
+        return None
+
+
+def harvest_concurrency_for_llamacpp() -> int:
+    raw = (os.environ.get("JAVSTORY_HARVEST_CONCURRENCY", "") or "").strip()
+    try:
+        n = int(raw) if raw else 1
+    except ValueError:
+        n = 1
+    return max(1, min(5, n))
+
+
+def server_config_fingerprint(cfg: "LlamaCppServerConfig", gguf: Path) -> str:
+    ngl = cfg.n_gpu_layers if cfg.n_gpu_layers is not None else "fit"
+    return (
+        f"{gguf.resolve()}|c={cfg.ctx_size}|p={cfg.parallel}|ngl={ngl}|"
+        f"fit={int(cfg.fit_vram)}|k={cfg.cache_type_k}|v={cfg.cache_type_v}|"
+        f"pcm={cfg.prompt_cache_mib}"
+    )
+
+
+def describe_llamacpp_spawn_diagnostics(
+    model_cfg: Dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Return would-be llama-server argv and env snapshot for troubleshooting."""
+    try:
+        runtime = resolve_translation_llamacpp_runtime(model_cfg)
+        cfg = LlamaCppServerConfig.from_env(runtime.preset)
+        argv = build_server_argv(runtime.gguf, cfg, runtime.preset)
+        log_path = Path(__file__).resolve().parents[2] / "data" / "logs" / "llama-server.log"
+        return {
+            "argv": argv,
+            "command": " ".join(argv),
+            "parallel": cfg.parallel,
+            "ctx_size": cfg.ctx_size,
+            "slot_ctx": cfg.ctx_size // max(1, cfg.parallel),
+            "n_gpu_layers": cfg.n_gpu_layers,
+            "fit_vram": cfg.fit_vram,
+            "gguf": str(runtime.gguf),
+            "model": runtime.serve_alias,
+            "log_path": str(log_path),
+            "log_exists": log_path.is_file(),
+            "harvest_concurrency": harvest_concurrency_for_llamacpp(),
+            "harvest_slot_ctx_env": os.environ.get("JAVSTORY_HARVEST_LLAMACPP_SLOT_CTX", ""),
+        }
+    except Exception as e:
+        return {"error": f"{type(e).__name__}: {e}"}
+
+
 def _port_from_base_url(base: str) -> int:
     parsed = urlparse(base)
     return int(parsed.port or 8081)
@@ -173,8 +243,12 @@ def _finalize_server_ready(
     base: str,
     *,
     runtime_id: str | None = None,
+    config_key: str | None = None,
     logger_func: LoggerFunc | None = None,
 ) -> None:
+    global _active_server_config_key
+    if config_key:
+        _active_server_config_key = config_key
     _track_managed_server(runtime_id or preset.id, base)
     _ensure_idle_monitor_started(logger_func=logger_func)
 
@@ -706,10 +780,14 @@ class LlamaCppServerConfig:
             except ValueError:
                 ctx = preset.default_ctx
         else:
-            # 슬롯 수만큼 컨텍스트도 함께 늘려 슬롯당 컨텍스트가 preset 기본값 밑으로
-            # 줄어들지 않게 한다(그렇지 않으면 --parallel만 올렸을 때 슬롯당 컨텍스트가
-            # 부족해져 번역 응답이 잘릴 수 있음).
-            ctx = preset.default_ctx * par
+            slot_ctx = harvest_slot_ctx_from_env()
+            if slot_ctx is not None:
+                ctx = slot_ctx * par
+            else:
+                # 슬롯 수만큼 컨텍스트도 함께 늘려 슬롯당 컨텍스트가 preset 기본값 밑으로
+                # 줄어들지 않게 한다(그렇지 않으면 --parallel만 올렸을 때 슬롯당 컨텍스트가
+                # 부족해져 번역 응답이 잘릴 수 있음).
+                ctx = preset.default_ctx * par
         fit_raw = (os.environ.get("JAVSTORY_LLAMACPP_FIT", "on") or "on").strip().lower()
         fit_vram = fit_raw not in ("0", "false", "off", "no")
         pcm_raw = (os.environ.get("JAVSTORY_LLAMACPP_PROMPT_CACHE_MB", "") or "").strip()
@@ -1047,6 +1125,7 @@ def _terminate_llamacpp_proc(
 
 def stop_llamacpp_server(*, logger_func: LoggerFunc | None = None) -> None:
     global _server_proc, _active_preset_id, _active_base_url, _active_requests, _idle_managed_port
+    global _active_server_config_key
     _idle_stop_event.set()
     with _lock:
         proc = _server_proc
@@ -1054,6 +1133,7 @@ def stop_llamacpp_server(*, logger_func: LoggerFunc | None = None) -> None:
         _server_proc = None
         _active_preset_id = None
         _active_base_url = None
+        _active_server_config_key = None
         _active_requests = 0
         _idle_managed_port = None
     if proc is not None:
@@ -1163,7 +1243,7 @@ def _ensure_llamacpp_server_ready_locked(
     logger_func: LoggerFunc | None = None,
     wait_sec: float = 120.0,
 ) -> str:
-    global _server_proc, _active_preset_id, _active_base_url, _last_activity_at
+    global _server_proc, _active_preset_id, _active_base_url, _last_activity_at, _active_server_config_key
     if not _env_bool("JAVSTORY_LLAMACPP_AUTO_START", True):
         base = llamacpp_base_url()
         if not _server_health_ok(base):
@@ -1188,11 +1268,19 @@ def _ensure_llamacpp_server_ready_locked(
     gguf = runtime.gguf
     cfg = LlamaCppServerConfig.from_env(preset)
     base = llamacpp_base_url()
+    expected_config_key = server_config_fingerprint(cfg, gguf)
 
     log = logger_func or print
 
     proc_to_stop: subprocess.Popen | None = None
     check_proc: subprocess.Popen | None = None
+
+    def _config_stale() -> bool:
+        with _lock:
+            active_key = _active_server_config_key
+        if active_key is None:
+            return False
+        return active_key != expected_config_key
 
     with _lock:
         if _server_proc is not None and _server_proc.poll() is not None:
@@ -1211,14 +1299,26 @@ def _ensure_llamacpp_server_ready_locked(
     # misidentifies a running server as crashed and triggers a spurious respawn.
     if check_proc is not None:
         check_proc_health_ok = _server_health_ok(base)
-        if check_proc_health_ok:
-            _finalize_server_ready(preset, base, runtime_id=runtime.runtime_id, logger_func=log)
+        if check_proc_health_ok and not _config_stale():
+            _finalize_server_ready(
+                preset,
+                base,
+                runtime_id=runtime.runtime_id,
+                config_key=expected_config_key,
+                logger_func=log,
+            )
             return runtime.serve_alias
+        if check_proc_health_ok and _config_stale():
+            log(
+                "[llama.cpp] parallel/ctx/ngl 변경 감지 — llama-server 재기동 "
+                f"({expected_config_key})"
+            )
         # Process alive but health check failed — treat as crashed and respawn.
         with _lock:
             if _server_proc is check_proc:
                 _server_proc = None
                 _active_preset_id = None
+                _active_server_config_key = None
         proc_to_stop = check_proc
 
     if proc_to_stop is not None:
@@ -1235,14 +1335,34 @@ def _ensure_llamacpp_server_ready_locked(
                 f"{base}에 이미 다른 llama-server 모델이 실행 중입니다: {running}. "
                 f"선택한 모델은 {runtime.label}입니다. 기존 llama-server를 종료한 뒤 다시 시작하세요."
             )
-        touch_llamacpp_activity()
-        # 청크마다 재사용 로그가 수백 줄 쌓이지 않도록 동일 base는 1회만 알림
-        global _reuse_log_base
-        if _reuse_log_base != base:
-            log(f"[llama.cpp] 기존 llama-server 재사용 — {base}/v1")
-            _reuse_log_base = base
-        _finalize_server_ready(preset, base, runtime_id=runtime.runtime_id, logger_func=log)
-        return runtime.serve_alias
+        if _config_stale():
+            log(
+                "[llama.cpp] 실행 중 llama-server 설정 불일치 — 재기동 "
+                f"({expected_config_key})"
+            )
+            if sys.platform == "win32":
+                _kill_port_owner_windows(cfg.port, logger_func=log)
+            if not _wait_for_port_free(cfg.host, cfg.port, timeout=15.0):
+                raise RuntimeError(
+                    f"포트 {cfg.port}의 기존 llama-server를 종료하지 못했습니다. "
+                    "작업 관리자에서 llama-server.exe를 종료한 뒤 다시 시도하세요."
+                )
+            initial_health_ok = False
+        else:
+            touch_llamacpp_activity()
+            # 청크마다 재사용 로그가 수백 줄 쌓이지 않도록 동일 base는 1회만 알림
+            global _reuse_log_base
+            if _reuse_log_base != base:
+                log(f"[llama.cpp] 기존 llama-server 재사용 — {base}/v1")
+                _reuse_log_base = base
+            _finalize_server_ready(
+                preset,
+                base,
+                runtime_id=runtime.runtime_id,
+                config_key=expected_config_key,
+                logger_func=log,
+            )
+            return runtime.serve_alias
 
     if sys.platform == "win32":
         bind_probe = _port_bind_probe(cfg.host, cfg.port)
@@ -1313,7 +1433,13 @@ def _ensure_llamacpp_server_ready_locked(
                     if _server_models_match_preset(
                         model_ids, preset, serve_alias=runtime.serve_alias
                     ):
-                        _finalize_server_ready(preset, base, runtime_id=runtime.runtime_id, logger_func=log)
+                        _finalize_server_ready(
+                            preset,
+                            base,
+                            runtime_id=runtime.runtime_id,
+                            config_key=expected_config_key,
+                            logger_func=log,
+                        )
                         log(f"[llama.cpp] 포트 충돌 감지 → 기존 서버 재사용 — {base}/v1")
                         return runtime.serve_alias
                 # 2) Not healthy: kill port owner (Windows: llama-server only) then retry
@@ -1331,7 +1457,13 @@ def _ensure_llamacpp_server_ready_locked(
                         if proc2.poll() is not None:
                             break
                         if _server_health_ok(base, timeout=2.0):
-                            _finalize_server_ready(preset, base, runtime_id=runtime.runtime_id, logger_func=log)
+                            _finalize_server_ready(
+                            preset,
+                            base,
+                            runtime_id=runtime.runtime_id,
+                            config_key=expected_config_key,
+                            logger_func=log,
+                        )
                             log(f"[llama.cpp] 재시작 성공 — {runtime.label} @ {base}/v1")
                             return runtime.serve_alias
                         time.sleep(0.5)
@@ -1345,7 +1477,13 @@ def _ensure_llamacpp_server_ready_locked(
         if _server_health_ok(base, timeout=2.0):
             with _lock:
                 _server_proc = proc
-            _finalize_server_ready(preset, base, runtime_id=runtime.runtime_id, logger_func=log)
+            _finalize_server_ready(
+                preset,
+                base,
+                runtime_id=runtime.runtime_id,
+                config_key=expected_config_key,
+                logger_func=log,
+            )
             log(f"[llama.cpp] 준비 완료 — {runtime.label} @ {base}/v1")
             return runtime.serve_alias
         time.sleep(0.5)

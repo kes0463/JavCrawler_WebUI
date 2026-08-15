@@ -7,7 +7,7 @@ from javstory.translation.correction_chunk import _apply_json_chunk
 from javstory.translation.json_extract import parse_json_array
 from javstory.translation.ko_translation_chunk import (
     _chunk_json_for_translation,
-    _default_chunk_durations,
+    _default_chunk_lines,
     is_acceptable_ko_subtitle_line,
     render_glm_translation_chunk_user,
     system_prompt_translation_chunk,
@@ -118,10 +118,10 @@ def test_non_lexical_source_allows_punctuation_ko() -> None:
 
 
 def test_llamacpp_gemma_chunk_longer_than_qwen() -> None:
-    gemma_t, _ = _default_chunk_durations(
+    gemma_t, _ = _default_chunk_lines(
         {"provider": "llamacpp", "model": "gemma-4-e4b-uncensored"}
     )
-    qwen_t, _ = _default_chunk_durations(
+    qwen_t, _ = _default_chunk_lines(
         {"provider": "llamacpp", "model": "Qwen2.5-14B-Instruct"}
     )
     assert gemma_t > qwen_t

@@ -1503,7 +1503,7 @@ Item {
                     Row {
                         spacing: Theme.spacingSm
                         Text {
-                            text: "Ollama 임베딩"
+                            text: "시맨틱 임베딩"
                             font.pixelSize: Theme.fontBody
                             color: Theme.textSecondary
                             width: 160
@@ -1538,7 +1538,7 @@ Item {
                     }
 
                     Text {
-                        text: "메타+캐노니컬+자막을 합쳐 data/cache/embeddings/ 에 벡터 캐시를 생성합니다."
+                        text: "llama-server로 메타+캐노니컬+자막 벡터를 data/cache/embeddings/ 에 저장합니다. (기본 포트 8082)"
                         font.pixelSize: Theme.fontCaption
                         color: Theme.textMuted
                         leftPadding: 168
@@ -1571,6 +1571,76 @@ Item {
                                 border.width: 1
                             }
                         }
+                    }
+
+                    Row {
+                        spacing: Theme.spacingSm
+                        width: parent.width
+                        Text {
+                            text: "임베딩 GGUF"
+                            font.pixelSize: Theme.fontBody
+                            color: Theme.textSecondary
+                            width: 160
+                            anchors.verticalCenter: parent.verticalCenter
+                        }
+                        ComboBox {
+                            id: embedGgufCombo
+                            width: Math.min(420, parent.width - 168)
+                            model: SettingsModel.embeddingsGgufOptions
+                            textRole: "label"
+                            currentIndex: {
+                                var opts = SettingsModel.embeddingsGgufOptions || [];
+                                var cur = SettingsModel.embeddingsGgufPath || "";
+                                var modelHint = (SettingsModel.embeddingsOllamaModel || "").toLowerCase();
+                                for (var i = 0; i < opts.length; i++) {
+                                    if ((opts[i].gguf_path || "") === cur) return i;
+                                }
+                                for (var j = 0; j < opts.length; j++) {
+                                    var lbl = (opts[j].label || "").toLowerCase();
+                                    if (modelHint && lbl.indexOf(modelHint) >= 0) return j;
+                                }
+                                return 0;
+                            }
+                            onActivated: function(index) {
+                                var opts = SettingsModel.embeddingsGgufOptions || [];
+                                if (index >= 0 && index < opts.length)
+                                    SettingsModel.selectEmbeddingsGguf(opts[index].id || "");
+                            }
+                            background: Rectangle {
+                                radius: Theme.radiusSm
+                                color: Theme.surfaceLight
+                                border.color: Theme.glassBorder
+                                border.width: 1
+                            }
+                            contentItem: Text {
+                                text: embedGgufCombo.displayText
+                                font.pixelSize: Theme.fontCaption
+                                color: Theme.textPrimary
+                                verticalAlignment: Text.AlignVCenter
+                                leftPadding: Theme.spacingSm
+                                elide: Text.ElideMiddle
+                            }
+                        }
+                    }
+
+                    Text {
+                        visible: !!(SettingsModel.embeddingsGgufPath)
+                        text: SettingsModel.embeddingsGgufPath
+                        font.pixelSize: Theme.fontCaption
+                        color: Theme.textMuted
+                        leftPadding: 168
+                        wrapMode: Text.WrapAnywhere
+                        width: parent.width
+                    }
+
+                    Text {
+                        text: SettingsModel.embeddingsGgufScanDir
+                              + " — e5 / nomic / bge 등 임베딩 GGUF (자동 탐색 = 모델 alias와 일치하는 파일 우선)"
+                        font.pixelSize: Theme.fontCaption
+                        color: Theme.textMuted
+                        leftPadding: 168
+                        wrapMode: Text.Wrap
+                        width: parent.width
                     }
 
                     Row {
@@ -1840,6 +1910,28 @@ Item {
 
                     Text {
                         text: "권장 2~3, 고성능 환경은 5 (OpenRouter 요청/DB 부하 증가)"
+                        font.pixelSize: Theme.fontCaption
+                        color: Theme.textMuted
+                        leftPadding: 168
+                    }
+
+                    Row {
+                        spacing: Theme.spacingSm
+                        Text {
+                            text: "Harvest 중 임베딩 일시정지"
+                            font.pixelSize: Theme.fontBody
+                            color: Theme.textSecondary
+                            width: 160
+                            anchors.verticalCenter: parent.verticalCenter
+                        }
+                        Switch {
+                            checked: SettingsModel.embeddingsPauseDuringHarvest
+                            onToggled: SettingsModel.embeddingsPauseDuringHarvest = checked
+                        }
+                    }
+
+                    Text {
+                        text: "번역 GPU/RAM 확보 · Harvest 완료 후 보류 SKU 일괄 임베딩"
                         font.pixelSize: Theme.fontCaption
                         color: Theme.textMuted
                         leftPadding: 168

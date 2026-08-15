@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState,
   type KeyboardEvent as ReactKeyboardEvent,
+  type MouseEvent as ReactMouseEvent,
+  type PointerEvent as ReactPointerEvent,
 } from "react";
 import {
   Maximize,
@@ -13,8 +15,10 @@ import {
   X,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
+import Hls from "hls.js";
 import {
   fetchSubtitleCues,
+  hlsPlaylistUrl,
   streamUrl,
   waitForPlaybackStream,
   type PlaybackInfo,
@@ -46,16 +50,26 @@ function formatTime(sec: number): string {
 function proxyPreparingMessage(reason?: string | null): string {
   switch (reason) {
     case "hevc":
-      return "HEVC → H.264 변환 중… (GPU 가속 시도)";
+      return "HEVC → H.264 HLS 변환 중… (GPU 가속 시도)";
     case "fragmented":
-      return "스트리밍 재생용 MP4 재배치 중…";
+      return "스트리밍 재생용 HLS 변환 중…";
     case "container":
-      return "브라우저 재생용 MP4 변환 중…";
+      return "브라우저 재생용 HLS 변환 중… (H.264는 remux 우선)";
     case "codec":
-      return "브라우저 호환 코덱으로 변환 중…";
+      return "브라우저 호환 HLS로 변환 중…";
     default:
-      return "브라우저 재생용 MP4 변환 중…";
+      return "브라우저 재생용 HLS 변환 중…";
   }
+}
+
+function formatEta(sec: number): string {
+  if (!Number.isFinite(sec) || sec < 0) return "";
+  if (sec < 60) return `약 ${Math.ceil(sec)}초 남음`;
+  const m = Math.floor(sec / 60);
+  const s = Math.round(sec % 60);
+  if (m < 60) return `약 ${m}분 ${s}초 남음`;
+  const h = Math.floor(m / 60);
+  return `약 ${h}시간 ${m % 60}분 남음`;
 }
 
 interface VideoPlayerProps {
@@ -66,9 +80,14 @@ interface VideoPlayerProps {
 export function VideoPlayer({ session, onClose }: VideoPlayerProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
+  const seekBarRef = useRef<HTMLDivElement>(null);
   const hideTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const resumeDone = useRef(false);
   const shouldAutoPlayRef = useRef(true);
+  const isScrubbingRef = useRef(false);
+  const seekTargetRef = useRef<number | null>(null);
+  const wasPlayingBeforeSeekRef = useRef(false);
+  const seekInProgressRef = useRef(false);
 
   const [partIndex, setPartIndex] = useState(0);
   const [trackIndex, setTrackIndex] = useState(-1);
@@ -86,6 +105,8 @@ export function VideoPlayer({ session, onClose }: VideoPlayerProps) {
   });
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
+  const [isScrubbing, setIsScrubbing] = useState(false);
+  const [scrubTime, setScrubTime] = useState(0);
   const [showControls, setShowControls] = useState(true);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [osd, setOsd] = useState<string | null>(null);
@@ -95,23 +116,32 @@ export function VideoPlayer({ session, onClose }: VideoPlayerProps) {
   const [streamEpoch, setStreamEpoch] = useState(0);
   const [preparingProxy, setPreparingProxy] = useState(false);
   const [proxyReason, setProxyReason] = useState<string | null>(null);
+  const [proxyProgress, setProxyProgress] = useState<number | null>(null);
+  const [proxyEtaSec, setProxyEtaSec] = useState<number | null>(null);
   const [subtitleOptions, setSubtitleOptions] = useState<SubtitleDisplayOptions>(loadSubtitleOptions);
   const [subtitleSettingsOpen, setSubtitleSettingsOpen] = useState(false);
+  const [seekLoading, setSeekLoading] = useState(false);
 
   const part = session.parts[partIndex] ?? session.parts[0];
   const code = session.product_code;
   const needsProxyWait = useMemo(() => {
     if (!part) return false;
     return (
-      part.needs_proxy === true
+      part.stream_mode === "hls"
+      || part.needs_proxy === true
       || part.proxy_ready === false
       || /\.(ts|avi|mkv|wmv|mov)$/i.test(part.filename)
     );
   }, [part]);
+  const isHlsMode = needsProxyWait;
   const streamReady = !needsProxyWait || proxyReady;
   const streamSrc = useMemo(
-    () => (streamReady && part ? streamUrl(code, part.index) : undefined),
-    [streamReady, part, code],
+    () => (streamReady && part && !isHlsMode ? streamUrl(code, part.index) : undefined),
+    [streamReady, part, code, isHlsMode],
+  );
+  const hlsSrc = useMemo(
+    () => (streamReady && part && isHlsMode ? hlsPlaylistUrl(code, part.index) : undefined),
+    [streamReady, part, code, isHlsMode],
   );
 
   const showOsd = useCallback((msg: string) => {
@@ -119,7 +149,6 @@ export function VideoPlayer({ session, onClose }: VideoPlayerProps) {
     window.setTimeout(() => setOsd(null), 1200);
   }, []);
 
-  /** 제목/컨트롤 영역 위에 포인터가 있는지 */
   const CONTROLS_IDLE_MS = 2800;
 
   const clearHideTimer = useCallback(() => {
@@ -139,21 +168,24 @@ export function VideoPlayer({ session, onClose }: VideoPlayerProps) {
     }, CONTROLS_IDLE_MS);
   }, [clearHideTimer]);
 
-  /** 제목·컨트롤 영역 호버 또는 키보드 조작 시 표시 + 유휴 타이머 재시작 */
+  /** 영상 위 마우스 이동·키보드 조작 시 표시 + 유휴 타이머 재시작 */
   const revealChrome = useCallback(() => {
     setShowControls(true);
     scheduleHideChrome();
   }, [scheduleHideChrome]);
 
-  const onChromeEnter = useCallback(() => {
+  /** 컨트롤/제목 위에 있으면 숨김 타이머를 멈춰 유지 (컨테이너로 버블링 차단) */
+  const onChromeEnter = useCallback((e: ReactMouseEvent) => {
+    e.stopPropagation();
     setShowControls(true);
-    scheduleHideChrome();
-  }, [scheduleHideChrome]);
+    clearHideTimer();
+  }, [clearHideTimer]);
 
-  const onChromeMove = useCallback(() => {
+  const onChromeMove = useCallback((e: ReactMouseEvent) => {
+    e.stopPropagation();
     setShowControls(true);
-    scheduleHideChrome();
-  }, [scheduleHideChrome]);
+    clearHideTimer();
+  }, [clearHideTimer]);
 
   const onChromeLeave = useCallback(() => {
     scheduleHideChrome();
@@ -173,14 +205,103 @@ export function VideoPlayer({ session, onClose }: VideoPlayerProps) {
     }
   }, [showOsd]);
 
+  const rememberPlayStateForSeek = useCallback(() => {
+    const v = videoRef.current;
+    wasPlayingBeforeSeekRef.current = v != null && !v.paused;
+  }, []);
+
+  const resumeAfterSeek = useCallback(() => {
+    const v = videoRef.current;
+    if (!v || !wasPlayingBeforeSeekRef.current) return;
+
+    const attemptPlay = () => {
+      if (!wasPlayingBeforeSeekRef.current) return;
+      void v.play()
+        .then(() => {
+          wasPlayingBeforeSeekRef.current = false;
+        })
+        .catch(() => {
+          /* seek 완료 전이면 onSeeked/canplay에서 재시도 */
+        });
+    };
+
+    if (v.readyState >= HTMLMediaElement.HAVE_FUTURE_DATA) {
+      attemptPlay();
+      return;
+    }
+    v.addEventListener("canplay", attemptPlay, { once: true });
+  }, []);
+
   const seekBy = useCallback((deltaSec: number, label: string) => {
     const v = videoRef.current;
     if (!v) return;
+    rememberPlayStateForSeek();
     const next = Math.max(0, Math.min(v.duration || 0, v.currentTime + deltaSec));
     v.currentTime = next;
+    setCurrentTime(next);
+    setScrubTime(next);
     showOsd(label);
     revealChrome();
-  }, [showOsd, revealChrome]);
+  }, [showOsd, revealChrome, rememberPlayStateForSeek]);
+
+  const pointerToSeekTime = useCallback((clientX: number) => {
+    const bar = seekBarRef.current;
+    if (!bar || !Number.isFinite(duration) || duration <= 0) return 0;
+    const rect = bar.getBoundingClientRect();
+    if (rect.width <= 0) return 0;
+    const ratio = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
+    return ratio * duration;
+  }, [duration]);
+
+  const commitSeek = useCallback((time: number) => {
+    const v = videoRef.current;
+    if (!v || !Number.isFinite(duration) || duration <= 0) return;
+    const next = Math.max(0, Math.min(duration, time));
+    seekTargetRef.current = next;
+    v.currentTime = next;
+    setCurrentTime(next);
+    setScrubTime(next);
+  }, [duration]);
+
+  const handleSeekPointerDown = useCallback((e: ReactPointerEvent<HTMLDivElement>) => {
+    if (e.button !== 0) return;
+    if (!Number.isFinite(duration) || duration <= 0) return;
+    rememberPlayStateForSeek();
+    const t = pointerToSeekTime(e.clientX);
+    isScrubbingRef.current = true;
+    setIsScrubbing(true);
+    setScrubTime(t);
+    revealChrome();
+    e.currentTarget.setPointerCapture(e.pointerId);
+    e.preventDefault();
+    e.stopPropagation();
+  }, [duration, pointerToSeekTime, revealChrome, rememberPlayStateForSeek]);
+
+  const handleSeekPointerMove = useCallback((e: ReactPointerEvent<HTMLDivElement>) => {
+    if (!isScrubbingRef.current) return;
+    setScrubTime(pointerToSeekTime(e.clientX));
+    e.preventDefault();
+  }, [pointerToSeekTime]);
+
+  const handleSeekPointerUp = useCallback((e: ReactPointerEvent<HTMLDivElement>) => {
+    if (!isScrubbingRef.current) return;
+    const t = pointerToSeekTime(e.clientX);
+    seekInProgressRef.current = true;
+    setSeekLoading(true);
+    commitSeek(t);
+    isScrubbingRef.current = false;
+    setIsScrubbing(false);
+    if (e.currentTarget.hasPointerCapture(e.pointerId)) {
+      e.currentTarget.releasePointerCapture(e.pointerId);
+    }
+    e.preventDefault();
+    e.stopPropagation();
+  }, [pointerToSeekTime, commitSeek]);
+
+  const displayTime = isScrubbing ? scrubTime : currentTime;
+  const progressPct = duration > 0
+    ? Math.max(0, Math.min(100, (displayTime / duration) * 100))
+    : 0;
 
   const handleKeyDown = useCallback((e: ReactKeyboardEvent | KeyboardEvent) => {
     const v = videoRef.current;
@@ -264,6 +385,7 @@ export function VideoPlayer({ session, onClose }: VideoPlayerProps) {
         break;
       case "Home":
         prevent();
+        rememberPlayStateForSeek();
         v.currentTime = 0;
         showOsd("⏮ 처음으로");
         revealChrome();
@@ -271,6 +393,7 @@ export function VideoPlayer({ session, onClose }: VideoPlayerProps) {
       default:
         if (/^[1-9]$/.test(key) && v.duration > 0) {
           prevent();
+          rememberPlayStateForSeek();
           const pct = parseInt(key, 10) / 10;
           v.currentTime = v.duration * pct;
           showOsd(`▶ ${parseInt(key, 10) * 10}%`);
@@ -278,7 +401,7 @@ export function VideoPlayer({ session, onClose }: VideoPlayerProps) {
         }
         break;
     }
-  }, [onClose, toggleFullscreen, seekBy, showOsd, revealChrome]);
+  }, [onClose, toggleFullscreen, seekBy, showOsd, revealChrome, rememberPlayStateForSeek]);
 
   useEffect(() => {
     const onFs = () => setIsFullscreen(!!document.fullscreenElement);
@@ -328,11 +451,16 @@ export function VideoPlayer({ session, onClose }: VideoPlayerProps) {
 
     setProxyReady(false);
     setProxyReason(part.proxy_reason ?? null);
+    setProxyProgress(null);
+    setProxyEtaSec(null);
     const run = async () => {
       setPreparingProxy(true);
       try {
-        await waitForPlaybackStream(code, part.index, (reason: string | null) => {
-          if (!cancelled) setProxyReason(reason);
+        await waitForPlaybackStream(code, part.index, info => {
+          if (cancelled) return;
+          setProxyReason(info.proxyReason);
+          setProxyProgress(info.progress);
+          setProxyEtaSec(info.etaSec);
         });
         if (!cancelled) {
           setLoadError(null);
@@ -358,7 +486,38 @@ export function VideoPlayer({ session, onClose }: VideoPlayerProps) {
   }, [code, part, partIndex, needsProxyWait]);
 
   useEffect(() => {
-    if (!streamReady) return;
+    if (!streamReady || !hlsSrc) return;
+    const v = videoRef.current;
+    if (!v) return;
+
+    const canNativeHls = v.canPlayType("application/vnd.apple.mpegurl") !== "";
+    if (canNativeHls) {
+      v.src = hlsSrc;
+      return () => {
+        v.removeAttribute("src");
+        v.load();
+      };
+    }
+
+    if (!Hls.isSupported()) {
+      setLoadError("HLS 재생을 지원하지 않는 브라우저입니다");
+      return;
+    }
+
+    const hls = new Hls({ enableWorker: true });
+    hls.loadSource(hlsSrc);
+    hls.attachMedia(v);
+    hls.on(Hls.Events.ERROR, (_event, data) => {
+      if (!data.fatal) return;
+      setLoadError("HLS 재생 중 오류가 발생했습니다. 잠시 후 다시 시도해 주세요.");
+    });
+    return () => {
+      hls.destroy();
+    };
+  }, [streamReady, hlsSrc, streamEpoch]);
+
+  useEffect(() => {
+    if (!streamReady || isHlsMode) return;
     const timer = window.setTimeout(() => {
       const v = videoRef.current;
       if (!v || loadError) return;
@@ -367,7 +526,7 @@ export function VideoPlayer({ session, onClose }: VideoPlayerProps) {
       }
     }, 20_000);
     return () => window.clearTimeout(timer);
-  }, [streamReady, code, partIndex, loadError]);
+  }, [streamReady, isHlsMode, code, partIndex, loadError]);
 
   useEffect(() => {
     if (trackIndex < 0 || !part) {
@@ -460,13 +619,14 @@ export function VideoPlayer({ session, onClose }: VideoPlayerProps) {
       ref={containerRef}
       className="fixed inset-0 z-[120] bg-black isolate electron-no-drag"
       data-no-drag-scroll
+      onMouseMove={revealChrome}
     >
       {/* 영상 레이어 — 하드웨어 합성 레이어가 오버레이를 덮지 않도록 z-0 */}
       <div className="absolute inset-0 z-0 flex items-center justify-center bg-black">
-        {streamReady && streamSrc ? (
+        {streamReady && (streamSrc || hlsSrc) ? (
         <video
           ref={videoRef}
-          key={`${streamSrc}-${streamEpoch}`}
+          key={`${code}-${part.index}-${streamEpoch}-${isHlsMode ? "hls" : "direct"}`}
           src={streamSrc}
           className="relative z-0 max-w-full max-h-full w-full h-full object-contain"
           playsInline
@@ -490,7 +650,30 @@ export function VideoPlayer({ session, onClose }: VideoPlayerProps) {
           onCanPlay={() => {
             void attemptAutoPlay();
           }}
-          onTimeUpdate={() => setCurrentTime(videoRef.current?.currentTime ?? 0)}
+          onTimeUpdate={() => {
+            if (isScrubbingRef.current) return;
+            const v = videoRef.current;
+            if (!v) return;
+            const target = seekTargetRef.current;
+            if (target != null) {
+              if (Math.abs(v.currentTime - target) > 0.35) return;
+              seekTargetRef.current = null;
+            }
+            setCurrentTime(v.currentTime);
+          }}
+          onSeeked={() => {
+            const v = videoRef.current;
+            if (!v || isScrubbingRef.current) return;
+            seekTargetRef.current = null;
+            setCurrentTime(v.currentTime);
+            resumeAfterSeek();
+          }}
+          onPlaying={() => {
+            if (seekInProgressRef.current) {
+              seekInProgressRef.current = false;
+              setSeekLoading(false);
+            }
+          }}
           onPlay={() => {
             setPlaying(true);
             scheduleHideChrome();
@@ -522,9 +705,23 @@ export function VideoPlayer({ session, onClose }: VideoPlayerProps) {
           }}
         />
         ) : preparingProxy ? (
-          <div className="flex flex-col items-center gap-3 text-center px-6">
+          <div className="flex flex-col items-center gap-3 text-center px-6 w-full max-w-sm">
             <div className="w-10 h-10 border-2 border-indigo-400/30 border-t-indigo-400 rounded-full animate-spin" />
             <p className="text-white text-sm font-medium">{proxyPreparingMessage(proxyReason ?? part.proxy_reason)}</p>
+            {proxyProgress != null && (
+              <div className="w-full">
+                <div className="h-1.5 w-full rounded-full bg-white/10 overflow-hidden">
+                  <div
+                    className="h-full rounded-full bg-indigo-400 transition-[width] duration-500"
+                    style={{ width: `${Math.max(2, Math.min(100, proxyProgress))}%` }}
+                  />
+                </div>
+                <div className="mt-1.5 flex items-center justify-between text-xs text-slate-400 tabular-nums">
+                  <span>{Math.floor(proxyProgress)}%</span>
+                  {proxyEtaSec != null && proxyEtaSec > 0 && <span>{formatEta(proxyEtaSec)}</span>}
+                </div>
+              </div>
+            )}
             <p className="text-slate-400 text-xs max-w-sm break-all">{part.filename}</p>
           </div>
         ) : null}
@@ -538,6 +735,11 @@ export function VideoPlayer({ session, onClose }: VideoPlayerProps) {
           videoHeight={videoSize.h}
           display={subtitleOptions}
         />
+        {seekLoading && (
+          <div className="absolute inset-0 flex items-center justify-center bg-black/30 pointer-events-none">
+            <div className="w-10 h-10 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+          </div>
+        )}
         {osd && (
           <div className="absolute top-1/4 left-1/2 -translate-x-1/2 px-5 py-2.5 rounded-xl bg-black/70 text-white text-sm font-medium">
             {osd}
@@ -550,17 +752,18 @@ export function VideoPlayer({ session, onClose }: VideoPlayerProps) {
         )}
       </div>
 
-      {/* 상단 바 — 숨겨져 있어도 히트 가능(호버로 재표시) */}
+      {/* 상단 바 — 숨김 시 pointer-events-none (영상 위 마우스 이동으로 재표시).
+          표시 중일 때만 프레임리스 창 드래그(electron-drag)를 켠다. */}
       <div
         className={cn(
           "absolute top-0 inset-x-0 z-30 flex items-center gap-3 px-4 py-3 min-h-[4.5rem] bg-gradient-to-b from-black/80 to-transparent transition-opacity",
-          showControls ? "opacity-100" : "opacity-0",
+          showControls ? "opacity-100 electron-drag" : "opacity-0 pointer-events-none",
         )}
         onMouseEnter={onChromeEnter}
         onMouseMove={onChromeMove}
         onMouseLeave={onChromeLeave}
       >
-        <div className={cn("min-w-0 flex-1", !showControls && "pointer-events-none")}>
+        <div className="min-w-0 flex-1">
           <p className="text-2xl font-mono font-bold text-indigo-300 leading-tight truncate">{code}</p>
           <p className="text-lg text-[#d0d0e8] truncate leading-snug mt-0.5">
             {session.title || part.filename}
@@ -574,10 +777,7 @@ export function VideoPlayer({ session, onClose }: VideoPlayerProps) {
         <button
           type="button"
           onClick={onClose}
-          className={cn(
-            "w-9 h-9 rounded-lg bg-white/10 hover:bg-white/20 flex items-center justify-center shrink-0",
-            !showControls && "pointer-events-none",
-          )}
+          className="w-9 h-9 rounded-lg bg-white/10 hover:bg-white/20 flex items-center justify-center shrink-0 electron-no-drag"
           title="닫기 (Esc)"
           tabIndex={showControls ? 0 : -1}
         >
@@ -585,31 +785,64 @@ export function VideoPlayer({ session, onClose }: VideoPlayerProps) {
         </button>
       </div>
 
-      {/* 하단 컨트롤 — 숨겨져 있어도 히트 가능 */}
+      {/* 하단 컨트롤 — 숨김 시 클릭 통과, 표시는 컨테이너 mousemove로 복구 */}
       <div
         className={cn(
           "absolute bottom-0 inset-x-0 z-30 px-4 pb-4 pt-8 min-h-[6.5rem] bg-gradient-to-t from-black/90 to-transparent transition-opacity",
-          showControls ? "opacity-100" : "opacity-0",
+          showControls ? "opacity-100" : "opacity-0 pointer-events-none",
         )}
         onMouseEnter={onChromeEnter}
         onMouseMove={onChromeMove}
         onMouseLeave={onChromeLeave}
       >
-        <div className={cn(!showControls && "pointer-events-none")}>
-        <input
-          type="range"
-          min={0}
-          max={duration || 1}
-          step={0.1}
-          value={currentTime}
-          onChange={e => {
-            const v = videoRef.current;
-            if (!v) return;
-            v.currentTime = parseFloat(e.target.value);
-            revealChrome();
+        <div>
+        <div
+          ref={seekBarRef}
+          role="slider"
+          aria-label="재생 위치"
+          aria-valuemin={0}
+          aria-valuemax={duration || 0}
+          aria-valuenow={displayTime}
+          tabIndex={-1}
+          className="relative flex items-center h-4 mb-3 cursor-pointer touch-none select-none outline-none [-webkit-tap-highlight-color:transparent]"
+          onPointerDown={handleSeekPointerDown}
+          onPointerMove={handleSeekPointerMove}
+          onPointerUp={handleSeekPointerUp}
+          onPointerCancel={handleSeekPointerUp}
+          onKeyDown={e => {
+            if (!Number.isFinite(duration) || duration <= 0) return;
+            const step = e.shiftKey ? 30 : e.ctrlKey ? 60 : 5;
+            if (e.key === "ArrowLeft") {
+              e.preventDefault();
+              rememberPlayStateForSeek();
+              commitSeek(displayTime - step);
+            } else if (e.key === "ArrowRight") {
+              e.preventDefault();
+              rememberPlayStateForSeek();
+              commitSeek(displayTime + step);
+            }
           }}
-          className="w-full h-1 accent-indigo-500 cursor-pointer mb-3"
-        />
+        >
+          <div className="relative w-full h-1 rounded-full bg-white/20 overflow-hidden">
+            <div
+              className={cn(
+                "h-full rounded-full bg-indigo-400",
+                isScrubbing ? "transition-none" : "transition-[width] duration-75 ease-linear",
+              )}
+              style={{ width: `${progressPct}%` }}
+            />
+          </div>
+          <div
+            className={cn(
+              "pointer-events-none absolute top-1/2 -translate-y-1/2 w-3 h-3 rounded-full bg-white border-2 border-indigo-400 shadow",
+              isScrubbing ? "opacity-100" : "opacity-0",
+            )}
+            style={{
+              left: `clamp(0px, calc(${progressPct}% - 6px), calc(100% - 12px))`,
+              transition: isScrubbing ? "none" : undefined,
+            }}
+          />
+        </div>
         <div className="flex items-center gap-3 flex-wrap">
           <button
             type="button"
@@ -626,7 +859,7 @@ export function VideoPlayer({ session, onClose }: VideoPlayerProps) {
           </button>
 
           <span className="text-xs text-slate-300 tabular-nums min-w-[5.5rem]">
-            {formatTime(currentTime)} / {formatTime(duration)}
+            {formatTime(displayTime)} / {formatTime(duration)}
           </span>
 
           <button

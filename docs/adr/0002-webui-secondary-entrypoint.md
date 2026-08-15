@@ -31,7 +31,7 @@ start_web.bat
 또는:
 
 ```bat
-uvicorn webapi.main:app --host 127.0.0.1 --port 8765
+uvicorn webapi.main:app --host 127.0.0.1 --port 18765
 cd frontend && npm run dev
 ```
 

@@ -15,7 +15,6 @@ from javstory.transcription.win_cuda_dlls import add_windows_cuda_dll_paths
 add_windows_cuda_dll_paths()
 
 import pysrt
-import torch
 
 from javstory.transcription.stt_types import (
     STTCancelled,
@@ -29,7 +28,7 @@ from javstory.transcription.stt_config import (
     STT_ENGINE_STABLE_TS_FW,
 )
 from javstory.transcription.stable_ts_pipeline import run_stt
-from javstory.transcription.fw_xxl_native import run_fw_native
+from javstory.transcription.fw_xxl_native import run_fw_native_subprocess
 
 # stt_worker 호환 re-export
 __all__ = [
@@ -70,9 +69,10 @@ def _emit_stt_segments(
 
 def clear_vram() -> None:
     gc.collect()
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
-    print("[VRAM] gc.collect + CUDA 캐시 비우기 완료")
+    # torch.cuda.empty_cache() 의도적으로 생략: STT 작업 직후(ctranslate2 모델 정리와
+    # 가까운 시점) 호출 시 트레이스백 없는 네이티브 크래시(0xe06d7363/0xc0000409)가
+    # 재현됨 — javstory/transcription/fw_xxl_native.py의 동일 수정 참고.
+    print("[VRAM] gc.collect 완료 (CUDA 캐시 비우기는 크래시 방지를 위해 생략)")
 
 
 def _load_existing_srt(srt_path: str) -> List[SimpleSegment]:
@@ -154,8 +154,9 @@ def process_video_to_segments(
     if engine == STT_ENGINE_STABLE_TS_FW:
         # 참조 Faster-Whisper-XXL 툴과 동일한 형태: ffmpeg 추출 → WhisperModel.transcribe()
         # 직접 호출 → SRT. stable-ts VAD/후처리를 안 거침(별도 Silero VAD·재분할이
-        # 근접 무음 결과의 원인 후보였음).
-        interim_srt, _ = run_fw_native(
+        # 근접 무음 결과의 원인 후보였음). 별도 프로세스에서 실행 — ctranslate2/CUDA
+        # 정리 단계 네이티브 크래시가 webapi 자체를 죽이지 않도록 격리(fw_xxl_native.py 참고).
+        interim_srt, _ = run_fw_native_subprocess(
             video_path=video_path,
             work_dir=out_dir,
             logger=log,

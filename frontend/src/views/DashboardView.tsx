@@ -193,7 +193,7 @@ export default function DashboardView() {
     <div className="w-full space-y-5 animate-fade-in">
       {error && (
         <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-lg text-amber-200">
-          {error} — <code className="text-amber-100/90">start_web.bat</code>을 닫았다가 다시 실행해 webapi(포트 8765)를 재시작하세요.
+          {error} — <code className="text-amber-100/90">start_web.bat</code>을 닫았다가 다시 실행해 webapi(포트 18765)를 재시작하세요.
         </div>
       )}
 

@@ -19,8 +19,7 @@ from javstory.analytics.persona_card import get_persona_card
 from javstory.analytics.persona_context import build_persona_context
 from javstory.config.app_config import DATA_ROOT
 from javstory.harvest.database import JAVMetadata, get_db_session_ctx
-from javstory.library.embeddings.pipeline import embeddings_ollama_model_from_env
-from javstory.llm.ollama_embeddings import ollama_embed_texts
+from javstory.library.embeddings.pipeline import embeddings_ollama_model_from_env, embed_texts
 from javstory.persona.library_search import (
     _attach_user_watch_signals,
     detect_source_policy,
@@ -134,11 +133,11 @@ def _cosine_similarity(a: List[float], b: List[float]) -> float:
 def _embed_texts_blocking(texts: List[str]) -> List[List[float]]:
     model = embeddings_ollama_model_from_env()
     try:
-        return asyncio.run(ollama_embed_texts(texts=texts, model=model, timeout_sec=90.0))
+        return asyncio.run(embed_texts(texts, model=model))
     except RuntimeError:
         loop = asyncio.new_event_loop()
         try:
-            return loop.run_until_complete(ollama_embed_texts(texts=texts, model=model, timeout_sec=90.0))
+            return loop.run_until_complete(embed_texts(texts, model=model))
         finally:
             loop.close()
 

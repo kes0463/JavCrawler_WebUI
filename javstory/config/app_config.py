@@ -42,6 +42,8 @@ def platform_env_suffix(platform: str | None = None) -> str:
         return "LLAMACPP"
     if p == "ollama":
         return "OLLAMA"
+    if p == "omniroute":
+        return "OMNIROUTE"
     return "OPENAI"
 
 
@@ -89,12 +91,6 @@ PRODUCTS_V2_HYDRATE_MARKER = DATA_ROOT / "db" / ".products_v2_hydrate_done"
 HYDRATE_PROGRESS_EVERY = int(os.environ.get("JAVSTORY_HYDRATE_PROGRESS_EVERY", "100") or 100)
 
 # [Phase 4] 장면 분석 및 썸네일 추출 설정
-SCENE_THRESHOLD = 27.0      # PySceneDetect ContentDetector 임계값 (지나치게 높지 않게 설정)
-SCENE_IMG_WIDTH = 640       # 추출 썸네일 가로 해상도
-SCENE_IMG_QUALITY = 80      # WebP 압축 품질 (0-100)
-SCENE_MIN_COUNT = 3         # 최소 감지 씬 개수 (미달 시 정적 샘플 위주 작동)
-SCENE_FALLBACK_INTERVAL = 180 # Fallback 시 추출 간격 (초 단위, 3분)
-SCENE_FRAME_SKIP = 4        # 장면 분석 시 스킵할 프레임 수
 SCENE_TARGET_COUNT = 24     # 최종적으로 리포트에 포함할 목표 썸네일 수 (균등 분포 보장용)
 
 # ============================================================
@@ -396,16 +392,16 @@ def correction_skip_enabled() -> bool:
 TRANSLATION_PROVIDER_DEFAULT = (
     os.environ.get("JAVSTORY_TRANSLATION_PROVIDER", "llamacpp").strip().lower() or "llamacpp"
 )
-if TRANSLATION_PROVIDER_DEFAULT not in ("openrouter", "ollama", "gemini", "llamacpp"):
+if TRANSLATION_PROVIDER_DEFAULT not in ("openrouter", "ollama", "gemini", "llamacpp", "omniroute"):
     TRANSLATION_PROVIDER_DEFAULT = "llamacpp"
 
 
 def llm_platform_from_env() -> str:
-    """Settings ``llmPlatform``: openai | ollama | llamacpp (openai → OpenRouter API)."""
+    """Settings ``llmPlatform``: openai | ollama | llamacpp | omniroute (openai → OpenRouter API)."""
     raw = (os.environ.get("JAVSTORY_LLM_PLATFORM", "llamacpp") or "llamacpp").strip().lower()
     if raw in ("openai", "openrouter"):
         return "openai"
-    if raw in ("ollama", "llamacpp"):
+    if raw in ("ollama", "llamacpp", "omniroute"):
         return raw
     return "openai"
 
@@ -479,6 +475,10 @@ def _openrouter_translation_model() -> str:
     return TRANSLATION_OPENROUTER_MODEL_DEFAULT
 
 
+def _omniroute_translation_model() -> str:
+    return (os.environ.get("JAVSTORY_OMNIROUTE_MODEL", "") or "").strip()
+
+
 def _ollama_translation_model() -> str:
     explicit = os.environ.get("JAVSTORY_TRANSLATION_OLLAMA_MODEL", "").strip()
     if explicit:
@@ -502,13 +502,15 @@ def _ollama_translation_model() -> str:
 def _effective_translation_provider(translation_provider: str | None) -> str:
     if translation_provider and str(translation_provider).strip():
         p = str(translation_provider).strip().lower()
-        if p in ("openrouter", "ollama", "gemini", "llamacpp"):
+        if p in ("openrouter", "ollama", "gemini", "llamacpp", "omniroute"):
             return p
     platform = llm_platform_from_env()
     if platform == "llamacpp":
         return "llamacpp"
     if platform == "ollama":
         return "ollama"
+    if platform == "omniroute":
+        return "omniroute"
     prof = _translation_profile()
     if prof in _GEMINI_PROFILE_MAP:
         return "gemini"
@@ -524,7 +526,7 @@ def _effective_translation_provider(translation_provider: str | None) -> str:
     ):
         return "ollama"
     env_p = os.environ.get("JAVSTORY_TRANSLATION_PROVIDER", "").strip().lower()
-    if env_p in ("openrouter", "ollama", "gemini", "llamacpp"):
+    if env_p in ("openrouter", "ollama", "gemini", "llamacpp", "omniroute"):
         return env_p
     return "llamacpp"
 
@@ -574,6 +576,20 @@ def translation_llm_tier_ollama() -> dict:
     }
 
 
+def translation_llm_tier_omniroute() -> dict:
+    """JA→KO 번역 — OmniRoute(사용자가 로컬에서 직접 띄운 OpenAI 호환 LLM 라우터)."""
+    return {
+        "rank": 99,
+        "name": "translation_omniroute",
+        "model": _omniroute_translation_model(),
+        "provider": "omniroute",
+        "cost_tier": "free",
+        "uncensored": True,
+        "timeout": 300,
+        "max_ctx": 32768,
+    }
+
+
 def gemini_translation_llm_tier(model_id: str | None = None) -> dict:
     """Gemini 번역 tier 딕셔너리. 환경변수 JAVSTORY_GEMINI_MODEL로 모델 덮어쓰기 가능."""
     prof = _translation_profile()
@@ -615,6 +631,8 @@ def resolve_translation_llm_tier(
             base = translation_llm_tier_ollama()
         elif prov == "llamacpp":
             base = translation_llm_tier_llamacpp()
+        elif prov == "omniroute":
+            base = translation_llm_tier_omniroute()
         else:
             base = translation_llm_tier_openrouter()
         return {**base, **translation_tier}
@@ -625,6 +643,8 @@ def resolve_translation_llm_tier(
         return translation_llm_tier_ollama()
     if prov == "llamacpp":
         return translation_llm_tier_llamacpp()
+    if prov == "omniroute":
+        return translation_llm_tier_omniroute()
     return translation_llm_tier_openrouter()
 
 

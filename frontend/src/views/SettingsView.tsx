@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { Save, RotateCcw, HardDrive, Cpu, Globe, Shield, Mic2, Loader2, Languages, FileText, Sparkles } from "lucide-react";
+import { Save, RotateCcw, HardDrive, Cpu, Globe, Shield, Mic2, Loader2, Languages, FileText, Sparkles, Film, Trash2, Wheat } from "lucide-react";
 import { GlassCard } from "@/components/ui/GlassCard";
 import { ActionButton } from "@/components/ui/ActionButton";
 import {
@@ -14,15 +14,32 @@ import {
   fetchTranslationPromptSettings,
   patchTranslationPromptSettings,
   fetchEmbeddingsSettings,
+  fetchEmbeddingsGgufOptions,
   patchEmbeddingsSettings,
+  fetchHarvestSettings,
+  patchHarvestSettings,
   type SttFwXxlOptions,
   type SttSettings,
   type TranslationSettings,
   type TranslationPromptSettings,
   type EmbeddingsSettings,
+  type EmbeddingsGgufOption,
+  type HarvestSettings,
 } from "@/api/settings";
 import { warmupLibraryEmbeddings, backfillLibraryEmbeddings } from "@/api/library";
+import {
+  fetchProxyCacheStats,
+  clearProxyCache,
+  type ProxyCacheStats,
+} from "@/api/playback";
 import { useToast } from "@/contexts/ToastContext";
+
+function formatBytes(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes <= 0) return "0 B";
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  const i = Math.min(units.length - 1, Math.floor(Math.log(bytes) / Math.log(1024)));
+  return `${(bytes / 1024 ** i).toFixed(i === 0 ? 0 : 1)} ${units[i]}`;
+}
 
 const WHISPER_MODEL_OPTIONS = [
   { label: "large-v2 (기본)", value: "large-v2" },
@@ -55,8 +72,10 @@ const DEFAULT_FW_XXL: SttFwXxlOptions = {
   hallucination_silence_threshold: 1.5,
   compute_type: "float16",
   batch_size: 8,
-  word_timestamps: true,
+  word_timestamps: false,
   repetition_penalty: 1.2,
+  log_prob_threshold: -1.0,
+  compression_ratio_threshold: 2.4,
 };
 
 type FwXxlDraft = {
@@ -76,6 +95,8 @@ type FwXxlDraft = {
   batch_size: string;
   word_timestamps: boolean;
   repetition_penalty: string;
+  log_prob_threshold: string;
+  compression_ratio_threshold: string;
 };
 
 function fwXxlToDraft(o: SttFwXxlOptions): FwXxlDraft {
@@ -97,6 +118,8 @@ function fwXxlToDraft(o: SttFwXxlOptions): FwXxlDraft {
     batch_size: String(m.batch_size),
     word_timestamps: m.word_timestamps,
     repetition_penalty: String(m.repetition_penalty),
+    log_prob_threshold: String(m.log_prob_threshold),
+    compression_ratio_threshold: String(m.compression_ratio_threshold),
   };
 }
 
@@ -114,7 +137,9 @@ function parseFwXxlDraft(d: FwXxlDraft): SttFwXxlOptions | null {
   const minSpeech = int(d.vad_min_speech_duration_ms);
   const maxSpeech = int(d.vad_max_speech_duration_s);
   const rep = num(d.repetition_penalty);
-  if ([vad, noSpeech, temp, tempInc, hallu, rep].some(Number.isNaN)) return null;
+  const logProb = num(d.log_prob_threshold);
+  const compRatio = num(d.compression_ratio_threshold);
+  if ([vad, noSpeech, temp, tempInc, hallu, rep, logProb, compRatio].some(Number.isNaN)) return null;
   if ([beam, bestOf, batch, minSpeech, maxSpeech].some(Number.isNaN)) return null;
   if (vad < 0.05 || vad > 0.95) return null;
   return {
@@ -134,6 +159,8 @@ function parseFwXxlDraft(d: FwXxlDraft): SttFwXxlOptions | null {
     batch_size: batch,
     word_timestamps: d.word_timestamps,
     repetition_penalty: rep,
+    log_prob_threshold: logProb,
+    compression_ratio_threshold: compRatio,
   };
 }
 
@@ -265,24 +292,143 @@ export default function SettingsView() {
   const [embSaving, setEmbSaving] = useState(false);
   const [embWarming, setEmbWarming] = useState(false);
   const [emb, setEmb] = useState<EmbeddingsSettings | null>(null);
-  const [embDraft, setEmbDraft] = useState({ enabled: false, model: "nomic-embed-text" });
+  const [ggufOptions, setGgufOptions] = useState<EmbeddingsGgufOption[]>([]);
+  const [ggufScanDir, setGgufScanDir] = useState("");
+  const [ggufOptionsLoading, setGgufOptionsLoading] = useState(true);
+  const [embDraft, setEmbDraft] = useState({
+    enabled: false,
+    backend: "llamacpp",
+    model: "nomic-embed-text",
+    gguf_path: "",
+    search_min_score: "0.36",
+    search_relative_ratio: "0.84",
+    search_max_gap: "0.10",
+  });
+
+  const loadGgufOptions = useCallback(async () => {
+    setGgufOptionsLoading(true);
+    try {
+      const snap = await fetchEmbeddingsGgufOptions();
+      setGgufOptions(snap.gguf_options ?? []);
+      setGgufScanDir(snap.gguf_scan_dir ?? "");
+    } catch (e) {
+      showToast(e instanceof Error ? e.message : "GGUF 목록 불러오기 실패", "error");
+    } finally {
+      setGgufOptionsLoading(false);
+    }
+  }, [showToast]);
 
   const loadEmb = useCallback(async () => {
     setEmbLoading(true);
+    void loadGgufOptions();
     try {
       const snap = await fetchEmbeddingsSettings();
       setEmb(snap);
-      setEmbDraft({ enabled: snap.enabled, model: snap.model });
+      if (snap.gguf_options?.length) {
+        setGgufOptions(snap.gguf_options);
+      }
+      if (snap.gguf_scan_dir) {
+        setGgufScanDir(snap.gguf_scan_dir);
+      }
+      let ggufPath = snap.gguf_path || "";
+      if (!ggufPath && snap.model) {
+        const modelKey = snap.model.trim().toLowerCase();
+        const match = (snap.gguf_options ?? []).find(o => {
+          const stem = o.label.replace(/\s*\(현재\)\s*$/, "").replace(/\.gguf$/i, "").toLowerCase();
+          return stem === modelKey || stem.includes(modelKey) || modelKey.includes(stem);
+        });
+        if (match?.gguf_path) {
+          ggufPath = match.gguf_path;
+        }
+      }
+      setEmbDraft({
+        enabled: snap.enabled,
+        backend: snap.backend || "llamacpp",
+        model: snap.model,
+        gguf_path: ggufPath,
+        search_min_score: String(snap.search_min_score ?? 0.36),
+        search_relative_ratio: String(snap.search_relative_ratio ?? 0.84),
+        search_max_gap: String(snap.search_max_gap ?? 0.1),
+      });
     } catch (e) {
       showToast(e instanceof Error ? e.message : "임베딩 설정 불러오기 실패", "error");
     } finally {
       setEmbLoading(false);
     }
-  }, [showToast]);
+  }, [showToast, loadGgufOptions]);
 
   useEffect(() => {
     void loadEmb();
   }, [loadEmb]);
+
+  const [harvestLoading, setHarvestLoading] = useState(true);
+  const [harvestSaving, setHarvestSaving] = useState(false);
+  const [harvest, setHarvest] = useState<HarvestSettings | null>(null);
+  const [harvestDraft, setHarvestDraft] = useState({
+    harvest_concurrency: "2",
+    embeddings_pause_during_harvest: true,
+    harvest_llamacpp_slot_ctx: "4096",
+  });
+
+  const loadHarvest = useCallback(async () => {
+    setHarvestLoading(true);
+    try {
+      const snap = await fetchHarvestSettings();
+      setHarvest(snap);
+      setHarvestDraft({
+        harvest_concurrency: String(snap.harvest_concurrency),
+        embeddings_pause_during_harvest: snap.embeddings_pause_during_harvest,
+        harvest_llamacpp_slot_ctx:
+          snap.harvest_llamacpp_slot_ctx != null
+            ? String(snap.harvest_llamacpp_slot_ctx)
+            : "4096",
+      });
+    } catch (e) {
+      showToast(e instanceof Error ? e.message : "Harvest 설정 불러오기 실패", "error");
+    } finally {
+      setHarvestLoading(false);
+    }
+  }, [showToast]);
+
+  useEffect(() => {
+    void loadHarvest();
+  }, [loadHarvest]);
+
+  const handleSaveHarvest = async () => {
+    setHarvestSaving(true);
+    try {
+      const conc = parseInt(harvestDraft.harvest_concurrency, 10);
+      if (!Number.isFinite(conc) || conc < 1 || conc > 5) {
+        showToast("Harvest 동시 실행 수는 1~5 사이여야 합니다", "error");
+        return;
+      }
+      const slotRaw = harvestDraft.harvest_llamacpp_slot_ctx.trim();
+      const slotCtx = slotRaw ? parseInt(slotRaw, 10) : null;
+      if (slotRaw && (!Number.isFinite(slotCtx!) || slotCtx! < 512)) {
+        showToast("슬롯 ctx는 512 이상이어야 합니다", "error");
+        return;
+      }
+      const snap = await patchHarvestSettings({
+        harvest_concurrency: conc,
+        embeddings_pause_during_harvest: harvestDraft.embeddings_pause_during_harvest,
+        harvest_llamacpp_slot_ctx: slotCtx,
+      });
+      setHarvest(snap);
+      setHarvestDraft({
+        harvest_concurrency: String(snap.harvest_concurrency),
+        embeddings_pause_during_harvest: snap.embeddings_pause_during_harvest,
+        harvest_llamacpp_slot_ctx:
+          snap.harvest_llamacpp_slot_ctx != null
+            ? String(snap.harvest_llamacpp_slot_ctx)
+            : "",
+      });
+      showToast("Harvest 성능 설정 저장됨 (llama-server 재시작 필요)", "success");
+    } catch (e) {
+      showToast(e instanceof Error ? e.message : "Harvest 설정 저장 실패", "error");
+    } finally {
+      setHarvestSaving(false);
+    }
+  };
 
   const handleSaveEmb = async () => {
     setEmbSaving(true);
@@ -292,12 +438,40 @@ export default function SettingsView() {
         showToast("임베딩 모델 이름을 입력하세요", "error");
         return;
       }
+      const minScore = Number(embDraft.search_min_score);
+      const relRatio = Number(embDraft.search_relative_ratio);
+      const maxGap = Number(embDraft.search_max_gap);
+      if (!Number.isFinite(minScore) || minScore < 0.05 || minScore > 0.95) {
+        showToast("최소 유사도는 0.05~0.95 사이여야 합니다", "error");
+        return;
+      }
+      if (!Number.isFinite(relRatio) || relRatio < 0.05 || relRatio > 0.99) {
+        showToast("상대 비율은 0.05~0.99 사이여야 합니다", "error");
+        return;
+      }
+      if (!Number.isFinite(maxGap) || maxGap < 0.01 || maxGap > 0.5) {
+        showToast("최대 격차는 0.01~0.5 사이여야 합니다", "error");
+        return;
+      }
       const snap = await patchEmbeddingsSettings({
         enabled: embDraft.enabled,
+        backend: embDraft.backend,
         model,
+        gguf_path: embDraft.gguf_path.trim(),
+        search_min_score: minScore,
+        search_relative_ratio: relRatio,
+        search_max_gap: maxGap,
       });
       setEmb(snap);
-      setEmbDraft({ enabled: snap.enabled, model: snap.model });
+      setEmbDraft({
+        enabled: snap.enabled,
+        backend: snap.backend || "llamacpp",
+        model: snap.model,
+        gguf_path: snap.gguf_path || "",
+        search_min_score: String(snap.search_min_score ?? 0.36),
+        search_relative_ratio: String(snap.search_relative_ratio ?? 0.84),
+        search_max_gap: String(snap.search_max_gap ?? 0.1),
+      });
       showToast("임베딩 설정 저장됨", "success");
     } catch (e) {
       showToast(e instanceof Error ? e.message : "임베딩 설정 저장 실패", "error");
@@ -308,7 +482,15 @@ export default function SettingsView() {
 
   const handleResetEmb = () => {
     if (!emb) return;
-    setEmbDraft({ enabled: emb.enabled, model: emb.model });
+    setEmbDraft({
+      enabled: emb.enabled,
+      backend: emb.backend || "llamacpp",
+      model: emb.model,
+      gguf_path: emb.gguf_path || "",
+      search_min_score: String(emb.search_min_score ?? 0.36),
+      search_relative_ratio: String(emb.search_relative_ratio ?? 0.84),
+      search_max_gap: String(emb.search_max_gap ?? 0.1),
+    });
   };
 
   const handleWarmupEmbeddings = async () => {
@@ -343,6 +525,11 @@ export default function SettingsView() {
   const [trDraft, setTrDraft] = useState({
     provider: "llamacpp",
     openrouter_profile: "default",
+    omniroute_url: "http://localhost:20128/v1",
+    omniroute_model: "",
+    omniroute_chunk_target_lines: "12",
+    omniroute_chunk_overlap_lines: "3",
+    omniroute_context_length: "32768",
     llamacpp_bin: "",
     llamacpp_url: "http://127.0.0.1:8080",
     llamacpp_port: "8080",
@@ -357,13 +544,26 @@ export default function SettingsView() {
     llamacpp_flash_attn: true,
     llamacpp_auto_start: true,
     llamacpp_fit_vram: false,
+    llamacpp_chunk_target_lines: "12",
+    llamacpp_chunk_overlap_lines: "3",
+    ollama_chunk_target_lines: "12",
+    ollama_chunk_overlap_lines: "3",
+    ollama_context_length: "2048",
+    openrouter_chunk_target_lines: "16",
+    openrouter_chunk_overlap_lines: "4",
   });
 
   const applyTrSnap = useCallback((snap: TranslationSettings) => {
     const lc = snap.llamacpp;
+    const co = snap.chunk_options;
     setTrDraft({
       provider: snap.provider,
       openrouter_profile: snap.openrouter_profile,
+      omniroute_url: snap.omniroute.url,
+      omniroute_model: snap.omniroute.model,
+      omniroute_chunk_target_lines: String(co.omniroute.chunk_target_lines),
+      omniroute_chunk_overlap_lines: String(co.omniroute.chunk_overlap_lines),
+      omniroute_context_length: String(co.omniroute.context_length ?? 32768),
       llamacpp_bin: lc.bin === "llama-server.exe" ? "" : lc.bin,
       llamacpp_url: lc.url,
       llamacpp_port: String(lc.port),
@@ -378,6 +578,13 @@ export default function SettingsView() {
       llamacpp_flash_attn: lc.flash_attn,
       llamacpp_auto_start: lc.auto_start,
       llamacpp_fit_vram: lc.fit_vram,
+      llamacpp_chunk_target_lines: String(co.llamacpp.chunk_target_lines),
+      llamacpp_chunk_overlap_lines: String(co.llamacpp.chunk_overlap_lines),
+      ollama_chunk_target_lines: String(co.ollama.chunk_target_lines),
+      ollama_chunk_overlap_lines: String(co.ollama.chunk_overlap_lines),
+      ollama_context_length: String(co.ollama.context_length ?? 2048),
+      openrouter_chunk_target_lines: String(co.openrouter.chunk_target_lines),
+      openrouter_chunk_overlap_lines: String(co.openrouter.chunk_overlap_lines),
     });
   }, []);
 
@@ -401,6 +608,10 @@ export default function SettingsView() {
   const handleSaveTranslation = async () => {
     setTrSaving(true);
     try {
+      if (trDraft.provider === "omniroute" && !trDraft.omniroute_model.trim()) {
+        showToast("OmniRoute 모델(콤보) 이름을 입력해주세요", "error");
+        return;
+      }
       const ctx = parseInt(trDraft.llamacpp_ctx, 10);
       const port = parseInt(trDraft.llamacpp_port, 10);
       if (Number.isNaN(ctx) || ctx < 512) {
@@ -423,9 +634,65 @@ export default function SettingsView() {
         showToast("스레드 수는 1 이상이어야 합니다", "error");
         return;
       }
+
+      const parseChunkLines = (raw: string, label: string): number | null => {
+        const n = parseInt(raw, 10);
+        if (Number.isNaN(n) || n < 1 || n > 200) {
+          showToast(`${label} 청크 길이는 1~200줄 사이여야 합니다`, "error");
+          return null;
+        }
+        return n;
+      };
+      const parseOverlapLines = (raw: string, label: string): number | null => {
+        const n = parseInt(raw, 10);
+        if (Number.isNaN(n) || n < 0 || n > 50) {
+          showToast(`${label} 겹침(오버랩)은 0~50줄 사이여야 합니다`, "error");
+          return null;
+        }
+        return n;
+      };
+      const parseContextLen = (raw: string, label: string): number | null => {
+        const n = parseInt(raw, 10);
+        if (Number.isNaN(n) || n < 512) {
+          showToast(`${label} 컨텍스트 길이는 512 이상이어야 합니다`, "error");
+          return null;
+        }
+        return n;
+      };
+
+      const llamacppChunkTarget = parseChunkLines(trDraft.llamacpp_chunk_target_lines, "llama.cpp");
+      const llamacppChunkOverlap = parseOverlapLines(trDraft.llamacpp_chunk_overlap_lines, "llama.cpp");
+      const ollamaChunkTarget = parseChunkLines(trDraft.ollama_chunk_target_lines, "Ollama");
+      const ollamaChunkOverlap = parseOverlapLines(trDraft.ollama_chunk_overlap_lines, "Ollama");
+      const ollamaContextLen = parseContextLen(trDraft.ollama_context_length, "Ollama");
+      const openrouterChunkTarget = parseChunkLines(trDraft.openrouter_chunk_target_lines, "OpenRouter");
+      const openrouterChunkOverlap = parseOverlapLines(trDraft.openrouter_chunk_overlap_lines, "OpenRouter");
+      const omnirouteChunkTarget = parseChunkLines(trDraft.omniroute_chunk_target_lines, "OmniRoute");
+      const omnirouteChunkOverlap = parseOverlapLines(trDraft.omniroute_chunk_overlap_lines, "OmniRoute");
+      const omnirouteContextLen = parseContextLen(trDraft.omniroute_context_length, "OmniRoute");
+      if (
+        llamacppChunkTarget === null ||
+        llamacppChunkOverlap === null ||
+        ollamaChunkTarget === null ||
+        ollamaChunkOverlap === null ||
+        ollamaContextLen === null ||
+        openrouterChunkTarget === null ||
+        openrouterChunkOverlap === null ||
+        omnirouteChunkTarget === null ||
+        omnirouteChunkOverlap === null ||
+        omnirouteContextLen === null
+      ) {
+        return;
+      }
+
       const snap = await patchTranslationSettings({
         provider: trDraft.provider,
         openrouter_profile: trDraft.openrouter_profile,
+        omniroute_url: trDraft.omniroute_url,
+        omniroute_model: trDraft.omniroute_model,
+        omniroute_chunk_target_lines: omnirouteChunkTarget,
+        omniroute_chunk_overlap_lines: omnirouteChunkOverlap,
+        omniroute_context_length: omnirouteContextLen,
         llamacpp_bin: trDraft.llamacpp_bin,
         llamacpp_url: trDraft.llamacpp_url,
         llamacpp_port: port,
@@ -440,6 +707,13 @@ export default function SettingsView() {
         llamacpp_flash_attn: trDraft.llamacpp_flash_attn,
         llamacpp_auto_start: trDraft.llamacpp_auto_start,
         llamacpp_fit_vram: trDraft.llamacpp_fit_vram,
+        llamacpp_chunk_target_lines: llamacppChunkTarget,
+        llamacpp_chunk_overlap_lines: llamacppChunkOverlap,
+        ollama_chunk_target_lines: ollamaChunkTarget,
+        ollama_chunk_overlap_lines: ollamaChunkOverlap,
+        ollama_context_length: ollamaContextLen,
+        openrouter_chunk_target_lines: openrouterChunkTarget,
+        openrouter_chunk_overlap_lines: openrouterChunkOverlap,
       });
       setTr(snap);
       applyTrSnap(snap);
@@ -533,6 +807,46 @@ export default function SettingsView() {
 
   const promptModeOptions = (pr?.prompt_mode_options ?? []).map(o => ({ label: o.label, value: o.id }));
   const promptVariantOptions = (pr?.prompt_variant_options ?? []).map(o => ({ label: o.label, value: o.id }));
+
+  const [cacheStats, setCacheStats] = useState<ProxyCacheStats | null>(null);
+  const [cacheLoading, setCacheLoading] = useState(true);
+  const [cacheClearing, setCacheClearing] = useState(false);
+
+  const loadCacheStats = useCallback(async () => {
+    setCacheLoading(true);
+    try {
+      setCacheStats(await fetchProxyCacheStats());
+    } catch (e) {
+      showToast(e instanceof Error ? e.message : "재생 캐시 정보 불러오기 실패", "error");
+    } finally {
+      setCacheLoading(false);
+    }
+  }, [showToast]);
+
+  useEffect(() => {
+    void loadCacheStats();
+  }, [loadCacheStats]);
+
+  const handleClearCache = async () => {
+    setCacheClearing(true);
+    try {
+      const res = await clearProxyCache();
+      showToast(
+        `재생 캐시 정리 완료 · ${res.removed}개 삭제 (${formatBytes(res.freed_bytes)} 확보)`,
+        "success",
+      );
+      await loadCacheStats();
+    } catch (e) {
+      showToast(e instanceof Error ? e.message : "재생 캐시 정리 실패", "error");
+    } finally {
+      setCacheClearing(false);
+    }
+  };
+
+  const cacheUsagePct =
+    cacheStats && cacheStats.max_bytes > 0
+      ? Math.min(100, (cacheStats.total_bytes / cacheStats.max_bytes) * 100)
+      : 0;
 
   return (
     <div className="space-y-5 animate-fade-in max-w-2xl">
@@ -665,6 +979,18 @@ export default function SettingsView() {
                   <TextInput
                     value={sttDraft.fw_xxl.no_speech_threshold}
                     onChange={v => setFwXxl("no_speech_threshold", v)}
+                  />
+                </SettingsRow>
+                <SettingsRow label="로그확률 임계값" hint="--log_prob_threshold (낮을수록 fallback 완화)">
+                  <TextInput
+                    value={sttDraft.fw_xxl.log_prob_threshold}
+                    onChange={v => setFwXxl("log_prob_threshold", v)}
+                  />
+                </SettingsRow>
+                <SettingsRow label="압축률 임계값" hint="--compression_ratio_threshold (높을수록 fallback 완화)">
+                  <TextInput
+                    value={sttDraft.fw_xxl.compression_ratio_threshold}
+                    onChange={v => setFwXxl("compression_ratio_threshold", v)}
                   />
                 </SettingsRow>
                 <SettingsRow label="Beam size" hint="--beam_size">
@@ -805,20 +1131,111 @@ export default function SettingsView() {
                   { label: "llama.cpp (로컬 llama-server)", value: "llamacpp" },
                   { label: "OpenRouter (클라우드 API)", value: "openrouter" },
                   { label: "Ollama (로컬)", value: "ollama" },
+                  { label: "OmniRoute (로컬 라우터)", value: "omniroute" },
                 ]}
               />
             </SettingsRow>
 
+            {trDraft.provider === "omniroute" && (
+              <>
+                <SettingsRow label="서버 URL" hint="사용자가 로컬에서 직접 띄운 OpenAI 호환 라우터 주소">
+                  <TextInput
+                    value={trDraft.omniroute_url}
+                    onChange={v => setTrDraft(d => ({ ...d, omniroute_url: v }))}
+                    placeholder="http://localhost:20128/v1"
+                  />
+                </SettingsRow>
+
+                <SettingsRow label="모델(콤보)" hint="OmniRoute에 설정해 둔 콤보 이름을 그대로 입력">
+                  <TextInput
+                    value={trDraft.omniroute_model}
+                    onChange={v => setTrDraft(d => ({ ...d, omniroute_model: v }))}
+                    placeholder="예: combo"
+                  />
+                </SettingsRow>
+
+                <SettingsRow label="청크 길이 (줄)" hint="한 번에 번역 요청할 자막 줄 수. 권장 12줄">
+                  <TextInput
+                    value={trDraft.omniroute_chunk_target_lines}
+                    onChange={v => setTrDraft(d => ({ ...d, omniroute_chunk_target_lines: v }))}
+                    placeholder="12"
+                  />
+                </SettingsRow>
+
+                <SettingsRow label="겹침 · 슬라이딩 윈도우 (줄)" hint="이전 청크 마지막 N줄의 원문을 읽기 전용 문맥으로 함께 전달(재번역 대상 아님). 권장 3줄">
+                  <TextInput
+                    value={trDraft.omniroute_chunk_overlap_lines}
+                    onChange={v => setTrDraft(d => ({ ...d, omniroute_chunk_overlap_lines: v }))}
+                    placeholder="3"
+                  />
+                </SettingsRow>
+
+                <SettingsRow label="컨텍스트 길이" hint="OmniRoute가 실제로 라우팅하는 모델의 컨텍스트 윈도우(토큰). 모르면 기본값 32768 유지">
+                  <TextInput
+                    value={trDraft.omniroute_context_length}
+                    onChange={v => setTrDraft(d => ({ ...d, omniroute_context_length: v }))}
+                    placeholder="32768"
+                  />
+                </SettingsRow>
+              </>
+            )}
+
             {trDraft.provider === "openrouter" && (
-              <SettingsRow label="OpenRouter 프로필">
-                <SelectInput
-                  value={trDraft.openrouter_profile}
-                  onChange={v => setTrDraft(d => ({ ...d, openrouter_profile: v }))}
-                  options={orProfileOptions.length ? orProfileOptions : [
-                    { label: "DeepSeek V3.2 (기본)", value: "default" },
-                  ]}
-                />
-              </SettingsRow>
+              <>
+                <SettingsRow label="OpenRouter 프로필">
+                  <SelectInput
+                    value={trDraft.openrouter_profile}
+                    onChange={v => setTrDraft(d => ({ ...d, openrouter_profile: v }))}
+                    options={orProfileOptions.length ? orProfileOptions : [
+                      { label: "DeepSeek V3.2 (기본)", value: "default" },
+                    ]}
+                  />
+                </SettingsRow>
+
+                <SettingsRow label="청크 길이 (줄)" hint="클라우드 모델이라 여유 있게 잡아도 됨. 권장 16줄">
+                  <TextInput
+                    value={trDraft.openrouter_chunk_target_lines}
+                    onChange={v => setTrDraft(d => ({ ...d, openrouter_chunk_target_lines: v }))}
+                    placeholder="16"
+                  />
+                </SettingsRow>
+
+                <SettingsRow label="겹침 · 슬라이딩 윈도우 (줄)" hint="권장 4줄">
+                  <TextInput
+                    value={trDraft.openrouter_chunk_overlap_lines}
+                    onChange={v => setTrDraft(d => ({ ...d, openrouter_chunk_overlap_lines: v }))}
+                    placeholder="4"
+                  />
+                </SettingsRow>
+              </>
+            )}
+
+            {trDraft.provider === "ollama" && (
+              <>
+                <SettingsRow label="청크 길이 (줄)" hint="선택한 모델 크기에 맞춘 권장값이 기본으로 채워집니다">
+                  <TextInput
+                    value={trDraft.ollama_chunk_target_lines}
+                    onChange={v => setTrDraft(d => ({ ...d, ollama_chunk_target_lines: v }))}
+                    placeholder="12"
+                  />
+                </SettingsRow>
+
+                <SettingsRow label="겹침 · 슬라이딩 윈도우 (줄)">
+                  <TextInput
+                    value={trDraft.ollama_chunk_overlap_lines}
+                    onChange={v => setTrDraft(d => ({ ...d, ollama_chunk_overlap_lines: v }))}
+                    placeholder="3"
+                  />
+                </SettingsRow>
+
+                <SettingsRow label="컨텍스트 길이 (num_ctx)" hint="Ollama 모델 컨텍스트 윈도우(토큰). 기본 2048 — 배경·번역 노트·힌트가 길어 잘리면 4096 이상으로 상향">
+                  <TextInput
+                    value={trDraft.ollama_context_length}
+                    onChange={v => setTrDraft(d => ({ ...d, ollama_context_length: v }))}
+                    placeholder="2048"
+                  />
+                </SettingsRow>
+              </>
             )}
 
             {trDraft.provider === "llamacpp" && (
@@ -881,6 +1298,20 @@ export default function SettingsView() {
                   <TextInput
                     value={trDraft.llamacpp_ctx}
                     onChange={v => setTrDraft(d => ({ ...d, llamacpp_ctx: v }))}
+                  />
+                </SettingsRow>
+
+                <SettingsRow label="청크 길이 (줄)" hint="선택한 모델(Qwen/Gemma 등)에 맞춘 권장값이 기본으로 채워집니다">
+                  <TextInput
+                    value={trDraft.llamacpp_chunk_target_lines}
+                    onChange={v => setTrDraft(d => ({ ...d, llamacpp_chunk_target_lines: v }))}
+                  />
+                </SettingsRow>
+
+                <SettingsRow label="겹침 · 슬라이딩 윈도우 (줄)">
+                  <TextInput
+                    value={trDraft.llamacpp_chunk_overlap_lines}
+                    onChange={v => setTrDraft(d => ({ ...d, llamacpp_chunk_overlap_lines: v }))}
                   />
                 </SettingsRow>
 
@@ -1088,9 +1519,9 @@ export default function SettingsView() {
         </SettingsRow>
       </SettingsSection>
 
-      {/* ── 시맨틱 검색 / 임베딩 ── */}
-      <SettingsSection icon={Sparkles} title="시맨틱 검색 (임베딩)">
-        {embLoading && !emb ? (
+      {/* ── Harvest 성능 ── */}
+      <SettingsSection icon={Wheat} title="Harvest 성능">
+        {harvestLoading && !harvest ? (
           <div className="flex items-center gap-2 text-sm text-muted-foreground py-2">
             <Loader2 className="w-4 h-4 animate-spin" />
             불러오는 중…
@@ -1098,8 +1529,83 @@ export default function SettingsView() {
         ) : (
           <>
             <SettingsRow
+              label="동시 실행 수"
+              hint="1~5 · llama-server --parallel과 연동 (JAVSTORY_HARVEST_CONCURRENCY)"
+            >
+              <SelectInput
+                value={harvestDraft.harvest_concurrency}
+                onChange={v => setHarvestDraft(d => ({ ...d, harvest_concurrency: v }))}
+                options={["1", "2", "3", "4", "5"].map(n => ({ label: n, value: n }))}
+              />
+            </SettingsRow>
+            <SettingsRow
+              label="Harvest 중 임베딩 일시정지"
+              hint="번역 GPU/RAM 확보 · 완료 후 보류 SKU 일괄 임베딩"
+              control="switch"
+            >
+              <Toggle
+                checked={harvestDraft.embeddings_pause_during_harvest}
+                onChange={v =>
+                  setHarvestDraft(d => ({ ...d, embeddings_pause_during_harvest: v }))
+                }
+                disabled={harvestSaving}
+              />
+            </SettingsRow>
+            <SettingsRow
+              label="슬롯당 ctx"
+              hint="JAVSTORY_HARVEST_LLAMACPP_SLOT_CTX · total = slot × parallel (예: 4096×5=20480)"
+            >
+              <TextInput
+                value={harvestDraft.harvest_llamacpp_slot_ctx}
+                onChange={v =>
+                  setHarvestDraft(d => ({ ...d, harvest_llamacpp_slot_ctx: v }))
+                }
+              />
+            </SettingsRow>
+            {harvest?.llamacpp_spawn_diagnostics?.command ? (
+              <p className="text-xs text-muted-foreground px-1 break-all font-mono">
+                llama-server: {String(harvest.llamacpp_spawn_diagnostics.command)}
+              </p>
+            ) : null}
+            {(harvest?.tuning_hints ?? []).length > 0 ? (
+              <ul className="text-xs text-muted-foreground px-1 space-y-1 list-disc list-inside">
+                {harvest!.tuning_hints.map(h => (
+                  <li key={h}>{h}</li>
+                ))}
+              </ul>
+            ) : null}
+            <div className="flex justify-end pt-2">
+              <ActionButton
+                variant="primary"
+                size="sm"
+                loading={harvestSaving}
+                icon={<Save className="w-3.5 h-3.5" />}
+                onClick={() => void handleSaveHarvest()}
+              >
+                Harvest 설정 저장
+              </ActionButton>
+            </div>
+          </>
+        )}
+      </SettingsSection>
+
+      {/* ── 시맨틱 검색 / 임베딩 ── */}
+      <SettingsSection icon={Sparkles} title="시맨틱 검색 (임베딩)">
+        {embLoading && !emb ? (
+          <div className="flex flex-col gap-2 py-2">
+            <div className="flex items-center gap-2 text-sm text-muted-foreground">
+              <Loader2 className="w-4 h-4 animate-spin" />
+              불러오는 중…
+            </div>
+            <p className="text-xs text-muted-foreground px-1">
+              임베딩 커버리지 통계를 집계합니다. 라이브러리가 크면 수 초 걸릴 수 있습니다.
+            </p>
+          </div>
+        ) : (
+          <>
+            <SettingsRow
               label="임베딩 사용"
-              hint="Ollama로 작품 벡터를 만들어 자연어 검색·추천에 사용"
+              hint="llama-server로 작품 벡터를 만들어 자연어 검색·추천에 사용"
               control="switch"
             >
               <Toggle
@@ -1107,10 +1613,118 @@ export default function SettingsView() {
                 onChange={v => setEmbDraft(d => ({ ...d, enabled: v }))}
               />
             </SettingsRow>
-            <SettingsRow label="Ollama 임베딩 모델" hint="예: nomic-embed-text">
+            <SettingsRow label="백엔드" hint="기본: llama-server (채팅용과 별도 포트 8082)">
+              <SelectInput
+                value={embDraft.backend}
+                onChange={v => setEmbDraft(d => ({ ...d, backend: v }))}
+                options={[
+                  { label: "llama-server", value: "llamacpp" },
+                  { label: "Ollama (레거시)", value: "ollama" },
+                ]}
+              />
+            </SettingsRow>
+            <SettingsRow
+              label="모델 alias"
+              hint="API model 이름 · 캐시 키 (예: nomic-embed-text)"
+            >
               <TextInput
                 value={embDraft.model}
                 onChange={v => setEmbDraft(d => ({ ...d, model: v }))}
+              />
+            </SettingsRow>
+            {embDraft.backend === "llamacpp" && (
+              <>
+                <SettingsRow
+                  label="임베딩 GGUF"
+                  hint={
+                    ggufScanDir || emb?.gguf_scan_dir
+                      ? `${ggufScanDir || emb?.gguf_scan_dir} — e5 / nomic / bge 등`
+                      : "D:\\Models 폴더의 임베딩 GGUF"
+                  }
+                >
+                  {ggufOptionsLoading && ggufOptions.length === 0 ? (
+                    <div className="flex items-center gap-2 text-sm text-muted-foreground">
+                      <Loader2 className="w-4 h-4 animate-spin" />
+                      GGUF 목록 불러오는 중…
+                    </div>
+                  ) : ggufOptions.length === 0 ? (
+                    <div className="flex flex-col gap-2">
+                      <p className="text-sm text-amber-300/90">
+                        GGUF 목록을 불러오지 못했습니다. webapi 재시작 후 새로고침하세요.
+                      </p>
+                      <ActionButton variant="ghost" size="sm" onClick={() => void loadGgufOptions()}>
+                        GGUF 목록 다시 불러오기
+                      </ActionButton>
+                    </div>
+                  ) : (
+                  <SelectInput
+                    value={
+                      ggufOptions.find(o => o.gguf_path === embDraft.gguf_path)?.id
+                      ?? ggufOptions.find(o => {
+                        const stem = o.label.replace(/\.gguf$/i, "").toLowerCase();
+                        return stem === embDraft.model.trim().toLowerCase();
+                      })?.id
+                      ?? ""
+                    }
+                    onChange={v => {
+                      const opt = ggufOptions.find(o => o.id === v);
+                      const path = opt?.gguf_path ?? "";
+                      const stem = path
+                        ? path.replace(/^.*[\\/]/, "").replace(/\.gguf$/i, "")
+                        : "";
+                      setEmbDraft(d => ({
+                        ...d,
+                        gguf_path: path,
+                        ...(path && stem ? { model: stem } : {}),
+                      }));
+                    }}
+                    options={ggufOptions.map(o => ({
+                      label: o.label,
+                      value: o.id || "",
+                    }))}
+                  />
+                  )}
+                </SettingsRow>
+                {ggufOptions.length <= 1 && !ggufOptionsLoading ? (
+                  <p className="text-xs text-amber-300/90 px-1 -mt-2 mb-1">
+                    스캔 폴더에서 임베딩 GGUF를 찾지 못했습니다. `.env`에{" "}
+                    <span className="font-mono">JAVSTORY_EMBEDDINGS_LLAMACPP_GGUF</span> 경로를
+                    지정하거나 <span className="font-mono">JAVSTORY_LLAMACPP_GGUF_SCAN_DIR</span>
+                    를 확인하세요.
+                  </p>
+                ) : null}
+                {embDraft.gguf_path ? (
+                  <p className="text-xs text-muted-foreground px-1 break-all -mt-2 mb-1">
+                    {embDraft.gguf_path}
+                  </p>
+                ) : null}
+              </>
+            )}
+            <SettingsRow
+              label="최소 유사도"
+              hint="이하면 제외 · 낮출수록 결과↑ / 올릴수록 엄격 (기본 0.36)"
+            >
+              <TextInput
+                value={embDraft.search_min_score}
+                onChange={v => setEmbDraft(d => ({ ...d, search_min_score: v }))}
+              />
+            </SettingsRow>
+            <SettingsRow
+              label="상대 비율"
+              hint="1등 점수×비율 미만 제외 · 낮출수록 더 많이 남김 (기본 0.84)"
+            >
+              <TextInput
+                value={embDraft.search_relative_ratio}
+                onChange={v => setEmbDraft(d => ({ ...d, search_relative_ratio: v }))}
+              />
+            </SettingsRow>
+            <SettingsRow
+              label="최대 격차"
+              hint="1등과의 점수 차이 허용폭 · 키우면 결과↑ (기본 0.10)"
+            >
+              <TextInput
+                value={embDraft.search_max_gap}
+                onChange={v => setEmbDraft(d => ({ ...d, search_max_gap: v }))}
               />
             </SettingsRow>
             {emb && (
@@ -1175,6 +1789,58 @@ export default function SettingsView() {
         <SettingsRow label="자동 수집" hint="폴더 감시 후 자동으로 수집 시작" control="switch">
           <Toggle checked={autoScrape} onChange={setAutoScrape} />
         </SettingsRow>
+      </SettingsSection>
+
+      {/* ── 재생 캐시 ── */}
+      <SettingsSection icon={Film} title="재생 캐시 (브라우저 프록시)">
+        {cacheLoading && !cacheStats ? (
+          <div className="flex items-center gap-2 text-sm text-muted-foreground py-2">
+            <Loader2 className="w-4 h-4 animate-spin" />
+            불러오는 중…
+          </div>
+        ) : (
+          <>
+            <p className="text-sm text-muted-foreground px-1">
+              MKV·TS·HEVC 등 브라우저가 직접 못 여는 영상을 재생용 MP4로 변환해 캐시합니다.
+              상한 초과 시 오래 안 본 것부터 자동 삭제되며, <span className="text-sky-300">나중에 볼</span> 영상은 시청 전까지(최대 30일) 보호됩니다.
+            </p>
+            {cacheStats && (
+              <div className="px-1 pt-1">
+                <div className="h-1.5 w-full rounded-full bg-white/10 overflow-hidden">
+                  <div
+                    className={cacheUsagePct >= 90 ? "h-full rounded-full bg-rose-400" : "h-full rounded-full bg-indigo-400"}
+                    style={{ width: `${Math.max(2, cacheUsagePct)}%` }}
+                  />
+                </div>
+                <p className="text-sm text-muted-foreground mt-1.5 tabular-nums">
+                  {formatBytes(cacheStats.total_bytes)} / {formatBytes(cacheStats.max_bytes)}
+                  {" · "}파일 {cacheStats.file_count.toLocaleString()}개
+                  {" · "}{cacheUsagePct.toFixed(0)}% 사용
+                </p>
+              </div>
+            )}
+            <div className="flex flex-wrap gap-2 justify-end pt-1">
+              <ActionButton
+                variant="ghost"
+                size="sm"
+                icon={<RotateCcw className="w-3.5 h-3.5" />}
+                onClick={() => void loadCacheStats()}
+                disabled={cacheLoading}
+              >
+                새로고침
+              </ActionButton>
+              <ActionButton
+                variant="danger"
+                size="sm"
+                loading={cacheClearing}
+                icon={<Trash2 className="w-3.5 h-3.5" />}
+                onClick={() => void handleClearCache()}
+              >
+                캐시 모두 비우기
+              </ActionButton>
+            </div>
+          </>
+        )}
       </SettingsSection>
 
       {/* ── 저장 경로 ── */}

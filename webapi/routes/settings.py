@@ -21,7 +21,10 @@ from javstory.translation.translation_prompt_config import (
 from webapi.schemas import (
     EmbeddingsSettingsPatch,
     EmbeddingsSettingsResponse,
+    EmbeddingsGgufOptionsResponse,
     FasterWhisperModelOption,
+    HarvestSettingsPatch,
+    HarvestSettingsResponse,
     SttEngineOption,
     SttFwXxlOptions,
     SttSettingsPatch,
@@ -151,10 +154,58 @@ def patch_translation_settings(body: TranslationSettingsPatch):
             set_env_runtime_value("JAVSTORY_LLM_PLATFORM", "ollama")
         elif prov == "openrouter":
             set_env_runtime_value("JAVSTORY_LLM_PLATFORM", "openai")
+        elif prov == "omniroute":
+            set_env_runtime_value("JAVSTORY_LLM_PLATFORM", "omniroute")
 
     if "openrouter_profile" in data and data["openrouter_profile"]:
         prof = str(data["openrouter_profile"]).strip().lower()
         set_env_runtime_value("JAVSTORY_TRANSLATION_PROFILE", prof)
+
+    if "omniroute_url" in data and data["omniroute_url"]:
+        url = str(data["omniroute_url"]).strip().rstrip("/")
+        set_env_runtime_value("JAVSTORY_OMNIROUTE_URL", url)
+
+    if "omniroute_model" in data:
+        set_env_runtime_value("JAVSTORY_OMNIROUTE_MODEL", str(data["omniroute_model"] or "").strip())
+
+    if "llamacpp_chunk_target_lines" in data and data["llamacpp_chunk_target_lines"] is not None:
+        set_env_runtime_value(
+            "JAVSTORY_TRANSLATION_LLAMACPP_CHUNK_TARGET_LINES", str(data["llamacpp_chunk_target_lines"])
+        )
+    if "llamacpp_chunk_overlap_lines" in data and data["llamacpp_chunk_overlap_lines"] is not None:
+        set_env_runtime_value(
+            "JAVSTORY_TRANSLATION_LLAMACPP_CHUNK_OVERLAP_LINES", str(data["llamacpp_chunk_overlap_lines"])
+        )
+    if "ollama_chunk_target_lines" in data and data["ollama_chunk_target_lines"] is not None:
+        set_env_runtime_value(
+            "JAVSTORY_TRANSLATION_OLLAMA_CHUNK_TARGET_LINES", str(data["ollama_chunk_target_lines"])
+        )
+    if "ollama_chunk_overlap_lines" in data and data["ollama_chunk_overlap_lines"] is not None:
+        set_env_runtime_value(
+            "JAVSTORY_TRANSLATION_OLLAMA_CHUNK_OVERLAP_LINES", str(data["ollama_chunk_overlap_lines"])
+        )
+    if "ollama_context_length" in data and data["ollama_context_length"] is not None:
+        set_env_runtime_value("OLLAMA_NUM_CTX", str(data["ollama_context_length"]))
+    if "openrouter_chunk_target_lines" in data and data["openrouter_chunk_target_lines"] is not None:
+        set_env_runtime_value(
+            "JAVSTORY_TRANSLATION_OPENROUTER_CHUNK_TARGET_LINES", str(data["openrouter_chunk_target_lines"])
+        )
+    if "openrouter_chunk_overlap_lines" in data and data["openrouter_chunk_overlap_lines"] is not None:
+        set_env_runtime_value(
+            "JAVSTORY_TRANSLATION_OPENROUTER_CHUNK_OVERLAP_LINES", str(data["openrouter_chunk_overlap_lines"])
+        )
+    if "omniroute_chunk_target_lines" in data and data["omniroute_chunk_target_lines"] is not None:
+        set_env_runtime_value(
+            "JAVSTORY_TRANSLATION_OMNIROUTE_CHUNK_TARGET_LINES", str(data["omniroute_chunk_target_lines"])
+        )
+    if "omniroute_chunk_overlap_lines" in data and data["omniroute_chunk_overlap_lines"] is not None:
+        set_env_runtime_value(
+            "JAVSTORY_TRANSLATION_OMNIROUTE_CHUNK_OVERLAP_LINES", str(data["omniroute_chunk_overlap_lines"])
+        )
+    if "omniroute_context_length" in data and data["omniroute_context_length"] is not None:
+        set_env_runtime_value(
+            "JAVSTORY_TRANSLATION_OMNIROUTE_MAX_CTX", str(data["omniroute_context_length"])
+        )
 
     model_id = data.get("llamacpp_model") or llamacpp_model_from_env()
 
@@ -323,6 +374,13 @@ def patch_translation_prompt_settings(body: TranslationPromptSettingsPatch):
     return _prompt_to_response(translation_prompt_settings_snapshot())
 
 
+@router.get("/embeddings/gguf-options", response_model=EmbeddingsGgufOptionsResponse)
+def get_embeddings_gguf_options():
+    from javstory.library.embeddings.web_status import embeddings_gguf_options_snapshot
+
+    return EmbeddingsGgufOptionsResponse(**embeddings_gguf_options_snapshot())
+
+
 @router.get("/embeddings", response_model=EmbeddingsSettingsResponse)
 def get_embeddings_settings():
     from javstory.library.embeddings.web_status import embeddings_settings_snapshot
@@ -344,10 +402,99 @@ def patch_embeddings_settings(body: EmbeddingsSettingsPatch):
             "JAVSTORY_EMBEDDINGS_ENABLED",
             "1" if data["enabled"] else "0",
         )
+    if "backend" in data and data["backend"] is not None:
+        backend = str(data["backend"] or "").strip().lower() or "llamacpp"
+        if backend not in ("llamacpp", "ollama"):
+            raise HTTPException(400, "backend must be llamacpp or ollama")
+        set_env_runtime_value("JAVSTORY_EMBEDDINGS_BACKEND", backend)
     if "model" in data:
         model = str(data["model"] or "").strip()
         if not model:
             raise HTTPException(400, "model is required")
+        set_env_runtime_value("JAVSTORY_EMBEDDINGS_MODEL", model)
+        # 하위 호환
         set_env_runtime_value("JAVSTORY_EMBEDDINGS_OLLAMA_MODEL", model)
+    if "gguf_path" in data:
+        from pathlib import Path
 
+        gguf = str(data["gguf_path"] or "").strip()
+        if gguf:
+            p = Path(gguf).expanduser()
+            if not p.is_file():
+                raise HTTPException(400, f"GGUF 파일 없음: {gguf}")
+            gguf = str(p.resolve())
+        set_env_runtime_value("JAVSTORY_EMBEDDINGS_LLAMACPP_GGUF", gguf)
+        from javstory.llm.llamacpp_embeddings import invalidate_embeddings_gguf_cache
+
+        invalidate_embeddings_gguf_cache()
+
+    search_env_changed = False
+    if "search_min_score" in data and data["search_min_score"] is not None:
+        set_env_runtime_value(
+            "JAVSTORY_EMBEDDING_SEARCH_MIN_SCORE",
+            f"{float(data['search_min_score']):.4f}",
+        )
+        search_env_changed = True
+    if "search_relative_ratio" in data and data["search_relative_ratio"] is not None:
+        set_env_runtime_value(
+            "JAVSTORY_EMBEDDING_SEARCH_RELATIVE_RATIO",
+            f"{float(data['search_relative_ratio']):.4f}",
+        )
+        search_env_changed = True
+    if "search_max_gap" in data and data["search_max_gap"] is not None:
+        set_env_runtime_value(
+            "JAVSTORY_EMBEDDING_SEARCH_MAX_GAP",
+            f"{float(data['search_max_gap']):.4f}",
+        )
+        search_env_changed = True
+    if search_env_changed:
+        from javstory.search.library_search import clear_embed_search_cache
+
+        clear_embed_search_cache()
+
+    # 모델/GGUF 변경 시 ANN 인덱스 재빌드 유도
+    if any(k in data for k in ("model", "gguf_path", "enabled", "backend")):
+        try:
+            from javstory.library.embeddings.ann_index import invalidate_embedding_ann_index
+
+            invalidate_embedding_ann_index(None)
+        except Exception:
+            pass
+
+    from javstory.library.embeddings.web_status import invalidate_embeddings_coverage_cache
+
+    invalidate_embeddings_coverage_cache()
     return EmbeddingsSettingsResponse(**embeddings_settings_snapshot())
+
+
+@router.get("/harvest", response_model=HarvestSettingsResponse)
+def get_harvest_settings():
+    from javstory.library.embeddings.harvest_coordination import harvest_settings_snapshot
+
+    return HarvestSettingsResponse(**harvest_settings_snapshot())
+
+
+@router.patch("/harvest", response_model=HarvestSettingsResponse)
+def patch_harvest_settings(body: HarvestSettingsPatch):
+    from javstory.config.secrets_manager import set_env_runtime_value
+    from javstory.library.embeddings.harvest_coordination import harvest_settings_snapshot
+
+    data = body.model_dump(exclude_unset=True)
+    if "harvest_concurrency" in data and data["harvest_concurrency"] is not None:
+        set_env_runtime_value(
+            "JAVSTORY_HARVEST_CONCURRENCY",
+            str(int(data["harvest_concurrency"])),
+        )
+    if "embeddings_pause_during_harvest" in data and data["embeddings_pause_during_harvest"] is not None:
+        set_env_runtime_value(
+            "JAVSTORY_EMBEDDINGS_PAUSE_DURING_HARVEST",
+            "1" if data["embeddings_pause_during_harvest"] else "0",
+        )
+    if "harvest_llamacpp_slot_ctx" in data:
+        slot = data["harvest_llamacpp_slot_ctx"]
+        if slot is None:
+            set_env_runtime_value("JAVSTORY_HARVEST_LLAMACPP_SLOT_CTX", "")
+        else:
+            set_env_runtime_value("JAVSTORY_HARVEST_LLAMACPP_SLOT_CTX", str(int(slot)))
+
+    return HarvestSettingsResponse(**harvest_settings_snapshot())

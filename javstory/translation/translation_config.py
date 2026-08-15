@@ -20,12 +20,13 @@ from javstory.llm.llamacpp_backend import (
     resolve_translation_llamacpp_runtime,
 )
 
-TRANSLATION_PROVIDERS: tuple[str, ...] = ("llamacpp", "openrouter", "ollama")
+TRANSLATION_PROVIDERS: tuple[str, ...] = ("llamacpp", "openrouter", "ollama", "omniroute")
 
 TRANSLATION_PROVIDER_LABELS: dict[str, str] = {
     "llamacpp": "llama.cpp (로컬 llama-server)",
     "openrouter": "OpenRouter (클라우드 API)",
     "ollama": "Ollama (로컬)",
+    "omniroute": "OmniRoute (로컬 라우터)",
 }
 
 OPENROUTER_PROFILES: tuple[tuple[str, str], ...] = (
@@ -165,6 +166,90 @@ def build_llamacpp_command_preview() -> str:
     return " ".join(build_server_argv(runtime.gguf, cfg, runtime.preset))
 
 
+#: provider별 청크 env 접두사(``ko_translation_chunk.CHUNK_ENV_PREFIX_BY_PROVIDER``와 동일 키셋).
+_CHUNK_OPTION_PROVIDERS: tuple[str, ...] = ("llamacpp", "ollama", "openrouter", "omniroute")
+
+
+def _chunk_default_lines_for_provider(provider: str) -> tuple[int, int]:
+    from javstory.config.app_config import resolve_translation_llm_tier
+    from javstory.translation.ko_translation_chunk import _default_chunk_lines
+
+    tier = resolve_translation_llm_tier(translation_provider=provider)
+    return _default_chunk_lines(tier)
+
+
+def chunk_target_lines_from_env(provider: str) -> int:
+    from javstory.translation.ko_translation_chunk import CHUNK_ENV_PREFIX_BY_PROVIDER
+
+    default_target, _ = _chunk_default_lines_for_provider(provider)
+    prefix = CHUNK_ENV_PREFIX_BY_PROVIDER.get(provider, "")
+    raw = (os.environ.get(f"JAVSTORY_TRANSLATION_{prefix}_CHUNK_TARGET_LINES", "") or "").strip()
+    if raw:
+        try:
+            return max(1, int(float(raw)))
+        except ValueError:
+            pass
+    return default_target
+
+
+def chunk_overlap_lines_from_env(provider: str) -> int:
+    from javstory.translation.ko_translation_chunk import CHUNK_ENV_PREFIX_BY_PROVIDER
+
+    _, default_overlap = _chunk_default_lines_for_provider(provider)
+    prefix = CHUNK_ENV_PREFIX_BY_PROVIDER.get(provider, "")
+    raw = (os.environ.get(f"JAVSTORY_TRANSLATION_{prefix}_CHUNK_OVERLAP_LINES", "") or "").strip()
+    if raw:
+        try:
+            return max(0, int(float(raw)))
+        except ValueError:
+            pass
+    return default_overlap
+
+
+def ollama_num_ctx_from_env() -> int:
+    raw = (os.environ.get("OLLAMA_NUM_CTX", "") or "").strip()
+    return int(raw) if raw.isdigit() else 2048
+
+
+def omniroute_max_ctx_from_env() -> int:
+    raw = (os.environ.get("JAVSTORY_TRANSLATION_OMNIROUTE_MAX_CTX", "") or "").strip()
+    return int(raw) if raw.isdigit() else 32768
+
+
+def translation_chunk_options_snapshot() -> dict[str, Any]:
+    """provider별 번역 청크 길이·겹침(자막 줄 수) + (해당 시) 컨텍스트 길이."""
+    out: dict[str, Any] = {}
+    for provider in _CHUNK_OPTION_PROVIDERS:
+        entry: dict[str, Any] = {
+            "chunk_target_lines": chunk_target_lines_from_env(provider),
+            "chunk_overlap_lines": chunk_overlap_lines_from_env(provider),
+        }
+        if provider == "ollama":
+            entry["context_length"] = ollama_num_ctx_from_env()
+        elif provider == "omniroute":
+            entry["context_length"] = omniroute_max_ctx_from_env()
+        out[provider] = entry
+    return out
+
+
+def omniroute_url_from_env() -> str:
+    explicit = (os.environ.get("JAVSTORY_OMNIROUTE_URL", "") or "").strip()
+    if explicit:
+        return explicit.rstrip("/")
+    return "http://localhost:20128/v1"
+
+
+def omniroute_model_from_env() -> str:
+    return (os.environ.get("JAVSTORY_OMNIROUTE_MODEL", "") or "").strip()
+
+
+def omniroute_settings_snapshot() -> dict[str, Any]:
+    return {
+        "url": omniroute_url_from_env(),
+        "model": omniroute_model_from_env(),
+    }
+
+
 def llamacpp_settings_snapshot() -> dict[str, Any]:
     model = llamacpp_model_from_env()
     preset = resolve_preset_for_translation(model)
@@ -200,6 +285,8 @@ def translation_settings_snapshot() -> dict[str, Any]:
         "provider": translation_provider_from_env(),
         "openrouter_profile": openrouter_profile_from_env(),
         "llamacpp": llamacpp_settings_snapshot(),
+        "omniroute": omniroute_settings_snapshot(),
+        "chunk_options": translation_chunk_options_snapshot(),
         "provider_options": [
             {"id": pid, "label": TRANSLATION_PROVIDER_LABELS.get(pid, pid)}
             for pid in TRANSLATION_PROVIDERS

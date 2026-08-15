@@ -233,6 +233,7 @@ class EmbeddingQueueController(QObject):
         except ValueError:
             n = 1
         self._max_parallel = max(1, n)
+        self._harvest_paused = False
         self._persist_timer = QTimer(self)
         self._persist_timer.setSingleShot(True)
         self._persist_timer.setInterval(350)
@@ -287,6 +288,15 @@ class EmbeddingQueueController(QObject):
 
     def flushQueueState(self) -> None:
         self._flush_persist()
+
+    def pause_for_harvest(self) -> None:
+        self._harvest_paused = True
+        self.logMessage.emit("[EmbeddingQueue] paused (harvest running)")
+
+    def resume_after_harvest(self) -> None:
+        self._harvest_paused = False
+        self.logMessage.emit("[EmbeddingQueue] resumed (harvest finished)")
+        QTimer.singleShot(0, self, self._pump)
 
     def _load_persisted(self) -> None:
         try:
@@ -377,6 +387,8 @@ class EmbeddingQueueController(QObject):
             self.toastMessage.emit(f"[임베딩] {added}건 큐에 추가됨", "success")
 
     def _pump(self) -> None:
+        if self._harvest_paused:
+            return
         if len(self._running) >= self._max_parallel:
             return
         for it in self._model._all():

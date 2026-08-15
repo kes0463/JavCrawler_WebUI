@@ -599,6 +599,13 @@ class HarvestModel(QObject):
 
     def _pump_global(self) -> None:
         """전역 큐에서 동시 실행 수만큼 워커를 채운다."""
+        if self._global_queue and not self._workers:
+            try:
+                from javstory.library.embeddings.harvest_coordination import begin_harvest_session
+
+                begin_harvest_session(logger_func=lambda m: self.logMessage.emit(m))
+            except Exception:
+                pass
         conc = self._harvest_concurrency()
         # 현재 실행중인 워커 수 기준으로 빈 슬롯만큼만 시작
         while len(self._workers) < conc and self._global_queue:
@@ -793,6 +800,13 @@ class HarvestModel(QObject):
             
             # 슬롯이 확실히 비워진 후 다음 작업 시작
             self._pump_global()
+            if not self._workers and not self._global_queue:
+                try:
+                    from javstory.library.embeddings.harvest_coordination import end_harvest_session
+
+                    end_harvest_session(logger_func=lambda m: self.logMessage.emit(m))
+                except Exception:
+                    pass
         
         QTimer.singleShot(2000, _cleanup)
         worker.deleteLater()

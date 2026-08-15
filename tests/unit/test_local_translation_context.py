@@ -10,7 +10,7 @@ import pytest
 from javstory.llm.engine import AllTiersExhaustedError
 from javstory.translation.ko_translation_chunk import (
     _compact_background_json_for_local,
-    _default_chunk_durations,
+    _default_chunk_lines,
     _story_hints_for_tier,
 )
 from javstory.translation.llm_backoff import is_context_size_exceeded, retryable_api_error
@@ -99,8 +99,8 @@ def test_story_hints_for_local_are_compact() -> None:
 
 
 def test_llamacpp_default_chunk_is_short() -> None:
-    tgt, ov = _default_chunk_durations(
+    tgt, ov = _default_chunk_lines(
         {"provider": "llamacpp", "model": "Qwen2.5-14B-Instruct-Q5_K_M"}
     )
-    assert tgt <= 12.0
-    assert ov <= 4.0
+    assert tgt <= 10
+    assert ov <= 3

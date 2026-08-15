@@ -5,23 +5,18 @@ win32mica; sys_platform == "win32"
 darkdetect
 
 # --- STT (stable-ts only; do NOT add openai-whisper — transitive via stable-ts) ---
-scenedetect[opencv]
 faster-whisper>=1.0.0,<2.0.0
 stable-ts>=2.17.0,<3.0.0
+# stills/highlight 프레임 추출 (이전 scenedetect[opencv] 경유 설치분)
+opencv-python>=4.8,<5
 
 # --- Harvest / LLM / IO ---
-tenacity
 openai
 requests
-jinja2
 python-dotenv
 keyring
-rich
-tqdm
 DrissionPage
 playwright
-undetected-chromedriver
-cloudscraper
 curl-cffi
 beautifulsoup4
 SQLAlchemy

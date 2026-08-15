@@ -62,16 +62,9 @@ async def lifespan(app: FastAPI):
 
     threading.Thread(target=_preview_stale_backfill, daemon=True, name="PreviewStaleBackfill").start()
 
-    def _ensure_ollama_for_embeddings() -> None:
-        try:
-            from javstory.llm.ollama_serve import ensure_ollama_serve, should_auto_start_ollama
-
-            if should_auto_start_ollama():
-                ensure_ollama_serve(wait_sec=2.0)
-        except Exception:
-            pass
-
-    threading.Thread(target=_ensure_ollama_for_embeddings, daemon=True, name="OllamaEnsure").start()
+    # 임베딩 llama-server는 더 이상 앱 시작 시 선기동하지 않는다. 실제 임베딩 작업
+    # (백필 큐 처리 등)이 시작될 때 ensure_embeddings_llamacpp_ready()가 온디맨드로
+    # 기동하고, 유휴 시 llamacpp_embeddings.py의 idle monitor가 자동 종료한다.
 
     def _embeddings_backfill_on_start() -> None:
         if (os.environ.get("JAVSTORY_EMBEDDINGS_BACKFILL_ON_START", "1") or "").strip().lower() in {
@@ -106,6 +99,20 @@ async def lifespan(app: FastAPI):
             pass
 
     threading.Thread(target=_purge_translation_chunk_cache, daemon=True, name="TranslationChunkCachePurge").start()
+
+    def _playback_cache_maintenance() -> None:
+        try:
+            from javstory.services.proxy_cache_service import (
+                init_proxy_cache_maintenance,
+                run_cache_maintenance,
+            )
+
+            init_proxy_cache_maintenance()
+            run_cache_maintenance()
+        except Exception:
+            pass
+
+    threading.Thread(target=_playback_cache_maintenance, daemon=True, name="PlaybackCacheMaintenance").start()
 
     try:
         from javstory.folder_watch.service import get_folder_watch_service
@@ -193,7 +200,7 @@ def main() -> None:
     uvicorn.run(
         "webapi.main:app",
         host=os.environ.get("JAVSTORY_WEBAPI_HOST", "127.0.0.1"),
-        port=int(os.environ.get("JAVSTORY_WEBAPI_PORT", "8765")),
+        port=int(os.environ.get("JAVSTORY_WEBAPI_PORT", "18765")),
         reload=False,
     )
 

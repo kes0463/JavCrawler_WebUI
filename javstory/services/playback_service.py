@@ -13,7 +13,9 @@ from javstory.library.playback_proxy import (
     prepare_playback_file,
     proxy_is_ready,
     proxy_reason,
+    resolve_hls_dir_for_stream,
     resolve_playback_file,
+    resolve_playback_file_for_stream,
 )
 from javstory.library.subtitle_parser import find_subtitle_files, load_subtitle_cues
 from javstory.library.video_ext import is_video_file
@@ -68,6 +70,8 @@ def guess_video_mime(path: Path) -> str:
 
 
 class PlaybackService:
+    _part_path_cache: dict[tuple[str, int], tuple[str, float, int, Path]] = {}
+
     def __init__(self) -> None:
         self._library = LibraryService()
 
@@ -99,6 +103,7 @@ class PlaybackService:
                     "needs_proxy": needs_proxy,
                     "proxy_ready": (not needs_proxy) or proxy_is_ready(path),
                     "proxy_reason": proxy_reason(path) if needs_proxy else None,
+                    "stream_mode": "hls" if needs_proxy else "direct",
                     "subtitle_tracks": [
                         {
                             "index": ti,
@@ -118,21 +123,75 @@ class PlaybackService:
 
     def resolve_part_path(self, product_code: str, part_index: int) -> Optional[Path]:
         pc = (product_code or "").strip().upper()
+        cache_key = (pc, part_index)
+        cached = self._part_path_cache.get(cache_key)
+        if cached:
+            resolved, mtime, size, path = cached
+            try:
+                if path.is_file() and str(path.resolve()) == resolved:
+                    st = path.stat()
+                    if st.st_mtime == mtime and st.st_size == size:
+                        return path
+            except OSError:
+                pass
+            self._part_path_cache.pop(cache_key, None)
+
         row = self._library.get_by_code(pc)
         folder = (row.folder_path or "").strip() if row else ""
         paths = self._sorted_paths(pc, folder or None)
         if part_index < 0 or part_index >= len(paths):
+            self._part_path_cache.pop(cache_key, None)
             return None
         path = paths[part_index]
         if not is_video_file(path):
             return None
+        try:
+            st = path.stat()
+            self._part_path_cache[cache_key] = (str(path.resolve()), st.st_mtime, st.st_size, path)
+        except OSError:
+            pass
         return path
 
     def resolve_stream_path(self, product_code: str, part_index: int) -> Optional[Path]:
         source = self.resolve_part_path(product_code, part_index)
         if not source:
             return None
-        return resolve_playback_file(source)
+        return resolve_playback_file_for_stream(source)
+
+    def resolve_hls_dir(self, product_code: str, part_index: int) -> Optional[Path]:
+        source = self.resolve_part_path(product_code, part_index)
+        if not source:
+            return None
+        return resolve_hls_dir_for_stream(source)
+
+    def resolve_hls_playlist(self, product_code: str, part_index: int) -> Optional[Path]:
+        hls_dir = self.resolve_hls_dir(product_code, part_index)
+        if not hls_dir:
+            return None
+        playlist = hls_dir / "playlist.m3u8"
+        return playlist if playlist.is_file() else None
+
+    def resolve_hls_segment(
+        self,
+        product_code: str,
+        part_index: int,
+        segment_name: str,
+    ) -> Optional[Path]:
+        if not segment_name or "/" in segment_name or "\\" in segment_name or ".." in segment_name:
+            return None
+        if not segment_name.endswith(".ts"):
+            return None
+        hls_dir = self.resolve_hls_dir(product_code, part_index)
+        if not hls_dir:
+            return None
+        segment = (hls_dir / segment_name).resolve()
+        try:
+            hls_resolved = hls_dir.resolve()
+        except OSError:
+            return None
+        if segment.parent != hls_resolved:
+            return None
+        return segment if segment.is_file() else None
 
     def prepare_stream(self, product_code: str, part_index: int) -> Optional[dict[str, Any]]:
         source = self.resolve_part_path(product_code, part_index)
@@ -172,13 +231,6 @@ class PlaybackService:
         except OSError:
             return False
 
-    def subtitle_cues(
-        self,
-        product_code: str,
-        part_index: int,
-        track_index: int,
-    ) -> list[dict[str, Any]]:
-        path = self.resolve_subtitle_path(product_code, part_index, track_index)
-        if not path:
-            return []
+    def read_subtitle_cues(self, path: Path) -> list[dict[str, Any]]:
+        """이미 해석된 자막 경로에서 큐를 읽는다(경로 재탐색 없음)."""
         return load_subtitle_cues(str(path))

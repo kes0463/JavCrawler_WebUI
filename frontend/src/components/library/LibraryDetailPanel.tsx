@@ -31,6 +31,30 @@ import { ActorCommaAutocompleteField } from "@/components/library/ActorCommaAuto
 import { CoverLightbox } from "@/components/library/CoverLightbox";
 import { SnapshotGallery } from "@/components/library/SnapshotGallery";
 
+const CRAWL_SOURCE_LABELS: Record<string, string> = {
+  "123av": "123av",
+  missav123: "missav123",
+  avwiki: "avwiki",
+  avwiki_pw: "avwiki",
+  njavtv: "njav.tv",
+  njavtv_dp: "njav.tv",
+  njavtv_dp_retry: "njav.tv",
+  avwikinet: "av-wiki.net",
+};
+
+const CRAWL_FIELD_LABELS: Record<string, string> = {
+  title: "제목",
+  original_title: "원제",
+  synopsis: "시놉시스",
+  cover_url: "커버",
+  release_date: "발매일",
+  maker: "메이커",
+  actors: "배우",
+  genres: "장르",
+};
+
+const CRAWL_FIELD_ORDER = ["actors", "cover_url", "title", "maker", "release_date", "genres", "synopsis", "original_title"];
+
 interface LibraryDetailPanelProps {
   code: string;
   onClose: () => void;
@@ -879,6 +903,34 @@ export function LibraryDetailPanel({
                 {detail.has_subtitle && (
                   <div className="px-3 py-2 rounded-lg bg-emerald-500/15 border border-emerald-500/30 text-emerald-200 text-lg font-semibold text-center">
                     자막
+                  </div>
+                )}
+                {detail.crawl_sources && Object.keys(detail.crawl_sources).length > 0 && (
+                  <div className="px-3 py-2 rounded-lg bg-white/[0.03] border border-white/[0.08]">
+                    <p className="text-xs text-muted-foreground mb-1.5">수집 출처</p>
+                    <div className="flex flex-wrap gap-1.5">
+                      {CRAWL_FIELD_ORDER
+                        .filter(f => detail.crawl_sources?.[f])
+                        .map(f => {
+                          const src = detail.crawl_sources![f];
+                          const isAvWikiNet = src === "avwikinet";
+                          return (
+                            <span
+                              key={f}
+                              className={cn(
+                                "inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-xs border",
+                                isAvWikiNet
+                                  ? "bg-amber-500/10 border-amber-500/30 text-amber-200"
+                                  : "bg-indigo-500/10 border-indigo-500/25 text-indigo-200",
+                              )}
+                              title={`${CRAWL_FIELD_LABELS[f] ?? f} 출처: ${CRAWL_SOURCE_LABELS[src] ?? src}`}
+                            >
+                              <span className="text-muted-foreground">{CRAWL_FIELD_LABELS[f] ?? f}</span>
+                              {CRAWL_SOURCE_LABELS[src] ?? src}
+                            </span>
+                          );
+                        })}
+                    </div>
                   </div>
                 )}
               </div>

@@ -100,6 +100,39 @@ def _pick_representative_vector(payload: Dict[str, Any]) -> Optional[List[float]
     return [x * inv for x in out]
 
 
+def payload_doc_text_blob(payload: Dict[str, Any]) -> str:
+    """임베딩 캐시에 저장된 문서 텍스트를 합친다 (어휘 매칭용)."""
+    parts: List[str] = []
+    for d in payload.get("docs") or []:
+        if not isinstance(d, dict):
+            continue
+        t = str(d.get("text") or "").strip()
+        if t:
+            parts.append(t)
+    return "\n".join(parts)
+
+
+def max_doc_cosine(query_vec: List[float], payload: Dict[str, Any]) -> float:
+    """
+    대표 벡터 혼합 대신 문서별(meta/grok/scene/…) 최대 코사인을 쓴다.
+    짧은 분위기 쿼리가 grok 서사 평균에 쓸려 가는 것을 줄인다.
+    """
+    best = float("-inf")
+    for d in payload.get("docs") or []:
+        if not isinstance(d, dict):
+            continue
+        emb = d.get("embedding")
+        if not isinstance(emb, list) or not emb:
+            continue
+        score = _cosine(query_vec, [float(x) for x in emb])
+        if score > best:
+            best = score
+    if not math.isfinite(best):
+        # 폴백: 혼합 대표 벡터
+        return _cosine(query_vec, _pick_representative_vector(payload) or [])
+    return best
+
+
 def _iter_embedding_payloads(*, model: str | None = None) -> Iterable[Tuple[Path, Dict[str, Any]]]:
     d = embeddings_cache_dir()
     for p in sorted(d.glob("*.json")):

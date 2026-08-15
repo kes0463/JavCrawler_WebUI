@@ -5,8 +5,8 @@ import { PosterHoverPreview } from "@/components/library/PosterHoverPreview";
 import { PosterCardContextMenu } from "@/components/library/PosterCardContextMenu";
 import type { ProcessingKind } from "@/api/processing";
 
-/** 길게 눌러 선택 모드 진입 (ms) */
-export const POSTER_LONG_PRESS_MS = 2000;
+/** 길게 눌러 선택 모드 진입 (ms). 12px 이동 시 취소되므로 스크롤 오인 위험 낮음. */
+export const POSTER_LONG_PRESS_MS = 500;
 
 interface PosterCardProps {
   productCode: string;

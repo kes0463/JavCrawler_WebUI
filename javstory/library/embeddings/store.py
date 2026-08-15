@@ -30,6 +30,20 @@ def write_embeddings_json(path: Path | str, payload: Dict[str, Any], *, indent: 
     p = Path(path)
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(json.dumps(payload, ensure_ascii=False, indent=indent), encoding="utf-8")
+    try:
+        from javstory.library.embeddings.ann_index import invalidate_embedding_ann_index
+
+        model = ""
+        if isinstance(payload, dict):
+            model = str(payload.get("model") or "").strip()
+        if not model:
+            # {CODE}__{model}.json
+            stem = p.stem
+            if "__" in stem:
+                model = stem.split("__", 1)[1]
+        invalidate_embedding_ann_index(model or None)
+    except Exception:
+        pass
     return p
 
 

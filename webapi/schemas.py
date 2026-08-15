@@ -4,7 +4,7 @@ import re
 from datetime import datetime
 from typing import Any, Literal, Optional
 
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, Field, field_validator
 
 _CODE_RE = re.compile(r"^[A-Z0-9][A-Z0-9\-]*$")
 
@@ -75,6 +75,7 @@ class LibraryItemDetail(LibraryItem):
     has_grok_story: bool = False
     grok_story_running: bool = False
     translation_note: Optional[str] = None
+    crawl_sources: dict[str, str] = {}
 
 
 class WorkTranslationNotePatch(BaseModel):
@@ -110,20 +111,102 @@ class LibraryListResponse(BaseModel):
     search_message: Optional[str] = None
 
 
+class EmbeddingsGgufOption(BaseModel):
+    id: str = ""
+    label: str
+    gguf_path: str = ""
+    gguf_env: str = ""
+
+
 class EmbeddingsSettingsResponse(BaseModel):
     enabled: bool
+    backend: str = "llamacpp"
     model: str
+    gguf_path: str = ""
+    gguf_scan_dir: str = ""
+    gguf_options: list[EmbeddingsGgufOption] = []
     embedded_count: int
     library_total: int
     missing_count: int
     pending_count: int = 0
     backfill_running: bool = False
     coverage_pct: float = 0.0
+    search_min_score: float = 0.36
+    search_relative_ratio: float = 0.84
+    search_max_gap: float = 0.10
+
+
+class EmbeddingsGgufOptionsResponse(BaseModel):
+    gguf_scan_dir: str = ""
+    gguf_options: list[EmbeddingsGgufOption] = []
 
 
 class EmbeddingsSettingsPatch(BaseModel):
     enabled: Optional[bool] = None
+    backend: Optional[str] = None
     model: Optional[str] = None
+    gguf_path: Optional[str] = None
+    search_min_score: Optional[float] = None
+    search_relative_ratio: Optional[float] = None
+    search_max_gap: Optional[float] = None
+
+    @field_validator("search_min_score")
+    @classmethod
+    def validate_search_min_score(cls, v: float | None) -> float | None:
+        if v is None:
+            return v
+        if not (0.05 <= float(v) <= 0.95):
+            raise ValueError("search_min_score must be between 0.05 and 0.95")
+        return float(v)
+
+    @field_validator("search_relative_ratio")
+    @classmethod
+    def validate_search_relative_ratio(cls, v: float | None) -> float | None:
+        if v is None:
+            return v
+        if not (0.05 <= float(v) <= 0.99):
+            raise ValueError("search_relative_ratio must be between 0.05 and 0.99")
+        return float(v)
+
+    @field_validator("search_max_gap")
+    @classmethod
+    def validate_search_max_gap(cls, v: float | None) -> float | None:
+        if v is None:
+            return v
+        if not (0.01 <= float(v) <= 0.5):
+            raise ValueError("search_max_gap must be between 0.01 and 0.5")
+        return float(v)
+
+class HarvestSettingsResponse(BaseModel):
+    harvest_concurrency: int = 2
+    embeddings_pause_during_harvest: bool = True
+    harvest_llamacpp_slot_ctx: int | None = None
+    llamacpp_spawn_diagnostics: dict = Field(default_factory=dict)
+    tuning_hints: list[str] = Field(default_factory=list)
+
+
+class HarvestSettingsPatch(BaseModel):
+    harvest_concurrency: Optional[int] = None
+    embeddings_pause_during_harvest: Optional[bool] = None
+    harvest_llamacpp_slot_ctx: Optional[int] = None
+
+    @field_validator("harvest_concurrency")
+    @classmethod
+    def validate_harvest_concurrency(cls, v: int | None) -> int | None:
+        if v is None:
+            return None
+        if v < 1 or v > 5:
+            raise ValueError("harvest_concurrency must be between 1 and 5")
+        return v
+
+    @field_validator("harvest_llamacpp_slot_ctx")
+    @classmethod
+    def validate_harvest_slot_ctx(cls, v: int | None) -> int | None:
+        if v is None:
+            return None
+        if v < 512 or v > 32768:
+            raise ValueError("harvest_llamacpp_slot_ctx must be between 512 and 32768")
+        return v
 
 
 class EmbeddingsWarmupResponse(BaseModel):
@@ -212,6 +295,7 @@ class PlaybackPart(BaseModel):
     needs_proxy: bool = False
     proxy_ready: bool = True
     proxy_reason: Optional[str] = None
+    stream_mode: Literal["direct", "hls"] = "direct"
     subtitle_tracks: list[SubtitleTrack] = []
 
 
@@ -221,6 +305,8 @@ class StreamPrepareResponse(BaseModel):
     status: str = "direct"
     proxy_reason: Optional[str] = None
     error: Optional[str] = None
+    progress: Optional[float] = None
+    eta_sec: Optional[float] = None
 
 
 class PlaybackInfo(BaseModel):
@@ -231,6 +317,18 @@ class PlaybackInfo(BaseModel):
 
 class SubtitleCueList(BaseModel):
     cues: list[dict] = []
+
+
+class ProxyCacheStats(BaseModel):
+    total_bytes: int = 0
+    file_count: int = 0
+    max_bytes: int = 0
+
+
+class ProxyCacheClearResult(BaseModel):
+    ok: bool = True
+    removed: int = 0
+    freed_bytes: int = 0
 
 
 class HarvestItem(BaseModel):
@@ -404,8 +502,10 @@ class SttFwXxlOptions(BaseModel):
     hallucination_silence_threshold: float = 1.5
     compute_type: str = "float16"
     batch_size: int = 8
-    word_timestamps: bool = True
+    word_timestamps: bool = False
     repetition_penalty: float = 1.2
+    log_prob_threshold: float = -1.0
+    compression_ratio_threshold: float = 2.4
 
 
 class SttFwXxlOptionsPatch(BaseModel):
@@ -425,6 +525,8 @@ class SttFwXxlOptionsPatch(BaseModel):
     batch_size: Optional[int] = None
     word_timestamps: Optional[bool] = None
     repetition_penalty: Optional[float] = None
+    log_prob_threshold: Optional[float] = None
+    compression_ratio_threshold: Optional[float] = None
 
 
 class FasterWhisperModelOption(BaseModel):
@@ -500,10 +602,23 @@ class LlamaCppSettingsSnapshot(BaseModel):
     command_preview: str
 
 
+class OmniRouteSettingsSnapshot(BaseModel):
+    url: str
+    model: str
+
+
+class TranslationChunkOption(BaseModel):
+    chunk_target_lines: int
+    chunk_overlap_lines: int
+    context_length: Optional[int] = None
+
+
 class TranslationSettingsResponse(BaseModel):
     provider: str
     openrouter_profile: str
     llamacpp: LlamaCppSettingsSnapshot
+    omniroute: OmniRouteSettingsSnapshot
+    chunk_options: dict[str, TranslationChunkOption]
     provider_options: list[TranslationProviderOption]
     model_options: list[TranslationModelOption]
     openrouter_profile_options: list[OpenRouterProfileOption]
@@ -512,6 +627,18 @@ class TranslationSettingsResponse(BaseModel):
 class TranslationSettingsPatch(BaseModel):
     provider: Optional[str] = None
     openrouter_profile: Optional[str] = None
+    omniroute_url: Optional[str] = None
+    omniroute_model: Optional[str] = None
+    llamacpp_chunk_target_lines: Optional[int] = None
+    llamacpp_chunk_overlap_lines: Optional[int] = None
+    ollama_chunk_target_lines: Optional[int] = None
+    ollama_chunk_overlap_lines: Optional[int] = None
+    ollama_context_length: Optional[int] = None
+    openrouter_chunk_target_lines: Optional[int] = None
+    openrouter_chunk_overlap_lines: Optional[int] = None
+    omniroute_chunk_target_lines: Optional[int] = None
+    omniroute_chunk_overlap_lines: Optional[int] = None
+    omniroute_context_length: Optional[int] = None
     llamacpp_bin: Optional[str] = None
     llamacpp_url: Optional[str] = None
     llamacpp_port: Optional[int] = None
@@ -534,6 +661,43 @@ class TranslationSettingsPatch(BaseModel):
             return None
         if v < 512 or v > 262144:
             raise ValueError("llamacpp_ctx must be between 512 and 262144")
+        return v
+
+    @field_validator(
+        "llamacpp_chunk_target_lines",
+        "ollama_chunk_target_lines",
+        "openrouter_chunk_target_lines",
+        "omniroute_chunk_target_lines",
+    )
+    @classmethod
+    def validate_chunk_target_lines(cls, v: int | None) -> int | None:
+        if v is None:
+            return None
+        if v < 1 or v > 200:
+            raise ValueError("chunk target lines must be between 1 and 200")
+        return v
+
+    @field_validator(
+        "llamacpp_chunk_overlap_lines",
+        "ollama_chunk_overlap_lines",
+        "openrouter_chunk_overlap_lines",
+        "omniroute_chunk_overlap_lines",
+    )
+    @classmethod
+    def validate_chunk_overlap_lines(cls, v: int | None) -> int | None:
+        if v is None:
+            return None
+        if v < 0 or v > 50:
+            raise ValueError("chunk overlap lines must be between 0 and 50")
+        return v
+
+    @field_validator("ollama_context_length", "omniroute_context_length")
+    @classmethod
+    def validate_context_length(cls, v: int | None) -> int | None:
+        if v is None:
+            return None
+        if v < 512 or v > 1_000_000:
+            raise ValueError("context length must be between 512 and 1,000,000")
         return v
 
     @field_validator("llamacpp_port")

@@ -94,16 +94,23 @@ class HarvestQueueService:
         self._grok_enabled = bool(enabled)
 
     @staticmethod
-    def _set_preview_paused(paused: bool) -> None:
+    def _set_harvest_aux_paused(paused: bool) -> None:
         try:
-            from javstory.library.highlight.preview_queue import preview_queue_manager
+            from javstory.library.embeddings.harvest_coordination import (
+                begin_harvest_session,
+                end_harvest_session,
+            )
 
             if paused:
-                preview_queue_manager.pause_for_harvest()
+                begin_harvest_session()
             else:
-                preview_queue_manager.resume_after_harvest()
+                end_harvest_session()
         except Exception:
             pass
+
+    @staticmethod
+    def _set_preview_paused(paused: bool) -> None:
+        HarvestQueueService._set_harvest_aux_paused(paused)
 
     def snapshot(self) -> dict[str, Any]:
         return {

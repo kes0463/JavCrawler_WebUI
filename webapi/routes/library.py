@@ -444,8 +444,20 @@ def _to_detail(row: JAVMetadata, code: str) -> LibraryItemDetail:
     from javstory.translation.translation_notes import load_work_translation_note
 
     grok_st = grok_story_status(code)
+    crawl_sources: dict[str, str] = {}
+    raw_sources = getattr(row, "crawl_sources_json", None)
+    if raw_sources:
+        try:
+            import json
+
+            parsed = json.loads(raw_sources)
+            if isinstance(parsed, dict):
+                crawl_sources = {str(k): str(v) for k, v in parsed.items() if v}
+        except (TypeError, ValueError):
+            crawl_sources = {}
     return base.model_copy(
         update={
+            "crawl_sources": crawl_sources,
             "scene_count": len(scenes),
             "favorite_score": fav,
             "has_subtitle": media["has_subtitle"],

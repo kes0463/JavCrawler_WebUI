@@ -45,6 +45,8 @@ class SettingsModel(QObject):
     isSystemDarkChanged = Signal()
     correctionProfileChanged = Signal()
     harvestConcurrencyChanged = Signal()
+    embeddingsPauseDuringHarvestChanged = Signal()
+    harvestLlamaCppSlotCtxChanged = Signal()
     embeddingsEnabledChanged = Signal()
     embeddingsModelChanged = Signal()
     excludedGenresChanged = Signal()
@@ -330,7 +332,19 @@ class SettingsModel(QObject):
         self._grok_enabled = _env_bool("JAVSTORY_STORY_ANALYSIS_ENABLED", False)
         self._dpi_bypass = _env_bool("JAVSTORY_DPI_BYPASS_ENABLED", False)
         self._embeddings_enabled = _env_bool("JAVSTORY_EMBEDDINGS_ENABLED", False)
-        self._embeddings_ollama_model = (os.environ.get("JAVSTORY_EMBEDDINGS_OLLAMA_MODEL", "") or "").strip() or "nomic-embed-text"
+        self._embeddings_backend = (
+            (os.environ.get("JAVSTORY_EMBEDDINGS_BACKEND", "") or "").strip().lower() or "llamacpp"
+        )
+        if self._embeddings_backend not in ("llamacpp", "ollama"):
+            self._embeddings_backend = "llamacpp"
+        self._embeddings_ollama_model = (
+            (os.environ.get("JAVSTORY_EMBEDDINGS_MODEL", "") or "").strip()
+            or (os.environ.get("JAVSTORY_EMBEDDINGS_OLLAMA_MODEL", "") or "").strip()
+            or "nomic-embed-text"
+        )
+        self._embeddings_gguf_path = (
+            (os.environ.get("JAVSTORY_EMBEDDINGS_LLAMACPP_GGUF", "") or "").strip()
+        )
         self._insight_harvest_alert_enabled = _env_bool("JAVSTORY_INSIGHT_HARVEST_ALERT_ENABLED", True)
         try:
             self._insight_harvest_alert_threshold = float(
@@ -357,6 +371,14 @@ class SettingsModel(QObject):
         except ValueError:
             self._harvest_concurrency = 2
         self._harvest_concurrency = max(1, min(5, int(self._harvest_concurrency or 2)))
+        self._embeddings_pause_during_harvest = _env_bool(
+            "JAVSTORY_EMBEDDINGS_PAUSE_DURING_HARVEST", True
+        )
+        try:
+            slot_raw = (os.environ.get("JAVSTORY_HARVEST_LLAMACPP_SLOT_CTX", "") or "").strip()
+            self._harvest_llamacpp_slot_ctx = int(slot_raw) if slot_raw else 4096
+        except ValueError:
+            self._harvest_llamacpp_slot_ctx = 4096
 
         # 4. 교정 (Correction) 모델
         self._correction_profile = self._platform_env_value(
@@ -710,6 +732,61 @@ class SettingsModel(QObject):
             self._embeddings_ollama_model = s
             self.embeddingsModelChanged.emit()
 
+    @Property(str, notify=embeddingsModelChanged)
+    def embeddingsBackend(self) -> str:
+        return str(getattr(self, "_embeddings_backend", "llamacpp") or "llamacpp")
+
+    @embeddingsBackend.setter  # type: ignore[attr-defined]
+    def embeddingsBackend(self, v: str):
+        s = (v or "").strip().lower() or "llamacpp"
+        if s not in ("llamacpp", "ollama"):
+            s = "llamacpp"
+        if s != str(getattr(self, "_embeddings_backend", "llamacpp") or "llamacpp"):
+            self._embeddings_backend = s
+            self.embeddingsModelChanged.emit()
+
+    @Property(str, notify=embeddingsModelChanged)
+    def embeddingsGgufPath(self) -> str:
+        return str(getattr(self, "_embeddings_gguf_path", "") or "")
+
+    @embeddingsGgufPath.setter  # type: ignore[attr-defined]
+    def embeddingsGgufPath(self, v: str):
+        s = (v or "").strip()
+        if s != str(getattr(self, "_embeddings_gguf_path", "") or ""):
+            self._embeddings_gguf_path = s
+            self.embeddingsModelChanged.emit()
+
+    @Property("QVariantList", notify=embeddingsModelChanged)
+    def embeddingsGgufOptions(self):
+        """D:\\Models(스캔 경로)의 .gguf 목록 — QML ComboBox용."""
+        try:
+            from javstory.llm.llamacpp_embeddings import list_embeddings_gguf_options
+
+            return list_embeddings_gguf_options()
+        except Exception:
+            return [{"id": "", "label": "(자동 탐색)", "gguf_path": "", "gguf_env": ""}]
+
+    @Property(str, notify=embeddingsModelChanged)
+    def embeddingsGgufScanDir(self) -> str:
+        try:
+            from javstory.llm.llamacpp_embeddings import embeddings_gguf_scan_dir
+
+            return embeddings_gguf_scan_dir()
+        except Exception:
+            return r"D:\Models"
+
+    @Slot(str)
+    def selectEmbeddingsGguf(self, option_id: str) -> None:
+        """QML ComboBox 선택 → GGUF 경로·모델 alias 반영."""
+        opts = self.embeddingsGgufOptions
+        match = next((o for o in opts if str(o.get("id") or "") == str(option_id or "")), None)
+        path = str((match or {}).get("gguf_path") or "").strip()
+        self.embeddingsGgufPath = path
+        if path:
+            stem = Path(path).stem
+            if stem:
+                self.embeddingsOllamaModel = stem
+
     @Property(str, notify=excludedGenresChanged)
     def excludedGenres(self) -> str:
         return str(getattr(self, "_excluded_genres", ""))
@@ -827,6 +904,31 @@ class SettingsModel(QObject):
         if n != getattr(self, "_harvest_concurrency", 2):
             self._harvest_concurrency = n
             self.harvestConcurrencyChanged.emit()
+
+    @Property(bool, notify=embeddingsPauseDuringHarvestChanged)
+    def embeddingsPauseDuringHarvest(self) -> bool:
+        return bool(getattr(self, "_embeddings_pause_during_harvest", True))
+
+    @embeddingsPauseDuringHarvest.setter  # type: ignore[attr-defined]
+    def embeddingsPauseDuringHarvest(self, v: bool):
+        nv = bool(v)
+        if nv != bool(getattr(self, "_embeddings_pause_during_harvest", True)):
+            self._embeddings_pause_during_harvest = nv
+            self.embeddingsPauseDuringHarvestChanged.emit()
+
+    @Property(int, notify=harvestLlamaCppSlotCtxChanged)
+    def harvestLlamaCppSlotCtx(self) -> int:
+        return int(getattr(self, "_harvest_llamacpp_slot_ctx", 4096) or 4096)
+
+    @harvestLlamaCppSlotCtx.setter  # type: ignore[attr-defined]
+    def harvestLlamaCppSlotCtx(self, v: int):
+        try:
+            n = max(512, int(v))
+        except Exception:
+            n = 4096
+        if n != int(getattr(self, "_harvest_llamacpp_slot_ctx", 4096)):
+            self._harvest_llamacpp_slot_ctx = n
+            self.harvestLlamaCppSlotCtxChanged.emit()
 
     def _apply_mica_global(self):
         """변경된 테마에 맞춰 Mica 효과 재적용."""
@@ -1021,13 +1123,31 @@ class SettingsModel(QObject):
         set_env_runtime_value("JAVSTORY_CORRECTION_SKIP", "1" if self._correction_skip else "0")
         set_env_runtime_value("JAVSTORY_DPI_BYPASS_ENABLED", "1" if self._dpi_bypass else "0")
         set_env_runtime_value("JAVSTORY_EMBEDDINGS_ENABLED", "1" if bool(getattr(self, "_embeddings_enabled", False)) else "0")
-        set_env_runtime_value("JAVSTORY_EMBEDDINGS_OLLAMA_MODEL", str(getattr(self, "_embeddings_ollama_model", "nomic-embed-text") or "nomic-embed-text"))
+        set_env_runtime_value(
+            "JAVSTORY_EMBEDDINGS_BACKEND",
+            str(getattr(self, "_embeddings_backend", "llamacpp") or "llamacpp"),
+        )
+        emb_model = str(getattr(self, "_embeddings_ollama_model", "nomic-embed-text") or "nomic-embed-text")
+        set_env_runtime_value("JAVSTORY_EMBEDDINGS_MODEL", emb_model)
+        set_env_runtime_value("JAVSTORY_EMBEDDINGS_OLLAMA_MODEL", emb_model)
+        set_env_runtime_value(
+            "JAVSTORY_EMBEDDINGS_LLAMACPP_GGUF",
+            str(getattr(self, "_embeddings_gguf_path", "") or ""),
+        )
         set_env_runtime_value("JAVSTORY_INSIGHT_HARVEST_ALERT_ENABLED", "1" if bool(getattr(self, "_insight_harvest_alert_enabled", True)) else "0")
         set_env_runtime_value("JAVSTORY_INSIGHT_HARVEST_ALERT_THRESHOLD", str(float(getattr(self, "_insight_harvest_alert_threshold", 0.85))))
         set_env_runtime_value("JAVSTORY_PERSONA_DEEP_ENABLED", "1" if bool(getattr(self, "_persona_deep_enabled", True)) else "0")
         set_env_runtime_value("JAVSTORY_PERSONA_SAMPLE_SIZE", str(int(getattr(self, "_persona_sample_size", 8))))
         set_env_runtime_value("JAVSTORY_SIMILARITY_EXCLUDED_GENRES", str(getattr(self, "_excluded_genres", "")))
         set_env_runtime_value("JAVSTORY_HARVEST_CONCURRENCY", str(int(self._harvest_concurrency or 2)))
+        set_env_runtime_value(
+            "JAVSTORY_EMBEDDINGS_PAUSE_DURING_HARVEST",
+            "1" if bool(getattr(self, "_embeddings_pause_during_harvest", True)) else "0",
+        )
+        set_env_runtime_value(
+            "JAVSTORY_HARVEST_LLAMACPP_SLOT_CTX",
+            str(int(getattr(self, "_harvest_llamacpp_slot_ctx", 4096) or 4096)),
+        )
 
 
         # DPI 우회 연결

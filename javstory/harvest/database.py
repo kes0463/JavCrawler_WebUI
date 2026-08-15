@@ -153,6 +153,8 @@ class JAVMetadata(Base):
     favorite_crawl_failed_at = Column(DateTime, nullable=True)
     # v15: WebUI/데스크톱 수동 메타 편집 — 재크롤 실패 시 FAILED_CRAWL 덮어쓰기 방지
     metadata_manual = Column(Boolean, default=False)
+    # v16: 필드별 크롤 출처 {"actors":"avwikinet","cover_url":"123av",...} (JSON)
+    crawl_sources_json = Column(Text, nullable=True)
 
 class Actress(Base):
     """배우 정보 테이블 (actresses)"""
@@ -649,6 +651,23 @@ def _run_idempotent_column_migrations() -> None:
     _migrate_v13_file_flag_cover_path()
     _migrate_v14_file_flag_preview_path()
     _migrate_v15_metadata_manual()
+    _migrate_v16_crawl_sources()
+
+
+def _migrate_v16_crawl_sources():
+    """v16: jav_metadata.crawl_sources_json — 필드별 크롤 출처 기록."""
+    import sqlite3
+
+    try:
+        with sqlite3.connect(DB_PATH) as conn:
+            cursor = conn.cursor()
+            cols = [row[1] for row in cursor.execute("PRAGMA table_info(jav_metadata)")]
+            if "crawl_sources_json" not in cols:
+                cursor.execute("ALTER TABLE jav_metadata ADD COLUMN crawl_sources_json TEXT")
+                print("[DB Migration v16] jav_metadata.crawl_sources_json 컬럼 추가 완료")
+            conn.commit()
+    except Exception as e:
+        print(f"[DB Migration v16] 실패: {e}")
 
 
 def init_db():

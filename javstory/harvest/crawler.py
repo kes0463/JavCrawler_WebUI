@@ -12,7 +12,7 @@ import socket
 import time
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 from urllib.parse import urljoin, urlparse
 
 from bs4 import BeautifulSoup
@@ -331,6 +331,7 @@ def _merge_empty_only(base: dict[str, Any], extra: dict[str, Any], *, source: st
         return base
     base.setdefault("_sources_tried", [])
     base["_sources_tried"].append(source)
+    field_sources: dict[str, str] = base.setdefault("_field_sources", {})
 
     def _empty_str(s: Any) -> bool:
         return not (isinstance(s, str) and s.strip())
@@ -342,6 +343,7 @@ def _merge_empty_only(base: dict[str, Any], extra: dict[str, Any], *, source: st
             if k in ("title", "original_title") and _is_boilerplate_title(val):
                 continue
             base[k] = val
+            field_sources[k] = source
 
     # title이 채워졌는데 original_title이 비어있으면 동기화
     if _empty_str(base.get("original_title")) and isinstance(base.get("title"), str) and base["title"].strip():
@@ -362,6 +364,8 @@ def _merge_empty_only(base: dict[str, Any], extra: dict[str, Any], *, source: st
                 merged_g.append(x)
         if merged_g:
             base["genres"] = merged_g
+        if not genres_a and genres_b:
+            field_sources["genres"] = source
 
     actors_a = dedupe_crawled_actor_tokens(_ensure_list_str(base.get("actors")))
     actors_b = dedupe_crawled_actor_tokens(_ensure_list_str(extra.get("actors")))
@@ -371,6 +375,8 @@ def _merge_empty_only(base: dict[str, Any], extra: dict[str, Any], *, source: st
         base["actors"] = actors_b
     elif actors_a:
         base["actors"] = actors_a
+    if not actors_a and actors_b:
+        field_sources["actors"] = source
 
     # favorite_score — 항상 합산 (비어있음 여부와 무관)
     base["favorite_score"] = int(base.get("favorite_score") or 0) + int(extra.get("favorite_score") or 0)
@@ -669,8 +675,9 @@ class HybridJavCrawler:
             data["_final_url"] = final_url
             return data
         except Exception as e:
-            msg = str(e).encode('utf-8', 'replace').decode('utf-8', 'replace')
-            print(f"[Hybrid] 추출 중 에러: {msg}")
+            # raw print는 Windows cp949 콘솔에서 중·일 문자가 있으면 UnicodeEncodeError를
+            # 재발생시켜 return {} 에 도달하지 못하고 상위 wait_for가 실패한다.
+            log_ts(f"[Hybrid] 추출 중 에러: {type(e).__name__}: {e}")
             return {}
         finally: 
             try: 
@@ -693,60 +700,86 @@ class HybridJavCrawler:
                 try: shutil.rmtree(tmp_user_dir, ignore_errors=True)
                 except: pass
 
-    async def fetch_metadata_smart(self, product_code: str) -> dict[str, Any]:
+    async def fetch_metadata_smart(
+        self,
+        product_code: str,
+        *,
+        progress_cb: Callable[[str, int], None] | None = None,
+    ) -> dict[str, Any]:
         code = product_code.upper()
         out: dict[str, Any] = {"_sources_tried": [], "_sources_used": []}
 
+        def _stage(msg: str, pct: int = 25) -> None:
+            log_ts(msg)
+            if progress_cb:
+                try:
+                    progress_cb(msg, pct)
+                except Exception:
+                    pass
+
         # 1) 123av
-        log_ts(f"[Hybrid] 1순위(123av): requests 수집 시도: {code}")
+        _stage(f"[Hybrid] 1순위(123av): requests 수집 시도: {code}", 26)
         try:
-            d = await asyncio.to_thread(_scrape_123av, code)
+            d = await asyncio.wait_for(asyncio.to_thread(_scrape_123av, code), timeout=45.0)
             out = _merge_empty_only(out, d, source="123av")
         except Exception:
             pass
 
         # 2) missav123
         if _needs_fallback(out):
-            log_ts(f"[Hybrid] 2순위(missav123): requests 수집 시도: {code}")
+            _stage(f"[Hybrid] 2순위(missav123): requests 수집 시도: {code}", 28)
             try:
-                d = await asyncio.to_thread(_scrape_missav123, code)
+                d = await asyncio.wait_for(asyncio.to_thread(_scrape_missav123, code), timeout=45.0)
                 out = _merge_empty_only(out, d, source="missav123")
             except Exception:
                 pass
 
         # 3) avwiki (아마추어 보루 / 403 시 Playwright)
         if _needs_fallback(out):
-            log_ts(f"[Hybrid] 3순위(avwiki): requests 수집 시도: {code}")
+            _stage(f"[Hybrid] 3순위(avwiki): requests 수집 시도: {code}", 30)
             try:
-                d = await asyncio.to_thread(_scrape_avwiki, code, False)
+                d = await asyncio.wait_for(
+                    asyncio.to_thread(_scrape_avwiki, code, False), timeout=60.0
+                )
                 out = _merge_empty_only(out, d, source="avwiki")
             except Exception as e:
                 if "403" in str(e):
                     try:
-                        log_ts(f"[Hybrid] 3순위(avwiki): 403 감지 → Playwright 우회 시도: {code}")
-                        d2 = await asyncio.to_thread(_scrape_avwiki, code, True)
+                        _stage(f"[Hybrid] 3순위(avwiki): 403 감지 → Playwright 우회 시도: {code}", 31)
+                        d2 = await asyncio.wait_for(
+                            asyncio.to_thread(_scrape_avwiki, code, True), timeout=120.0
+                        )
                         out = _merge_empty_only(out, d2, source="avwiki_pw")
                     except Exception:
                         pass
 
         # 4) njavtv (Playwright -> DrissionPage -> 재시도)
         if _needs_fallback(out):
-            log_ts(f"[Hybrid] 4순위(njavtv): Playwright(Headless) 수집 시도: {code}")
-            raw = await scrape_njavtv_playwright_async(code)
+            _stage(f"[Hybrid] 4순위(njavtv): Playwright(Headless) 수집 시도: {code}", 33)
+            try:
+                raw = await asyncio.wait_for(scrape_njavtv_playwright_async(code), timeout=180.0)
+            except Exception:
+                raw = {}
             if _raw_has_any_content(raw):
                 nj = _scrape_dict_for_db(raw, code)
                 nj["_final_url"] = raw.get("_final_url") or raw.get("final_url")
                 out = _merge_empty_only(out, nj, source="njavtv")
 
         if _needs_fallback(out):
-            log_ts(f"[Hybrid] 4순위(njavtv): DrissionPage(Headless) 정밀 수집 시도: {code}")
+            _stage(f"[Hybrid] 4순위(njavtv): DrissionPage(Headless) 정밀 수집 시도: {code}", 35)
             for nj_url in njavtv_detail_urls(code):
-                raw2 = await asyncio.to_thread(
-                    self.get_local_page_data,
-                    nj_url,
-                    code,
-                    False,
-                )
+                try:
+                    raw2 = await asyncio.wait_for(
+                        asyncio.to_thread(
+                            self.get_local_page_data,
+                            nj_url,
+                            code,
+                            False,
+                        ),
+                        timeout=120.0,
+                    )
+                except Exception:
+                    raw2 = {}
                 if _raw_has_any_content(raw2):
                     nj2 = _scrape_dict_for_db(raw2, code)
                     nj2["_final_url"] = raw2.get("_final_url") or raw2.get("final_url")
@@ -754,15 +787,21 @@ class HybridJavCrawler:
                     break
 
         if _needs_fallback(out):
-            log_ts(f"[Hybrid] 4순위(njavtv): 최종 재시도(Headless) : {code}")
+            _stage(f"[Hybrid] 4순위(njavtv): 최종 재시도(Headless) : {code}", 37)
             await asyncio.sleep(2)
             for nj_url in njavtv_detail_urls(code):
-                raw3 = await asyncio.to_thread(
-                    self.get_local_page_data,
-                    nj_url,
-                    code,
-                    False,
-                )
+                try:
+                    raw3 = await asyncio.wait_for(
+                        asyncio.to_thread(
+                            self.get_local_page_data,
+                            nj_url,
+                            code,
+                            False,
+                        ),
+                        timeout=120.0,
+                    )
+                except Exception:
+                    raw3 = {}
                 if _raw_has_any_content(raw3):
                     nj3 = _scrape_dict_for_db(raw3, code)
                     nj3["_final_url"] = raw3.get("_final_url") or raw3.get("final_url")
@@ -771,9 +810,9 @@ class HybridJavCrawler:
 
         # 5) av-wiki.net (배우 식별 전문 — 최종 폴백, 시놉시스 없음)
         if _needs_actress_fallback(out):
-            log_ts(f"[Hybrid] 5순위(av-wiki.net): 배우/커버 보완 시도: {code}")
+            _stage(f"[Hybrid] 5순위(av-wiki.net): 배우/커버 보완 시도: {code}", 39)
             try:
-                d = await asyncio.to_thread(_scrape_avwikinet, code)
+                d = await asyncio.wait_for(asyncio.to_thread(_scrape_avwikinet, code), timeout=60.0)
                 out = _merge_empty_only(out, d, source="avwikinet")
             except Exception:
                 pass

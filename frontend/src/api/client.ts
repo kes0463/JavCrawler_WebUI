@@ -1,6 +1,6 @@
 export const API_BASE =
   import.meta.env.VITE_API_BASE?.replace(/\/$/, "")
-  || (import.meta.env.DEV ? "" : "http://127.0.0.1:8765");
+  || (import.meta.env.DEV ? "" : "http://127.0.0.1:18765");
 
 export interface ApiStatus {
   api: string;
@@ -16,10 +16,10 @@ function formatApiError(text: string): string {
     if (text.includes("insight") || text.includes("/api/insight")) {
       return "인사이트 API를 찾을 수 없습니다. start_web.bat으로 webapi를 재시작해 주세요.";
     }
-    return "배우 API를 찾을 수 없습니다. JAVSTORY_WebUI 폴더에서 start_web.bat으로 webapi를 재시작해 주세요. (구버전 JAVSTORY webapi가 8765 포트를 점유 중일 수 있습니다)";
+    return "배우 API를 찾을 수 없습니다. JAVSTORY_WebUI 폴더에서 start_web.bat으로 webapi를 재시작해 주세요. (구버전 JAVSTORY webapi가 18765 포트를 점유 중일 수 있습니다)";
   }
   if (text.includes("Method Not Allowed") || text.includes('"detail":"Method Not Allowed"')) {
-    return "작품 편집 API가 활성화되지 않았습니다. start_web.bat으로 webapi를 재시작해 주세요. (8765 포트에 구버전 프로세스가 남아 있을 수 있습니다)";
+    return "작품 편집 API가 활성화되지 않았습니다. start_web.bat으로 webapi를 재시작해 주세요. (18765 포트에 구버전 프로세스가 남아 있을 수 있습니다)";
   }
   return text;
 }
@@ -76,4 +76,4 @@ export const patch = <T>(path: string, body?: unknown, timeoutMs = MUTATION_TIME
 
 export const WS_BASE = API_BASE
   ? API_BASE.replace(/^http/, "ws")
-  : `${window.location.protocol === "https:" ? "wss:" : "ws:"}//${window.location.hostname}:8765`;
+  : `${window.location.protocol === "https:" ? "wss:" : "ws:"}//${window.location.hostname}:18765`;

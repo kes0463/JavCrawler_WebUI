@@ -69,6 +69,8 @@ export interface LibraryItemDetail extends LibraryItem {
   has_grok_story?: boolean;
   grok_story_running?: boolean;
   translation_note?: string | null;
+  /** 필드별 크롤 출처 { actors: "avwikinet", cover_url: "123av", ... } */
+  crawl_sources?: Record<string, string>;
 }
 
 export interface LibraryItemUpdate {

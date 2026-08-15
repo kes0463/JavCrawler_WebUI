@@ -9,7 +9,11 @@
 
 환경: `JAVSTORY_TRANSLATION_PROFILE`(default|keeper|deepseek_chat|budget|qwen35|qwen3_14|gemma3_12|jkv_12b), `JAVSTORY_TRANSLATION_OPENROUTER_MODEL`,
 `JAVSTORY_TRANSLATION_PROVIDER`, `JAVSTORY_TRANSLATION_OLLAMA_MODEL`,
-`JAVSTORY_TRANSLATION_CHUNK_TARGET_SEC` / `_OVERLAP_SEC` (미설정 시 `JAVSTORY_CORRECTION_CHUNK_*` → 티어 기본: DeepSeek V3.2 18s/5s, DeepSeek Chat 16s/4s, GLM-5.1 14s/4s, Ollama는 `correction_chunk._ollama_chunk_params_by_model` 과 동일 — Qwen3:14B 18/5, Qwen3.5:9B 16/4.5, Qwen3:8B 15/4, Qwen2.5:14B 17/4.5, Gemma3:12B 16/4.5, Gemma4 16/4, llama.cpp Qwen ~10s/3s · Gemma ~12s/3.5s(짧은 n_ctx·fit 대비), 기타 Ollama 300s/20s, 그 외 OpenRouter 50s/10s),
+청크는 시간(초)이 아닌 자막 줄 수 기준 — `JAVSTORY_TRANSLATION_{PROVIDER}_CHUNK_TARGET_LINES` / `_OVERLAP_LINES`
+(provider ∈ LLAMACPP|OLLAMA|OPENROUTER|OMNIROUTE; 미설정 시 `JAVSTORY_TRANSLATION_CHUNK_TARGET_LINES`/`_OVERLAP_LINES` 공용값 →
+`_default_chunk_lines()` 티어 기본: llama.cpp Qwen 8/2 · Gemma 12/3 · 기타 13/3, Ollama는 `_ollama_chunk_lines_by_model` 참고,
+OmniRoute 12/3, OpenRouter DeepSeek V3.2 16/4 · GLM-5.1 13/3 · 기타 14/3, Gemini는 `_gemini_chunk_lines`).
+겹침(overlap) 줄은 직전 청크 꼬리의 원문(JA)을 `[TranslationHints]` 옆에 읽기 전용 문맥으로 함께 전달 — 재번역 대상 아님.
 `JAVSTORY_TRANSLATION_QWEN_MAX_TOKENS`(Qwen만, `JAVSTORY_TRANSLATION_OLLAMA_MAX_TOKENS` 미설정 시 Ollama 기본 2048 / llama.cpp 기본 768),
 `JAVSTORY_TRANSLATION_LOCAL_HINT_MAX_CHARS`(로컬 스토리 힌트 상한, 기본 900),
 `JAVSTORY_TRANSLATION_CONCURRENCY`, `JAVSTORY_LOG_FULL_TRANSLATION_PROMPT`(1/true 시 청크마다 system+user 전체 로그),
@@ -50,7 +54,7 @@ CancelCheck = Optional[Callable[[], bool]]
 ContentLineFn = Optional[Callable[[dict[str, object]], None]]
 OptionalLogger = Optional[Callable[[str], None]]
 _CACHE_SCHEMA_VERSION = 2
-_CACHE_PROMPT_VERSION = "ko_translation_chunk_cache_v5"
+_CACHE_PROMPT_VERSION = "ko_translation_chunk_cache_v6"
 
 # ── 번역 프롬프트 상수·함수 (구 background_prompts.py에서 인라인) ──
 
@@ -306,6 +310,7 @@ def render_glm_translation_chunk_user(
     *,
     compact_translation_hints: bool = False,
     english_local: bool = False,
+    context_lines: List[str] | None = None,
 ) -> str:
     parts: List[str] = []
     if english_local:
@@ -317,6 +322,9 @@ def render_glm_translation_chunk_user(
                 parts.append("[TranslationHints]\n(same as chunk 0 — omitted)")
             else:
                 parts.append(f"[TranslationHints]\n{extra_hints.strip()}")
+        if context_lines:
+            ctx = "\n".join(f"- {t}" for t in context_lines)
+            parts.append(f"[Previous context — reference only, NOT part of the translation target]\n{ctx}")
         parts.append("[Output language] Korean Hangul only (100%)")
         parts.append(
             "[Output format] JSON array only. "
@@ -333,6 +341,9 @@ def render_glm_translation_chunk_user(
             parts.append("[TranslationHints]\n(チャンク0のヒントと同一 — 省略)")
         else:
             parts.append(f"[TranslationHints]\n{extra_hints.strip()}")
+    if context_lines:
+        ctx = "\n".join(f"- {t}" for t in context_lines)
+        parts.append(f"[直前の文脈 · 参考のみ・翻訳対象外]\n{ctx}")
     parts.append(f"[出力 言語] 韓国語のみ (100% Korean)")
     parts.append(
         "[出力形式] JSON配列のみ。"
@@ -575,7 +586,7 @@ def _use_compact_translation_hints(chunk_idx: int) -> bool:
 
 
 def _local_translation_provider(tier: Dict[str, Any]) -> bool:
-    return str(tier.get("provider") or "").lower() in ("ollama", "llamacpp")
+    return str(tier.get("provider") or "").lower() in ("ollama", "llamacpp", "omniroute")
 
 
 def _local_hint_max_chars() -> int:
@@ -655,76 +666,123 @@ def _story_hints_for_tier(
     return _merge_translation_hints(hints_body or None, "")
 
 
-def _default_chunk_durations(tier: Dict[str, Any]) -> tuple[float, float]:
+def _ollama_chunk_lines_by_model(model: str) -> tuple[int, int]:
+    """Ollama 태그 문자열 기준 권장 청크·겹침(줄 수).
+
+    `correction_chunk._ollama_chunk_params_by_model`(초 단위, 교정 파이프라인 공용)과는
+    별개 — 번역은 줄 수 기준 청킹으로 전환해 실제 프롬프트 크기를 예측 가능하게 관리한다.
+    """
+    m = (model or "").lower()
+    if "gemma4" in m or "gemma3" in m or "gemma" in m:
+        return 12, 3
+    if "qwen3.5" in m or "qwen3_5" in m:
+        return 11, 3
+    if "qwen2.5" in m or "qwen2_5" in m:
+        return 12, 3
+    if "qwen3:8b" in m or "qwen3-8b" in m:
+        return 10, 3
+    if "qwen3:14b" in m or "qwen3-14b" in m:
+        return 13, 3
+    if "qwen" in m:
+        return 13, 3
+    if "ja-ko-vn" in m or "jkv" in m:
+        return 12, 3
+    return 20, 5
+
+
+def _gemini_chunk_lines(model_id: str) -> tuple[int, int]:
+    """Gemini rpm 등급(기존 초 단위 로직)을 줄 수로 환산 — 교정 파이프라인과 무관한 번역 전용 매핑."""
+    from javstory.config.app_config import gemini_default_chunk_params
+
+    tgt_sec, _, _ = gemini_default_chunk_params(model_id)
+    if tgt_sec >= 100:
+        return 60, 8
+    if tgt_sec >= 40:
+        return 30, 6
+    if tgt_sec >= 30:
+        return 22, 5
+    return 16, 4
+
+
+def _default_chunk_lines(tier: Dict[str, Any]) -> tuple[int, int]:
     model_l = (tier.get("model") or "").lower()
     if tier.get("provider") == "ollama":
-        return _ollama_chunk_params_by_model(model_l)
+        return _ollama_chunk_lines_by_model(model_l)
     if tier.get("provider") == "llamacpp":
         # Qwen 14B: fit으로 n_ctx가 줄어들 수 있어 청크를 짧게.
         # Gemma E4B: 상대적으로 가벼워 청크를 키워 왕복·파싱 실패 횟수를 줄인다.
         if "qwen" in model_l:
-            return 10.0, 3.0
+            return 8, 2
         if "gemma" in model_l:
-            return 12.0, 3.5
-        return 14.0, 3.5
+            return 12, 3
+        return 13, 3
+    if tier.get("provider") == "omniroute":
+        # 사용자가 직접 운용하는 로컬 라우터 — 실제 모델 용량을 알 수 없어
+        # llama.cpp 범용값과 비슷한 보수적인 기본값을 사용한다.
+        return 12, 3
     if tier.get("provider") == "gemini":
         try:
-            from javstory.config.app_config import gemini_default_chunk_params
-
-            tgt, ov, _ = gemini_default_chunk_params(tier.get("model") or "")
-            return float(tgt), float(ov)
+            return _gemini_chunk_lines(tier.get("model") or "")
         except Exception:
-            return 45.0, 10.0
+            return 30, 6
     if "minimax" in model_l:
-        return 30.0, 6.0
+        return 25, 5
     if _is_glm_tier(tier):
-        return 14.0, 4.0
+        return 13, 3
     if "deepseek" in model_l and ("v3.2" in model_l or "deepseek-v3.2" in model_l):
-        return 18.0, 5.0
+        return 16, 4
     if "deepseek" in model_l:
-        return 16.0, 4.0
-    return 50.0, 10.0
+        return 14, 3
+    return 40, 8
 
 
-def _effective_translation_chunk_durations(tier: Dict[str, Any]) -> tuple[float, float]:
-    target_dur, overlap_dur = _default_chunk_durations(tier)
-    if tier.get("provider") == "llamacpp":
-        if os.environ.get("JAVSTORY_TRANSLATION_LLAMACPP_CHUNK_TARGET_SEC"):
-            target_dur = max(
-                5.0,
-                _env_float("JAVSTORY_TRANSLATION_LLAMACPP_CHUNK_TARGET_SEC", target_dur),
-            )
-        elif os.environ.get("JAVSTORY_CORRECTION_LLAMACPP_CHUNK_TARGET_SEC"):
-            target_dur = max(
-                5.0,
-                _env_float("JAVSTORY_CORRECTION_LLAMACPP_CHUNK_TARGET_SEC", target_dur),
-            )
-        if os.environ.get("JAVSTORY_TRANSLATION_LLAMACPP_CHUNK_OVERLAP_SEC"):
-            overlap_dur = max(
-                0.0,
-                _env_float("JAVSTORY_TRANSLATION_LLAMACPP_CHUNK_OVERLAP_SEC", overlap_dur),
-            )
-        elif os.environ.get("JAVSTORY_CORRECTION_LLAMACPP_CHUNK_OVERLAP_SEC"):
-            overlap_dur = max(
-                0.0,
-                _env_float("JAVSTORY_CORRECTION_LLAMACPP_CHUNK_OVERLAP_SEC", overlap_dur),
-            )
-        return target_dur, overlap_dur
-    # 번역 전용 → 없으면 교정과 동일 env 폴백
-    if os.environ.get("JAVSTORY_TRANSLATION_CHUNK_TARGET_SEC"):
-        target_dur = max(5.0, _env_float("JAVSTORY_TRANSLATION_CHUNK_TARGET_SEC", target_dur))
-    elif os.environ.get("JAVSTORY_CORRECTION_CHUNK_TARGET_SEC"):
-        target_dur = max(5.0, _env_float("JAVSTORY_CORRECTION_CHUNK_TARGET_SEC", target_dur))
-    if os.environ.get("JAVSTORY_TRANSLATION_CHUNK_OVERLAP_SEC"):
-        overlap_dur = max(0.0, _env_float("JAVSTORY_TRANSLATION_CHUNK_OVERLAP_SEC", overlap_dur))
-    elif os.environ.get("JAVSTORY_CORRECTION_CHUNK_OVERLAP_SEC"):
-        overlap_dur = max(0.0, _env_float("JAVSTORY_CORRECTION_CHUNK_OVERLAP_SEC", overlap_dur))
-    return target_dur, overlap_dur
+#: provider별 청크·겹침 전용 env 접두사. 매핑에 없는 provider(gemini 등)는
+#: 공용 `JAVSTORY_TRANSLATION_CHUNK_*_LINES`만 적용된다.
+CHUNK_ENV_PREFIX_BY_PROVIDER: dict[str, str] = {
+    "llamacpp": "LLAMACPP",
+    "ollama": "OLLAMA",
+    "openrouter": "OPENROUTER",
+    "omniroute": "OMNIROUTE",
+}
+
+
+def _chunk_env_keys(prefix: str | None, kind: str) -> list[str]:
+    """kind: ``TARGET`` | ``OVERLAP``. provider 전용 env → 공용 번역 env 순으로 폴백."""
+    keys: list[str] = []
+    if prefix:
+        keys.append(f"JAVSTORY_TRANSLATION_{prefix}_CHUNK_{kind}_LINES")
+    keys.append(f"JAVSTORY_TRANSLATION_CHUNK_{kind}_LINES")
+    return keys
+
+
+def _env_int(name: str, default: int) -> int:
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        return int(float(raw))
+    except ValueError:
+        return default
+
+
+def _chunk_env_override(prefix: str | None, kind: str, current: int, floor: int) -> int:
+    for key in _chunk_env_keys(prefix, kind):
+        if os.environ.get(key):
+            return max(floor, _env_int(key, current))
+    return current
+
+
+def _effective_translation_chunk_lines(tier: Dict[str, Any]) -> tuple[int, int]:
+    target_lines, overlap_lines = _default_chunk_lines(tier)
+    prefix = CHUNK_ENV_PREFIX_BY_PROVIDER.get(str(tier.get("provider") or "").lower())
+    target_lines = _chunk_env_override(prefix, "TARGET", target_lines, 1)
+    overlap_lines = _chunk_env_override(prefix, "OVERLAP", overlap_lines, 0)
+    return target_lines, overlap_lines
 
 
 def _translation_concurrency(tier: Dict[str, Any]) -> int:
     prov = str(tier.get("provider") or "").lower()
-    if prov in ("ollama", "llamacpp"):
+    if prov in ("ollama", "llamacpp", "omniroute"):
         # 로컬 모델은 VRAM·순서 안정을 위해 항상 순차 처리
         return 1
     raw = os.environ.get("JAVSTORY_TRANSLATION_CONCURRENCY", "").strip()
@@ -746,24 +804,25 @@ def _translation_concurrency(tier: Dict[str, Any]) -> int:
     return 1
 
 
-def _build_chunks(segments: List[SimpleSegment], target_dur: float, overlap_dur: float) -> List[dict]:
+def _build_chunks(segments: List[SimpleSegment], target_lines: int, overlap_lines: int) -> List[dict]:
+    """자막을 `target_lines`줄 단위로 non-overlapping 분할한다(각 줄은 정확히 한 청크에서만 번역됨).
+
+    `overlap_lines`는 직전 청크 꼬리의 원문(JA) 텍스트를 읽기 전용 문맥으로 함께 넘겨
+    번역 연속성(대사 흐름·말투)을 돕는 용도 — 실제 번역 대상으로 다시 포함되지는 않는다.
+    """
     chunks_data: List[dict] = []
-    if not segments:
+    n = len(segments)
+    if n == 0 or target_lines <= 0:
         return chunks_data
-    current_time = 0.0
-    video_end = segments[-1].end
-    while current_time < video_end:
-        tgt = [s for s in segments if current_time <= s.start < (current_time + target_dur)]
+    i = 0
+    while i < n:
+        end = min(i + target_lines, n)
+        tgt = segments[i:end]
         if tgt:
-            chunks_data.append(
-                {
-                    "context": [
-                        s for s in segments if (current_time - overlap_dur) <= s.start < current_time
-                    ],
-                    "target": tgt,
-                }
-            )
-        current_time += target_dur
+            ctx_start = max(0, i - overlap_lines) if overlap_lines > 0 else i
+            context_ja_lines = [s.text for s in segments[ctx_start:i] if (s.text or "").strip()]
+            chunks_data.append({"target": tgt, "context_ja_lines": context_ja_lines})
+        i = end
     return chunks_data
 
 
@@ -966,6 +1025,17 @@ async def translate_ja_segments_to_ko_async(
         translation_tier=translation_tier,
     )
     prov_l = str(tier.get("provider") or "").lower()
+    if prov_l == "omniroute":
+        raw_ctx = (os.environ.get("JAVSTORY_TRANSLATION_OMNIROUTE_MAX_CTX", "") or "").strip()
+        if raw_ctx:
+            try:
+                tier = {**tier, "max_ctx": max(512, int(raw_ctx))}
+            except ValueError:
+                pass
+    elif prov_l == "ollama":
+        # 실제 요청에 실리는 num_ctx(engine.py extra_body)와 tier 표시값을 일치시킨다.
+        raw_num_ctx = (os.environ.get("OLLAMA_NUM_CTX", "") or "").strip()
+        tier = {**tier, "max_ctx": int(raw_num_ctx) if raw_num_ctx.isdigit() else 2048}
     if prov_l in ("ollama", "llamacpp") and "qwen" in (tier.get("model") or "").lower():
         qt = os.environ.get("JAVSTORY_TRANSLATION_QWEN_TEMPERATURE", "0.22").strip()
         try:
@@ -1044,8 +1114,8 @@ async def translate_ja_segments_to_ko_async(
 
         await llamacpp_ensure_model(tier, logger_func=log)
 
-    target_dur, overlap_dur = _effective_translation_chunk_durations(tier)
-    chunks_data = _build_chunks(segments, target_dur, overlap_dur)
+    target_lines, overlap_lines = _effective_translation_chunk_lines(tier)
+    chunks_data = _build_chunks(segments, target_lines, overlap_lines)
     conc = _translation_concurrency(tier)
     semaphore = asyncio.Semaphore(conc)
     total_chunks = len(chunks_data)
@@ -1053,7 +1123,8 @@ async def translate_ja_segments_to_ko_async(
     video_end_sec = segments[-1].end if segments else 0.0
     log(
         f"[KO-TRANSLATE] 시작 — {tier.get('name')} / {tier.get('model')} "
-        f"(청크≈{target_dur:.0f}s, 겹침≈{overlap_dur:.0f}s, 동시≤{conc}, 총 청크 {total_chunks})"
+        f"(청크≈{target_lines}줄, 겹침≈{overlap_lines}줄, 컨텍스트≈{tier.get('max_ctx') or '?'}, "
+        f"동시≤{conc}, 총 청크 {total_chunks})"
     )
     if log_start_details:
         _log_translation_start_details(
@@ -1126,8 +1197,9 @@ async def translate_ja_segments_to_ko_async(
                 "model": tier.get("model") or "",
                 "temperature": tier.get("temperature"),
                 "max_tokens": tier.get("max_tokens"),
-                "target_dur": round(float(target_dur), 3),
-                "overlap_dur": round(float(overlap_dur), 3),
+                "target_lines": target_lines,
+                "overlap_lines": overlap_lines,
+                "context_ja_lines": chunk.get("context_ja_lines") or [],
                 "chunk_idx": idx,
                 "chunk_json": chunk_json,
                 "background": background_json_str,
@@ -1287,6 +1359,7 @@ async def translate_ja_segments_to_ko_async(
                 extra_hints,
                 compact_translation_hints=compact_hints,
                 english_local=use_en_local,
+                context_lines=chunk.get("context_ja_lines"),
             )
             messages: List[dict[str, str]] = [
                 {"role": "system", "content": system_prompt_translation_chunk(tier)},

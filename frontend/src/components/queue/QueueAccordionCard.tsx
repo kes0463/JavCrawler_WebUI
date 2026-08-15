@@ -29,39 +29,44 @@ export function QueueAccordionCard({
 
   return (
     <GlassCard noPadding className={cn("overflow-hidden", className)}>
-      <button
-        onClick={() => setOpen(o => !o)}
-        className={cn(
-          "w-full flex items-center gap-3 px-4 py-4 text-left",
-          "hover:bg-white/[0.025] transition-colors duration-150",
-        )}
-      >
-        {icon && <span className="text-[15px] leading-none">{icon}</span>}
+      <div className="px-4 py-4 space-y-3">
+        <button
+          type="button"
+          onClick={() => setOpen(o => !o)}
+          className={cn(
+            "w-full flex items-center gap-3 text-left",
+            "hover:opacity-90 transition-opacity duration-150",
+          )}
+        >
+          {icon && <span className="text-[15px] leading-none shrink-0">{icon}</span>}
 
-        <span className="flex-1 text-lg font-semibold text-[#d4d4ec] tracking-tight">{title}</span>
-
-        {count !== undefined && (
-          <span className="text-sm tabular-nums text-zinc-500 px-2.5 py-0.5 rounded-full bg-white/[0.05] border border-white/[0.06]">
-            {count}
+          <span className="flex-1 min-w-0 text-lg font-semibold text-[#d4d4ec] tracking-tight truncate">
+            {title}
           </span>
-        )}
 
-        {status && <StatusBadge status={status} />}
+          {count !== undefined && (
+            <span className="text-sm tabular-nums text-zinc-500 px-2.5 py-0.5 rounded-full bg-white/[0.05] border border-white/[0.06] shrink-0">
+              {count}
+            </span>
+          )}
+
+          {status && <StatusBadge status={status} />}
+
+          <ChevronDown
+            className={cn(
+              "w-3.5 h-3.5 text-zinc-600 shrink-0",
+              "transition-transform duration-250 ease-spring",
+              open && "rotate-180",
+            )}
+          />
+        </button>
 
         {actions && (
-          <div onClick={e => e.stopPropagation()} className="flex items-center gap-1.5">
+          <div className="flex items-center gap-1.5 flex-wrap">
             {actions}
           </div>
         )}
-
-        <ChevronDown
-          className={cn(
-            "w-3.5 h-3.5 text-zinc-600 shrink-0",
-            "transition-transform duration-250 ease-spring",
-            open && "rotate-180",
-          )}
-        />
-      </button>
+      </div>
 
       <div
         className={cn(

@@ -54,6 +54,15 @@ def _text(el: Any) -> str:
     return re.sub(r"\s+", " ", el.get_text(" ", strip=True) or "").strip()
 
 
+def _normalize_code(code: str) -> str:
+    """품번 비교용 정규화: 대문자화 + 영숫자만 남기고 + 숫자 구간의 선행 0 제거.
+
+    'KAVR-146', 'KAVR00146', 'kavr 146' 이 모두 'KAVR146' 으로 수렴한다.
+    """
+    s = re.sub(r"[^A-Za-z0-9]", "", (code or "")).upper()
+    return re.sub(r"\d+", lambda m: str(int(m.group())), s)
+
+
 def _abs_url(url: str, *, base_url: str) -> str:
     url = (url or "").strip()
     if not url:
@@ -185,6 +194,19 @@ def fetch_actress_info(
     r2.raise_for_status()
     info = parse_article_html(r2.text, base_url=base_url)
     info.source_url = article_url
+
+    # 오탐 방지: 검색이 무결과일 때 워드프레스는 사이드바의 "최근 글" 링크를 노출하고,
+    # find_article_url 폴백이 그 링크(품번과 무관한 기사)를 잡을 수 있다. 파싱한 기사의
+    # 품번이 요청 품번과 일치할 때만 신뢰하고, 아니면 배우 정보를 채우지 않는다.
+    requested = _normalize_code(product_id)
+    parsed = _normalize_code(info.code)
+    if requested and parsed:
+        if requested != parsed:
+            return AvWikiNetInfo(code=product_id.upper(), source_url=article_url)
+    elif requested and requested not in _normalize_code(r2.text):
+        # 품번을 파싱하지 못한 경우, 본문에 품번이 등장하는지로 최소 검증한다.
+        return AvWikiNetInfo(code=product_id.upper(), source_url=article_url)
+
     if not info.code:
         info.code = product_id.upper()
     return info

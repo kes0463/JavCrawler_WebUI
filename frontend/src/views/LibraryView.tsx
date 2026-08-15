@@ -130,8 +130,11 @@ export default function LibraryView() {
     scrollRoot,
   );
 
+  const statsRef = useRef(stats);
+  statsRef.current = stats;
+
   const refreshStats = useCallback((showSkeleton = true) => {
-    if (showSkeleton && !stats) setStatsLoading(true);
+    if (showSkeleton && !statsRef.current) setStatsLoading(true);
     else setStatsRefreshing(true);
     fetchLibraryStats()
       .then(next => {
@@ -142,17 +145,17 @@ export default function LibraryView() {
         setStatsLoading(false);
         setStatsRefreshing(false);
       });
-  }, [stats]);
+  }, []);
 
   useEffect(() => {
-    const run = () => refreshStats(!stats);
+    const run = () => refreshStats(!statsRef.current);
     if (typeof requestIdleCallback !== "undefined") {
       const id = requestIdleCallback(run);
       return () => cancelIdleCallback(id);
     }
     const t = window.setTimeout(run, 0);
     return () => window.clearTimeout(t);
-  }, [refreshStats, stats]);
+  }, [refreshStats]);
 
   useEffect(() => {
     if (currentView !== "library") return;

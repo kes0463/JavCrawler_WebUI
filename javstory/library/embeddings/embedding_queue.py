@@ -43,6 +43,7 @@ class EmbeddingQueueManager:
         self._state_lock = threading.Lock()
         self._jobs: dict[str, EmbeddingJobState] = {}
         self._active_codes: set[str] = set()
+        self._harvest_paused = False
         self._completed_total = 0
         self._failed_total = 0
         self._seq = 0
@@ -63,6 +64,20 @@ class EmbeddingQueueManager:
             t.start()
             self._workers.append(t)
         logger.info("Embedding queue started (%d worker(s)).", n)
+
+    def pause_for_harvest(self) -> None:
+        with self._state_lock:
+            self._harvest_paused = True
+        logger.info("Embedding queue paused (harvest running).")
+
+    def resume_after_harvest(self) -> None:
+        with self._state_lock:
+            self._harvest_paused = False
+        logger.info("Embedding queue resumed (harvest finished).")
+
+    def is_harvest_paused(self) -> bool:
+        with self._state_lock:
+            return bool(self._harvest_paused)
 
     def _touch(self, job: EmbeddingJobState, **kwargs: Any) -> None:
         for k, v in kwargs.items():
@@ -211,10 +226,15 @@ class EmbeddingQueueManager:
 
     def _worker_loop(self) -> None:
         while True:
+            if self.is_harvest_paused():
+                time.sleep(0.5)
+                continue
             try:
                 job_id = self._queue.get(timeout=1.0)
             except queue.Empty:
                 continue
+            while self.is_harvest_paused():
+                time.sleep(0.5)
             try:
                 self._run_job(job_id)
             except Exception:
@@ -249,10 +269,19 @@ class EmbeddingQueueManager:
         ok = False
         err_msg = ""
         try:
-            from javstory.library.embeddings.pipeline import build_and_store_embeddings_for_product
-            from javstory.llm.ollama_serve import ensure_ollama_serve
+            from javstory.library.embeddings.pipeline import (
+                build_and_store_embeddings_for_product,
+                embeddings_backend_from_env,
+            )
 
-            ensure_ollama_serve(wait_sec=3.0)
+            if embeddings_backend_from_env() == "ollama":
+                from javstory.llm.ollama_serve import ensure_ollama_serve
+
+                ensure_ollama_serve(wait_sec=3.0)
+            else:
+                from javstory.llm.llamacpp_embeddings import ensure_embeddings_llamacpp_ready
+
+                ensure_embeddings_llamacpp_ready(logger_func=_log, wait_sec=90.0)
 
             async def _run() -> None:
                 path = await build_and_store_embeddings_for_product(

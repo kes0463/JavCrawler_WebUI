@@ -1,4 +1,4 @@
-import { useEffect, useRef, type ReactNode } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { Bookmark, Download, FileAudio, FolderOpen, Heart, Languages, Play, RefreshCw, ScanEye, Sparkles } from "lucide-react";
 import { cn } from "@/lib/utils";
@@ -84,6 +84,22 @@ export function PosterCardContextMenu({
   const multi = codes.length > 1;
   const labelPrefix = multi ? `${codes.length}개` : (codes[0] || "");
 
+  // 실제 렌더된 메뉴 크기를 재서 화면 밖으로 넘치지 않게 위치를 보정한다.
+  // (항목 개수에 따라 높이가 달라지므로 고정값 가정은 어긋남을 유발한다.)
+  const [pos, setPos] = useState({ left: x, top: y });
+
+  useLayoutEffect(() => {
+    if (!open) return;
+    const el = menuRef.current;
+    if (!el) return;
+    const pad = 8;
+    const w = el.offsetWidth;
+    const h = el.offsetHeight;
+    const left = Math.max(pad, Math.min(x, window.innerWidth - w - pad));
+    const top = Math.max(pad, Math.min(y, window.innerHeight - h - pad));
+    setPos({ left, top });
+  }, [open, x, y, codes.length]);
+
   useEffect(() => {
     if (!open) return;
 
@@ -106,17 +122,11 @@ export function PosterCardContextMenu({
 
   if (!open || typeof document === "undefined" || codes.length === 0) return null;
 
-  const pad = 8;
-  const menuW = 240;
-  const menuH = 300;
-  const left = Math.min(x, window.innerWidth - menuW - pad);
-  const top = Math.min(y, window.innerHeight - menuH - pad);
-
   return createPortal(
     <div
       ref={menuRef}
       className="fixed z-[200] min-w-[220px] py-1.5 px-1.5 rounded-xl border border-white/[0.10] bg-bg-panel/95 shadow-xl backdrop-blur-md"
-      style={{ left, top }}
+      style={{ left: pos.left, top: pos.top }}
       onClick={e => e.stopPropagation()}
       onContextMenu={e => e.preventDefault()}
     >

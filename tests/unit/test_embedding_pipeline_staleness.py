@@ -26,7 +26,7 @@ def test_embedding_cache_skips_when_story_context_not_newer(tmp_path, monkeypatc
         calls["embed"] += 1
         return [[0.1]]
 
-    monkeypatch.setattr(pipeline, "ollama_embed_texts", fake_embed_texts)
+    monkeypatch.setattr(pipeline, "_embed_texts", fake_embed_texts)
 
     out = asyncio.run(
         pipeline.build_and_store_embeddings_for_product("ABC-123", model="test-model")
@@ -61,15 +61,11 @@ def test_embedding_cache_regenerates_when_story_context_newer(tmp_path, monkeypa
         lambda *_args, **_kwargs: [{"doc_id": "d1", "kind": "meta", "text": "hello", "meta": {}}],
     )
 
-    async def fake_ensure_model(*_args, **_kwargs):
-        return None
-
     async def fake_embed_texts(*_args, **_kwargs):
         calls["embed"] += 1
         return [[0.1, 0.2]]
 
-    monkeypatch.setattr(pipeline, "ollama_ensure_model", fake_ensure_model)
-    monkeypatch.setattr(pipeline, "ollama_embed_texts", fake_embed_texts)
+    monkeypatch.setattr(pipeline, "_embed_texts", fake_embed_texts)
 
     out = asyncio.run(
         pipeline.build_and_store_embeddings_for_product(

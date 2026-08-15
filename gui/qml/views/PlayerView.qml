@@ -33,6 +33,7 @@ Item {
     // 스킵 감지용
     property int _prevPosition: 0
     property bool _isUserSeeking: false
+    property real _scrubValue: 0
   // 오른쪽 Ctrl 등 modifiers 미반영 환경용 래치
     property int _ctrlHeldCount: 0
     property int _altHeldCount: 0
@@ -998,10 +999,18 @@ Item {
                 Layout.fillWidth: true
                 Layout.preferredHeight: 28
                 focusPolicy: Qt.NoFocus
+                live: true
                 from: 0; to: Math.max(1, mediaPlayer.duration)
-                value: mediaPlayer.position
-                onPressedChanged: playerRoot._isUserSeeking = pressed
-                onMoved: mediaPlayer.setPosition(value)
+                value: playerRoot._isUserSeeking ? playerRoot._scrubValue : mediaPlayer.position
+                onPressed: {
+                    playerRoot._isUserSeeking = true
+                    playerRoot._scrubValue = mediaPlayer.position
+                }
+                onMoved: playerRoot._scrubValue = value
+                onReleased: {
+                    mediaPlayer.setPosition(progressSlider.value)
+                    playerRoot._isUserSeeking = false
+                }
 
                 background: Rectangle {
                     color: "transparent"
@@ -1024,8 +1033,11 @@ Item {
                     width: 14; height: 14; radius: 7; color: "#FFF"
                     border.color: Theme.accentNeon; border.width: 2
                     visible: progressSlider.hovered || progressSlider.pressed
-                    scale: progressSlider.hovered ? 1.2 : 1.0
-                    Behavior on scale { NumberAnimation { duration: 100 } }
+                    scale: progressSlider.hovered || progressSlider.pressed ? 1.2 : 1.0
+                    Behavior on scale {
+                        enabled: !progressSlider.pressed
+                        NumberAnimation { duration: 100 }
+                    }
                 }
             }
 
@@ -1061,7 +1073,8 @@ Item {
                 // 시간
                 Text {
                     Layout.alignment: Qt.AlignVCenter
-                    text: formatTime(mediaPlayer.position) + " / " + formatTime(mediaPlayer.duration)
+                    text: formatTime(playerRoot._isUserSeeking ? playerRoot._scrubValue : mediaPlayer.position)
+                          + " / " + formatTime(mediaPlayer.duration)
                     color: Qt.rgba(1, 1, 1, 0.75)
                     font.pixelSize: 14
                     font.family: Theme.fontFamily

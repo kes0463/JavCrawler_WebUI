@@ -4,7 +4,7 @@ const path = require("path");
 const net = require("net");
 const fs = require("fs");
 
-const API_PORT = Number(process.env.JAVSTORY_WEBAPI_PORT || 8765);
+const API_PORT = Number(process.env.JAVSTORY_WEBAPI_PORT || 18765);
 const VITE_PORT = Number(process.env.JAVSTORY_VITE_PORT || 5500);
 const IS_DEV = process.env.NODE_ENV === "development";
 

@@ -225,7 +225,7 @@ webapi/
 **핵심 원칙**
 
 - 라우트는 **얇게**: 요청 검증 → `javstory.services.*` 호출 → 스키마 반환
-- 기본 포트: `8765` (`JAVSTORY_WEBAPI_PORT`로 오버라이드)
+- 기본 포트: `18765` (`JAVSTORY_WEBAPI_PORT`로 오버라이드)
 - CORS: `http://localhost:5173`, `http://127.0.0.1:5173` (환경변수 `JAVSTORY_CORS_ORIGINS` 지원)
 - Harvest WebSocket 이벤트 형식은 [`frontend/src/api/harvest.ts`](../../frontend/src/api/harvest.ts)와 **호환 유지** (`state`, `progress`, `item_done` 등)
 
@@ -269,7 +269,7 @@ pydantic>=2.7,<3
 
 ### 4.1 API 클라이언트
 
-- [`frontend/src/api/client.ts`](../../frontend/src/api/client.ts): `VITE_API_BASE` 환경변수 지원 (기본 `http://127.0.0.1:8765`)
+- [`frontend/src/api/client.ts`](../../frontend/src/api/client.ts): `VITE_API_BASE` 환경변수 지원 (기본 `http://127.0.0.1:18765`)
 - **신규** `frontend/src/api/dashboard.ts`: summary / pending / system fetch
 - 기존 [`library.ts`](../../frontend/src/api/library.ts), [`harvest.ts`](../../frontend/src/api/harvest.ts): 경로 prefix 동일 유지 (`/api/library`, `/api/harvest`)
 
@@ -305,7 +305,7 @@ MVP는 **브라우저 + Vite dev** 우선. [`frontend/electron/main.cjs`](../../
 
 ```
 # Terminal 1
-uvicorn webapi.main:app --host 127.0.0.1 --port 8765 --reload
+uvicorn webapi.main:app --host 127.0.0.1 --port 18765 --reload
 
 # Terminal 2
 cd frontend && npm run dev

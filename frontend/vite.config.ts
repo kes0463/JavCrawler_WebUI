@@ -14,13 +14,13 @@ export default defineConfig({
     strictPort: true,
     proxy: {
       "/api": {
-        target: "http://127.0.0.1:8765",
+        target: "http://127.0.0.1:18765",
         changeOrigin: true,
         timeout: 0,
         proxyTimeout: 0,
       },
       "/health": {
-        target: "http://127.0.0.1:8765",
+        target: "http://127.0.0.1:18765",
         changeOrigin: true,
         timeout: 5000,
         proxyTimeout: 5000,
