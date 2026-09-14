@@ -150,7 +150,7 @@ export default function ActressView() {
     setLoadError(null);
     fetchActresses(query, sort, ascending ? "asc" : "desc", pageNum, PER_PAGE)
       .then(r => {
-        if (!append && !apiWarnedRef.current && r.items.length === 0 && r.total === 0) {
+        if (!append && !apiWarnedRef.current && !query && r.items.length === 0 && r.total === 0) {
           apiWarnedRef.current = true;
           showToast(
             "배우 데이터가 비어 있습니다. start_web.bat으로 webapi를 실행했는지 확인해 주세요.",

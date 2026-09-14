@@ -125,6 +125,34 @@ def reset_cache() -> None:
         _CACHE.clear()
 
 
+def _resolved_is_real(exe: str) -> bool:
+    """`_resolve` 결과가 실제 실행 가능한 바이너리인지.
+
+    절대 경로면 `_resolve` 가 이미 `_is_executable_file` 로 검증한 것이고,
+    맨 이름(마지막 폴백)이면 PATH 에 실제로 존재하는지 확인한다.
+    """
+    if os.path.isabs(exe):
+        return True
+    return shutil.which(exe) is not None
+
+
+def ffmpeg_available() -> bool:
+    """ffmpeg 를 실제로 실행할 수 있는지(설치·PATH·env 해석 성공)."""
+    return _resolved_is_real(get_ffmpeg())
+
+
+def ffprobe_available() -> bool:
+    """ffprobe 를 실제로 실행할 수 있는지."""
+    return _resolved_is_real(get_ffprobe())
+
+
+FFMPEG_MISSING_MESSAGE = (
+    "ffmpeg/ffprobe 실행 파일을 찾을 수 없습니다. "
+    "ffmpeg 를 설치해 시스템 PATH 에 추가하거나, "
+    "JAVSTORY_FFMPEG · JAVSTORY_FFPROBE 환경변수에 실행 파일 경로를 지정하세요."
+)
+
+
 def bootstrap_path_env() -> None:
     """PATH 의존 ffmpeg 호출을 위해 해석된 실행 파일 디렉터리를 PATH 앞쪽에 추가한다."""
     global _PATH_BOOTSTRAPPED

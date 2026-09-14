@@ -75,11 +75,18 @@ class LibraryItemDetail(LibraryItem):
     has_grok_story: bool = False
     grok_story_running: bool = False
     translation_note: Optional[str] = None
+    translation_note_running: bool = False
     crawl_sources: dict[str, str] = {}
 
 
 class WorkTranslationNotePatch(BaseModel):
     translation_note: str
+
+
+class TranslationNoteRegenerateResponse(BaseModel):
+    ok: bool
+    queued: int = 0
+    message: str = ""
 
 
 class GrokStoryStartRequest(BaseModel):
@@ -109,6 +116,7 @@ class LibraryListResponse(BaseModel):
     embeddings_enabled: Optional[bool] = None
     embedding_channel_used: Optional[bool] = None
     search_message: Optional[str] = None
+    search_message_kind: Optional[str] = None
 
 
 class EmbeddingsGgufOption(BaseModel):
@@ -134,6 +142,7 @@ class EmbeddingsSettingsResponse(BaseModel):
     search_min_score: float = 0.36
     search_relative_ratio: float = 0.84
     search_max_gap: float = 0.10
+    batch_size: int = 10
 
 
 class EmbeddingsGgufOptionsResponse(BaseModel):
@@ -149,6 +158,16 @@ class EmbeddingsSettingsPatch(BaseModel):
     search_min_score: Optional[float] = None
     search_relative_ratio: Optional[float] = None
     search_max_gap: Optional[float] = None
+    batch_size: Optional[int] = None
+
+    @field_validator("batch_size")
+    @classmethod
+    def validate_batch_size(cls, v: int | None) -> int | None:
+        if v is None:
+            return v
+        if not (1 <= int(v) <= 64):
+            raise ValueError("batch_size must be between 1 and 64")
+        return int(v)
 
     @field_validator("search_min_score")
     @classmethod
@@ -307,6 +326,9 @@ class StreamPrepareResponse(BaseModel):
     error: Optional[str] = None
     progress: Optional[float] = None
     eta_sec: Optional[float] = None
+    # ready=True 이면서 complete=False 이면: 재생은 시작 가능하지만 백그라운드에서
+    # 나머지 구간을 계속 HLS 변환 중이라는 뜻(점진적 재생).
+    complete: bool = False
 
 
 class PlaybackInfo(BaseModel):
@@ -613,11 +635,28 @@ class TranslationChunkOption(BaseModel):
     context_length: Optional[int] = None
 
 
+class GeminiModelOption(BaseModel):
+    id: str
+    label: str
+    rpm: Optional[int] = None
+    tpm: Optional[int] = None
+    rpd: Optional[int] = None
+    is_pro: bool = False
+
+
+class GeminiSettingsSnapshot(BaseModel):
+    model: str
+    chain: list[str]
+    has_api_key: bool
+    model_options: list[GeminiModelOption]
+
+
 class TranslationSettingsResponse(BaseModel):
     provider: str
     openrouter_profile: str
     llamacpp: LlamaCppSettingsSnapshot
     omniroute: OmniRouteSettingsSnapshot
+    gemini: GeminiSettingsSnapshot
     chunk_options: dict[str, TranslationChunkOption]
     provider_options: list[TranslationProviderOption]
     model_options: list[TranslationModelOption]
@@ -629,6 +668,8 @@ class TranslationSettingsPatch(BaseModel):
     openrouter_profile: Optional[str] = None
     omniroute_url: Optional[str] = None
     omniroute_model: Optional[str] = None
+    gemini_chain: Optional[list[str]] = None
+    gemini_api_key: Optional[str] = None
     llamacpp_chunk_target_lines: Optional[int] = None
     llamacpp_chunk_overlap_lines: Optional[int] = None
     ollama_chunk_target_lines: Optional[int] = None
@@ -639,6 +680,8 @@ class TranslationSettingsPatch(BaseModel):
     omniroute_chunk_target_lines: Optional[int] = None
     omniroute_chunk_overlap_lines: Optional[int] = None
     omniroute_context_length: Optional[int] = None
+    gemini_chunk_target_lines: Optional[int] = None
+    gemini_chunk_overlap_lines: Optional[int] = None
     llamacpp_bin: Optional[str] = None
     llamacpp_url: Optional[str] = None
     llamacpp_port: Optional[int] = None
@@ -668,6 +711,7 @@ class TranslationSettingsPatch(BaseModel):
         "ollama_chunk_target_lines",
         "openrouter_chunk_target_lines",
         "omniroute_chunk_target_lines",
+        "gemini_chunk_target_lines",
     )
     @classmethod
     def validate_chunk_target_lines(cls, v: int | None) -> int | None:
@@ -682,6 +726,7 @@ class TranslationSettingsPatch(BaseModel):
         "ollama_chunk_overlap_lines",
         "openrouter_chunk_overlap_lines",
         "omniroute_chunk_overlap_lines",
+        "gemini_chunk_overlap_lines",
     )
     @classmethod
     def validate_chunk_overlap_lines(cls, v: int | None) -> int | None:
@@ -699,6 +744,20 @@ class TranslationSettingsPatch(BaseModel):
         if v < 512 or v > 1_000_000:
             raise ValueError("context length must be between 512 and 1,000,000")
         return v
+
+    @field_validator("gemini_chain")
+    @classmethod
+    def validate_gemini_chain(cls, v: list[str] | None) -> list[str] | None:
+        if v is None:
+            return None
+        # 빈 리스트는 거부하지 않고 그대로 통과시킨다 — 이 필드는 provider와 무관하게
+        # 저장 때마다 항상 함께 전송되므로(다른 provider 필드들과 동일한 패턴), 여기서
+        # reject하면 gemini를 쓰지 않는 저장까지 전체가 막힌다. 라우트가
+        # `if data["gemini_chain"]:`로 빈 값을 이미 무시하므로 여기서는 최대 개수만 본다.
+        cleaned = [m.strip() for m in v if m and m.strip()]
+        if len(cleaned) > 10:
+            raise ValueError("gemini_chain supports at most 10 models")
+        return cleaned
 
     @field_validator("llamacpp_port")
     @classmethod

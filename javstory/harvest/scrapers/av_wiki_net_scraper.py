@@ -169,7 +169,7 @@ def fetch_actress_info(
     *,
     base_url: str = BASE_URL,
     search_path_template: str = SEARCH_PATH_TEMPLATE,
-    timeout: float = 30.0,
+    timeout: float = 12.0,
     session: Optional[requests.Session] = None,
 ) -> AvWikiNetInfo:
     """품번으로 av-wiki.net을 검색해 기사 페이지를 찾아 파싱한다.

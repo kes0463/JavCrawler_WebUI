@@ -539,8 +539,10 @@ def _http_get(
     session=None,
     disable_cffi: bool,
 ) -> Optional[Any]:
-    max_tries = 3
-    backoffs = (0.0, 0.8, 1.6)
+    # 재시도는 전송 예외(타임아웃·리셋 등 일시적 실패)에만 의미가 있다.
+    # 404/빈 페이지는 예외가 아니라 정상 반환 → 재시도 없이 상위에서 다음 슬러그로 넘어간다.
+    max_tries = 2
+    backoffs = (0.0, 0.7)
     last_exc: Optional[BaseException] = None
     for i in range(max_tries):
         if i > 0:
@@ -584,7 +586,7 @@ def fetch_video_info(
     *,
     base_url: str = BASE_URL,
     path_template: str = VIDEO_PATH_TEMPLATE,
-    timeout: float = 30.0,
+    timeout: float = 12.0,
     session=None,
 ) -> VideoInfo:
     product_id = product_id.strip()

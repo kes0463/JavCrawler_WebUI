@@ -154,8 +154,11 @@ def patch_translation_settings(body: TranslationSettingsPatch):
             set_env_runtime_value("JAVSTORY_LLM_PLATFORM", "ollama")
         elif prov == "openrouter":
             set_env_runtime_value("JAVSTORY_LLM_PLATFORM", "openai")
-        elif prov == "omniroute":
-            set_env_runtime_value("JAVSTORY_LLM_PLATFORM", "omniroute")
+        # omniroute/gemini는 JAVSTORY_LLM_PLATFORM을 건드리지 않는다 — 그 변수는
+        # harvest/correction/데스크톱 GUI가 공유하는 llamacpp|ollama|openai 3-way
+        # 스위치라, 값을 넣으면 그쪽의 platform-suffixed override가 깨진다.
+        # 번역 provider 판단은 _effective_translation_provider가 JAVSTORY_TRANSLATION_PROVIDER를
+        # 직접 보고 처리한다.
 
     if "openrouter_profile" in data and data["openrouter_profile"]:
         prof = str(data["openrouter_profile"]).strip().lower()
@@ -167,6 +170,28 @@ def patch_translation_settings(body: TranslationSettingsPatch):
 
     if "omniroute_model" in data:
         set_env_runtime_value("JAVSTORY_OMNIROUTE_MODEL", str(data["omniroute_model"] or "").strip())
+
+    if "gemini_api_key" in data and data["gemini_api_key"]:
+        set_env_runtime_value("JAVSTORY_GEMINI_API_KEY", str(data["gemini_api_key"]).strip())
+
+    if "gemini_chain" in data and data["gemini_chain"]:
+        # 체인 1순위가 곧 기본 모델 — 별도 "기본 모델" 필드를 두지 않고 체인 저장 시
+        # JAVSTORY_GEMINI_MODEL을 체인[0]으로 동기화한다. 카탈로그 키 그대로 저장하고
+        # 별칭(-preview 등) 정규화는 실제 API 호출 직전(gemini_translation_llm_tier)에서만 한다
+        # — 여기서 정규화하면 model_options[].id와 어긋나 저장 후 드롭다운이 비어 보인다.
+        chain = [str(m).strip() for m in data["gemini_chain"] if str(m).strip()]
+        set_env_runtime_value("JAVSTORY_GEMINI_TRANSLATION_CHAIN", ",".join(chain))
+        if chain:
+            set_env_runtime_value("JAVSTORY_GEMINI_MODEL", chain[0])
+
+    if "gemini_chunk_target_lines" in data and data["gemini_chunk_target_lines"] is not None:
+        set_env_runtime_value(
+            "JAVSTORY_TRANSLATION_GEMINI_CHUNK_TARGET_LINES", str(data["gemini_chunk_target_lines"])
+        )
+    if "gemini_chunk_overlap_lines" in data and data["gemini_chunk_overlap_lines"] is not None:
+        set_env_runtime_value(
+            "JAVSTORY_TRANSLATION_GEMINI_CHUNK_OVERLAP_LINES", str(data["gemini_chunk_overlap_lines"])
+        )
 
     if "llamacpp_chunk_target_lines" in data and data["llamacpp_chunk_target_lines"] is not None:
         set_env_runtime_value(
@@ -427,6 +452,12 @@ def patch_embeddings_settings(body: EmbeddingsSettingsPatch):
         from javstory.llm.llamacpp_embeddings import invalidate_embeddings_gguf_cache
 
         invalidate_embeddings_gguf_cache()
+
+    if "batch_size" in data and data["batch_size"] is not None:
+        set_env_runtime_value(
+            "JAVSTORY_EMBEDDINGS_LLAMACPP_BATCH_SIZE",
+            str(int(data["batch_size"])),
+        )
 
     search_env_changed = False
     if "search_min_score" in data and data["search_min_score"] is not None:

@@ -115,7 +115,7 @@ def _curl_resolve_njav_http_redirect(entry_url: str) -> str | None:
     try:
         r = curl_requests.get(
             entry_url, headers={"User-Agent": _NJAV_UA},
-            timeout=30, impersonate="chrome120", allow_redirects=True,
+            timeout=12, impersonate="chrome120", allow_redirects=True,
         )
         u = str(r.url).strip()
         if u and "njavtv.com" in u.lower() and _njav_path_is_dm_detail(u):
@@ -393,24 +393,36 @@ def _merge_empty_only(base: dict[str, Any], extra: dict[str, Any], *, source: st
     return base
 
 
-def _needs_fallback(d: dict[str, Any]) -> bool:
-    """title·cover·synopsis 중 하나라도 없거나 제목이 리다이렉트 안내 문구일 때 다음 소스 시도.
+def _browser_chases_synopsis() -> bool:
+    """njavtv 브라우저 단계(건당 수십 초~수 분)를 synopsis만 누락일 때도 돌릴지.
 
-    synopsis 누락은 과거엔 폴백 트리거가 아니었음 — 1순위 소스가 title/cover만
-    채우고 시놉시스가 비면 그 상태로 체인이 조기 종료돼, 시놉시스 없는 작품이
-    "정상 수집"으로 저장되는 문제가 있었다. `_merge_empty_only`가 이미 필드 단위로
-    빈 값만 채우므로, 이미 채워진 title/cover/actors 등은 다음 소스로 덮어써지지 않는다.
+    기본 꺼짐 — title/cover 가 있으면 synopsis 없는 행도 정상 수집으로 저장한다.
+    빈 synopsis 는 이후 값싼 배치로 백필할 수 있다.
+    `JAVSTORY_HARVEST_BROWSER_FOR_SYNOPSIS=1` 로 예전(항상 njavtv 시도) 동작 복원.
+    """
+    return (os.environ.get("JAVSTORY_HARVEST_BROWSER_FOR_SYNOPSIS", "") or "").strip().lower() in (
+        "1", "true", "yes", "on",
+    )
 
-    njavtv(Playwright/DrissionPage) 단계는 건당 수 분이 걸릴 수 있지만, synopsis만
-    빠진 경우에도 의도적으로 계속 시도한다(사용자 확인 — 느리더라도 njavtv를
-    건너뛰지 말 것).
+
+def _needs_fallback(d: dict[str, Any], *, require_synopsis: bool = False) -> bool:
+    """title·cover(·synopsis) 중 하나라도 없거나 제목이 리다이렉트 안내 문구일 때 다음 소스 시도.
+
+    기본은 title/cover 만 본다 — synopsis 는 있으면 좋은 선택 필드라, 그것만
+    비었다고 다음 소스(특히 수 분짜리 브라우저 단계)로 넘어가지 않는다.
+    값싼 HTTP 소스(missav/avwiki)는 호출부에서 `require_synopsis=True` 로
+    synopsis·favorite_score 를 계속 보완한다.
+    `_merge_empty_only` 가 필드 단위로 빈 값만 채우므로 이미 채워진
+    title/cover/actors 등은 다음 소스로 덮어써지지 않는다.
     """
     from javstory.harvest.scrapers.av123_scraper import _is_boilerplate_title
 
     title = str(d.get("title") or "").strip()
     cover = str(d.get("cover_url") or "").strip()
     synopsis = str(d.get("synopsis") or "").strip()
-    if (not title) or (not cover) or (not synopsis) or title == "제목 없음" or cover == "이미지 누락":
+    if (not title) or (not cover) or title == "제목 없음" or cover == "이미지 누락":
+        return True
+    if require_synopsis and not synopsis:
         return True
     if _is_boilerplate_title(title):
         return True
@@ -531,7 +543,7 @@ class HybridJavCrawler:
 
     def get_local_page_data(self, url: str, expected_product_code: str | None = None, force_visible: bool = False) -> dict[str, Any]:
         log_ts(f"[Hybrid] 요청 URL: {url} (Visible: {force_visible})")
-        nav_timeout = _env_timeout_seconds("JAVSTORY_DRISSION_NAV_TIMEOUT", 45.0)
+        nav_timeout = _env_timeout_seconds("JAVSTORY_DRISSION_NAV_TIMEOUT", 25.0)
         # [개선] 동영상 자동 재생 방지 및 음소거 설정
         co = ChromiumOptions().set_argument('--no-sandbox')
         co.set_argument('--autoplay-policy=user-gesture-required') 
@@ -584,21 +596,21 @@ class HybridJavCrawler:
             except TypeError:
                 page.get(open_url)
             
-            # Cloudflare 대기 레이턴시 증가
-            for _ in range(5):
+            # Cloudflare 챌린지 대기 — 챌린지 타이틀일 때만 짧게 재확인(없으면 즉시 탈출)
+            for _ in range(3):
                 if any(term in (page.title or "") for term in ["Access Denied", "403 Forbidden", "Attention Required", "Cloudflare", "Just a moment"]):
-                    log_ts(f"[Hybrid] 보안 확인 중... 대기 ({_ + 1}/5)")
-                    time.sleep(5)
+                    log_ts(f"[Hybrid] 보안 확인 중... 대기 ({_ + 1}/3)")
+                    time.sleep(3)
                 else: break
             href = _page_location_href(page) or (page.url or "").strip() or open_url
             final_url = href or open_url
             for _ in range(2):
-                if ("Just a moment" in page.title or "잠시만 기다려" in page.title) and not page.ele('tag:h1'): time.sleep(5)
+                if ("Just a moment" in page.title or "잠시만 기다려" in page.title) and not page.ele('tag:h1'): time.sleep(3)
                 else: break
             for s in ['text:18歳以上', 'text:확인', 'text:Enter', 'text:Yes']:
                 btn = page.ele(s, timeout=1)
                 if btn: btn.click(); time.sleep(2); break
-            final_url = _wait_njav_detail_url(page, slug=slug, max_wait=22.0) or final_url
+            final_url = _wait_njav_detail_url(page, slug=slug, max_wait=12.0) or final_url
             
             # [개선] 상세 정보(詳細) 탭 활성화 시도 (탭이 숨겨져 있어도 텍스트 추출을 보장하기 위함)
             for tab_text in ['text:詳細', 'text:Details', 'tag:span@text=詳細']:
@@ -720,26 +732,26 @@ class HybridJavCrawler:
         # 1) 123av
         _stage(f"[Hybrid] 1순위(123av): requests 수집 시도: {code}", 26)
         try:
-            d = await asyncio.wait_for(asyncio.to_thread(_scrape_123av, code), timeout=45.0)
+            d = await asyncio.wait_for(asyncio.to_thread(_scrape_123av, code), timeout=20.0)
             out = _merge_empty_only(out, d, source="123av")
         except Exception:
             pass
 
-        # 2) missav123
-        if _needs_fallback(out):
+        # 2) missav123 — 값싼 HTTP라 synopsis·favorite_score 보완까지 계속 시도
+        if _needs_fallback(out, require_synopsis=True):
             _stage(f"[Hybrid] 2순위(missav123): requests 수집 시도: {code}", 28)
             try:
-                d = await asyncio.wait_for(asyncio.to_thread(_scrape_missav123, code), timeout=45.0)
+                d = await asyncio.wait_for(asyncio.to_thread(_scrape_missav123, code), timeout=20.0)
                 out = _merge_empty_only(out, d, source="missav123")
             except Exception:
                 pass
 
-        # 3) avwiki (아마추어 보루 / 403 시 Playwright)
-        if _needs_fallback(out):
+        # 3) avwiki (아마추어 보루 / 403 시 Playwright) — 값싼 HTTP라 synopsis 도 계속 시도
+        if _needs_fallback(out, require_synopsis=True):
             _stage(f"[Hybrid] 3순위(avwiki): requests 수집 시도: {code}", 30)
             try:
                 d = await asyncio.wait_for(
-                    asyncio.to_thread(_scrape_avwiki, code, False), timeout=60.0
+                    asyncio.to_thread(_scrape_avwiki, code, False), timeout=25.0
                 )
                 out = _merge_empty_only(out, d, source="avwiki")
             except Exception as e:
@@ -747,17 +759,22 @@ class HybridJavCrawler:
                     try:
                         _stage(f"[Hybrid] 3순위(avwiki): 403 감지 → Playwright 우회 시도: {code}", 31)
                         d2 = await asyncio.wait_for(
-                            asyncio.to_thread(_scrape_avwiki, code, True), timeout=120.0
+                            asyncio.to_thread(_scrape_avwiki, code, True), timeout=60.0
                         )
                         out = _merge_empty_only(out, d2, source="avwiki_pw")
                     except Exception:
                         pass
 
-        # 4) njavtv (Playwright -> DrissionPage -> 재시도)
-        if _needs_fallback(out):
+        # 4) njavtv (Playwright -> DrissionPage)
+        #  - 브라우저 자동화라 건당 수십 초~수 분. title/cover 가 이미 있으면(=synopsis 만
+        #    누락) 기본적으로 건너뛴다(_browser_chases_synopsis / env 로 복원 가능).
+        #  - "최종 재시도" 단계는 제거: 같은 URL을 DrissionPage로 다시 여는 순수 중복이라,
+        #    앞선 Playwright/DP 가 404·빈 페이지를 받은 코드에서는 결과가 동일하다.
+        _njav_require_syn = _browser_chases_synopsis()
+        if _needs_fallback(out, require_synopsis=_njav_require_syn):
             _stage(f"[Hybrid] 4순위(njavtv): Playwright(Headless) 수집 시도: {code}", 33)
             try:
-                raw = await asyncio.wait_for(scrape_njavtv_playwright_async(code), timeout=180.0)
+                raw = await asyncio.wait_for(scrape_njavtv_playwright_async(code), timeout=75.0)
             except Exception:
                 raw = {}
             if _raw_has_any_content(raw):
@@ -765,7 +782,7 @@ class HybridJavCrawler:
                 nj["_final_url"] = raw.get("_final_url") or raw.get("final_url")
                 out = _merge_empty_only(out, nj, source="njavtv")
 
-        if _needs_fallback(out):
+        if _needs_fallback(out, require_synopsis=_njav_require_syn):
             _stage(f"[Hybrid] 4순위(njavtv): DrissionPage(Headless) 정밀 수집 시도: {code}", 35)
             for nj_url in njavtv_detail_urls(code):
                 try:
@@ -776,7 +793,7 @@ class HybridJavCrawler:
                             code,
                             False,
                         ),
-                        timeout=120.0,
+                        timeout=45.0,
                     )
                 except Exception:
                     raw2 = {}
@@ -786,33 +803,11 @@ class HybridJavCrawler:
                     out = _merge_empty_only(out, nj2, source="njavtv_dp")
                     break
 
-        if _needs_fallback(out):
-            _stage(f"[Hybrid] 4순위(njavtv): 최종 재시도(Headless) : {code}", 37)
-            await asyncio.sleep(2)
-            for nj_url in njavtv_detail_urls(code):
-                try:
-                    raw3 = await asyncio.wait_for(
-                        asyncio.to_thread(
-                            self.get_local_page_data,
-                            nj_url,
-                            code,
-                            False,
-                        ),
-                        timeout=120.0,
-                    )
-                except Exception:
-                    raw3 = {}
-                if _raw_has_any_content(raw3):
-                    nj3 = _scrape_dict_for_db(raw3, code)
-                    nj3["_final_url"] = raw3.get("_final_url") or raw3.get("final_url")
-                    out = _merge_empty_only(out, nj3, source="njavtv_dp_retry")
-                    break
-
         # 5) av-wiki.net (배우 식별 전문 — 최종 폴백, 시놉시스 없음)
         if _needs_actress_fallback(out):
             _stage(f"[Hybrid] 5순위(av-wiki.net): 배우/커버 보완 시도: {code}", 39)
             try:
-                d = await asyncio.wait_for(asyncio.to_thread(_scrape_avwikinet, code), timeout=60.0)
+                d = await asyncio.wait_for(asyncio.to_thread(_scrape_avwikinet, code), timeout=30.0)
                 out = _merge_empty_only(out, d, source="avwikinet")
             except Exception:
                 pass

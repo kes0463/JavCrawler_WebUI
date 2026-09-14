@@ -246,6 +246,113 @@ def test_proxy_hls_ready_requires_playlist_and_segment(tmp_path: Path) -> None:
     assert _proxy_hls_ready(hls_dir) is True
 
 
+def _write_partial_hls_dir(hls_dir: Path, segments: int, *, ondemand: bool = True) -> None:
+    """변환 진행 중(ENDLIST 없음)인 온디맨드 HLS 디렉터리를 흉내낸다."""
+    hls_dir.mkdir(parents=True, exist_ok=True)
+    lines = ["#EXTM3U", "#EXT-X-VERSION:3", "#EXT-X-PLAYLIST-TYPE:VOD", "#EXT-X-TARGETDURATION:4"]
+    for i in range(segments):
+        lines += ["#EXTINF:4.0,", f"seg_{i:05d}.ts"]
+        (hls_dir / f"seg_{i:05d}.ts").write_bytes(b"fake ts")
+    (hls_dir / "playlist.m3u8").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    (hls_dir / ".building").write_text("", encoding="utf-8")
+    if ondemand:
+        (hls_dir / ".ondemand").write_text("", encoding="utf-8")
+
+
+def test_proxy_hls_complete_needs_endlist(tmp_path: Path) -> None:
+    from javstory.library.playback_proxy import _proxy_hls_complete
+
+    hls_dir = tmp_path / "hls"
+    _write_partial_hls_dir(hls_dir, 3)
+    assert _proxy_hls_complete(hls_dir) is False
+    (hls_dir / ".building").unlink()
+    _write_hls_dir(hls_dir)  # ENDLIST 포함
+    assert _proxy_hls_complete(hls_dir) is True
+
+
+def test_proxy_hls_playable_before_endlist(tmp_path: Path) -> None:
+    from javstory.library.playback_proxy import _proxy_hls_playable
+
+    hls_dir = tmp_path / "hls"
+    hls_dir.mkdir()
+    # 미완료(ENDLIST 없음) 재생목록만 있고 첫 세그먼트가 없으면 아직 재생 불가
+    (hls_dir / "playlist.m3u8").write_text(
+        "#EXTM3U\n#EXT-X-PLAYLIST-TYPE:EVENT\n", encoding="utf-8"
+    )
+    (hls_dir / ".building").write_text("", encoding="utf-8")
+    assert _proxy_hls_playable(hls_dir) is False
+    # 재생목록 + seg_00000.ts 가 생기면 변환이 안 끝났어도 재생 시작 가능
+    _write_partial_hls_dir(hls_dir, 1)
+    assert _proxy_hls_playable(hls_dir) is True
+
+
+def test_prepare_building_reports_ready_when_playable(tmp_path: Path, monkeypatch) -> None:
+    from javstory.library import playback_proxy as pp
+
+    cache_root = tmp_path / "cache"
+    monkeypatch.setattr(pp, "proxy_cache_dir", lambda: cache_root)
+    source = tmp_path / "clip.ts"
+    source.write_bytes(b"\x00" * 8)
+    monkeypatch.setattr(pp, "needs_browser_proxy", lambda _p: True)
+
+    key = pp._job_key(source)
+    pp._JOBS[key] = {"status": "building", "progress": 12.0, "eta_sec": 34}
+    try:
+        _write_partial_hls_dir(pp.proxy_hls_dir(source), 2)
+        out = pp.prepare_playback_file(source)
+        assert out["status"] == "building"
+        assert out["ready"] is True
+        assert out["complete"] is False
+        assert out["progress"] == 12.0
+    finally:
+        pp._JOBS.pop(key, None)
+
+
+def test_ondemand_virtual_playlist_and_segment_count(tmp_path: Path) -> None:
+    from javstory.library.playback_proxy import (
+        _covered_segments,
+        _segment_count,
+        _write_virtual_vod_playlist,
+    )
+
+    assert _segment_count(0) == 0
+    assert _segment_count(4) == 1
+    assert _segment_count(10) == 3  # ceil(10/4)
+
+    hls_dir = tmp_path / "od"
+    hls_dir.mkdir()
+    _write_virtual_vod_playlist(hls_dir, duration_sec=10.0, count=3)
+    text = (hls_dir / "playlist.m3u8").read_text(encoding="utf-8")
+    assert text.count("#EXTINF") == 3
+    assert "seg_00000.ts" in text and "seg_00002.ts" in text
+    assert "#EXT-X-ENDLIST" in text
+    # 마지막 세그먼트는 나머지 길이(2초)
+    assert "#EXTINF:2.000," in text
+
+    (hls_dir / "seg_00000.ts").write_bytes(b"x")
+    (hls_dir / "seg_00002.ts").write_bytes(b"x")
+    (hls_dir / "seg_00001.ts").write_bytes(b"")  # 0바이트 → 커버 아님
+    assert _covered_segments(hls_dir) == {0, 2}
+
+
+def test_ondemand_next_block_prioritises_seek(tmp_path: Path) -> None:
+    from javstory.library.playback_proxy import _OndemandBuild, _ONDEMAND_BLOCK_SEGMENTS
+
+    source = tmp_path / "clip.mkv"
+    source.write_bytes(b"\x00" * 8)
+    build = _OndemandBuild(source, tmp_path / "od", "k", duration_sec=400.0)
+    # 블록 크기 = 8세그먼트(32초). 처음엔 맨 앞 블록.
+    assert build._next_block() == (0, _ONDEMAND_BLOCK_SEGMENTS)
+    # 100번 세그먼트(=400초, block start 96)를 요청하면 그 블록이 우선.
+    build.request(50)  # 400초 중 200초 지점 → block start 48
+    blk = build._next_block()
+    assert blk[0] == 48 and blk[1] == 56
+    # 그 블록이 다 커버되면 다시 맨 앞 미커버 블록으로.
+    build.covered |= set(range(48, 56))
+    build.priority.discard(48)
+    assert build._next_block() == (0, _ONDEMAND_BLOCK_SEGMENTS)
+
+
 def test_prepare_direct_mp4(tmp_path: Path, monkeypatch) -> None:
     source = tmp_path / "clip.mp4"
     source.write_bytes(b"\x00" * 8)
@@ -276,6 +383,8 @@ def test_prepare_ts_starts_building(tmp_path: Path, monkeypatch) -> None:
         "javstory.library.playback_proxy.is_browser_playable",
         lambda path: path.suffix.lower() != ".ts",
     )
+    monkeypatch.setattr("javstory.library.playback_proxy.ffmpeg_available", lambda: True)
+    monkeypatch.setattr("javstory.library.playback_proxy.ffprobe_available", lambda: True)
 
     def fake_worker(source: Path, hls_dir: Path, key: str) -> None:
         _write_hls_dir(hls_dir)

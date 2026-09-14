@@ -25,6 +25,7 @@ from webapi.schemas import (
     RescanFlagsRequest,
     RescanFlagsResponse,
     SceneSummary,
+    TranslationNoteRegenerateResponse,
     WatchFlagsResponse,
     WorkTranslationNotePatch,
 )
@@ -221,6 +222,7 @@ def search_library(
         embeddings_enabled=result.get("embeddings_enabled"),
         embedding_channel_used=result.get("embedding_channel_used"),
         search_message=result.get("search_message"),
+        search_message_kind=result.get("search_message_kind"),
     )
 
 
@@ -441,9 +443,11 @@ def _to_detail(row: JAVMetadata, code: str) -> LibraryItemDetail:
     media = _library.media_flags_for(row, flags_map.get(row.product_code))
     watch = _library.load_watch_flags_for([code]).get(code.upper()) or {}
     from javstory.services.grok_story_service import grok_story_status
+    from javstory.services.translation_note_service import translation_note_status
     from javstory.translation.translation_notes import load_work_translation_note
 
     grok_st = grok_story_status(code)
+    note_st = translation_note_status(code)
     crawl_sources: dict[str, str] = {}
     raw_sources = getattr(row, "crawl_sources_json", None)
     if raw_sources:
@@ -474,6 +478,7 @@ def _to_detail(row: JAVMetadata, code: str) -> LibraryItemDetail:
             "user_liked": bool(watch.get("user_liked")),
             "watch_later": bool(watch.get("watch_later")),
             "translation_note": load_work_translation_note(code),
+            "translation_note_running": bool(note_st.get("running")),
             **_folder_watch_flags(code),
         }
     )
@@ -504,6 +509,18 @@ def patch_work_translation_note(code: str, body: WorkTranslationNotePatch):
         raise HTTPException(404, "작품을 찾을 수 없습니다")
     save_work_translation_note(code, body.translation_note)
     return _to_detail(row, code)
+
+
+@router.post("/{code}/translation-note/regenerate", response_model=TranslationNoteRegenerateResponse)
+def regenerate_work_translation_note(code: str, use_grok: bool = Query(True)):
+    from javstory.services.translation_note_service import start_translation_note_generation
+
+    row = _library.get_by_code(code)
+    if not row:
+        raise HTTPException(404, "작품을 찾을 수 없습니다")
+    return TranslationNoteRegenerateResponse(
+        **start_translation_note_generation(code, use_grok=use_grok)
+    )
 
 
 @router.patch("/{code}", response_model=LibraryItemDetail)

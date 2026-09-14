@@ -19,9 +19,11 @@ import Hls from "hls.js";
 import {
   fetchSubtitleCues,
   hlsPlaylistUrl,
+  preparePlaybackStream,
   streamUrl,
   waitForPlaybackStream,
   type PlaybackInfo,
+  type StreamPrepareResult,
   type SubtitleCue,
 } from "@/api/playback";
 import { SubtitleOverlay } from "@/components/player/SubtitleOverlay";
@@ -118,6 +120,8 @@ export function VideoPlayer({ session, onClose }: VideoPlayerProps) {
   const [proxyReason, setProxyReason] = useState<string | null>(null);
   const [proxyProgress, setProxyProgress] = useState<number | null>(null);
   const [proxyEtaSec, setProxyEtaSec] = useState<number | null>(null);
+  // 전체 HLS 변환 완료 여부(점진적 재생: 재생 시작 후에도 백그라운드 변환이 이어짐)
+  const [proxyComplete, setProxyComplete] = useState(false);
   const [subtitleOptions, setSubtitleOptions] = useState<SubtitleDisplayOptions>(loadSubtitleOptions);
   const [subtitleSettingsOpen, setSubtitleSettingsOpen] = useState(false);
   const [seekLoading, setSeekLoading] = useState(false);
@@ -444,12 +448,14 @@ export function VideoPlayer({ session, onClose }: VideoPlayerProps) {
       setProxyReady(true);
       setPreparingProxy(false);
       setProxyReason(null);
+      setProxyComplete(true);
       return () => {
         cancelled = true;
       };
     }
 
     setProxyReady(false);
+    setProxyComplete(false);
     setProxyReason(part.proxy_reason ?? null);
     setProxyProgress(null);
     setProxyEtaSec(null);
@@ -461,12 +467,41 @@ export function VideoPlayer({ session, onClose }: VideoPlayerProps) {
           setProxyReason(info.proxyReason);
           setProxyProgress(info.progress);
           setProxyEtaSec(info.etaSec);
+          if (info.complete) setProxyComplete(true);
         });
-        if (!cancelled) {
-          setLoadError(null);
-          setProxyReady(true);
-          setStreamEpoch(e => e + 1);
-          setPreparingProxy(false);
+        if (cancelled) return;
+        setLoadError(null);
+        setProxyReady(true);
+        setStreamEpoch(e => e + 1);
+        setPreparingProxy(false);
+
+        // 재생은 시작됐다. 재인코딩 소스는 서버가 백그라운드에서 나머지 구간을 계속
+        // 변환하고(시크하면 그 지점부터 우선 변환), 완료될 때까지 진행률만 가볍게
+        // 폴링한다 — 플레이어는 다시 만들지 않는다.
+        while (!cancelled) {
+          await new Promise(r => setTimeout(r, 3000));
+          if (cancelled) break;
+          let info: StreamPrepareResult;
+          try {
+            info = await preparePlaybackStream(code, part.index);
+          } catch {
+            continue;
+          }
+          if (cancelled) break;
+          setProxyProgress(info.progress ?? null);
+          setProxyEtaSec(info.eta_sec ?? null);
+          if (info.complete || info.status === "ready") {
+            setProxyProgress(100);
+            setProxyEtaSec(null);
+            setProxyComplete(true);
+            break;
+          }
+          if (info.status === "failed") {
+            // 이미 재생 중이므로 플레이어를 내리지 않고 안내만 한다.
+            setProxyComplete(true);
+            setLoadError(info.error || "백그라운드 변환이 중단되었습니다");
+            break;
+          }
         }
       } catch (e) {
         if (!cancelled) {
@@ -504,11 +539,38 @@ export function VideoPlayer({ session, onClose }: VideoPlayerProps) {
       return;
     }
 
-    const hls = new Hls({ enableWorker: true });
+    // startPosition: 0 — 항상 맨 앞부터 재생(재생목록은 완전한 VOD).
+    // fragLoadPolicy — 온디맨드 변환에서 아직 인코딩 안 된 세그먼트는 서버가
+    // (30초 대기 후에도 안 되면) 503을 주므로, 치명적 오류로 만들지 말고 넉넉히
+    // 재시도하며 기다린다(시크 지점 우선 변환이 끝나면 다음 재시도에서 성공).
+    const hls = new Hls({
+      enableWorker: true,
+      startPosition: 0,
+      fragLoadPolicy: {
+        default: {
+          maxTimeToFirstByteMs: 45_000,
+          maxLoadTimeMs: 60_000,
+          timeoutRetry: { maxNumRetry: 6, retryDelayMs: 500, maxRetryDelayMs: 4_000 },
+          errorRetry: { maxNumRetry: 12, retryDelayMs: 1_000, maxRetryDelayMs: 8_000 },
+        },
+      },
+    });
+    let recoverCount = 0;
     hls.loadSource(hlsSrc);
     hls.attachMedia(v);
     hls.on(Hls.Events.ERROR, (_event, data) => {
       if (!data.fatal) return;
+      // 네트워크/미디어 오류는 몇 번 자체 복구를 시도한다(세그먼트 지연 대응).
+      if (data.type === Hls.ErrorTypes.NETWORK_ERROR && recoverCount < 4) {
+        recoverCount += 1;
+        window.setTimeout(() => hls.startLoad(), 1_500);
+        return;
+      }
+      if (data.type === Hls.ErrorTypes.MEDIA_ERROR && recoverCount < 4) {
+        recoverCount += 1;
+        hls.recoverMediaError();
+        return;
+      }
       setLoadError("HLS 재생 중 오류가 발생했습니다. 잠시 후 다시 시도해 주세요.");
     });
     return () => {
@@ -647,6 +709,14 @@ export function VideoPlayer({ session, onClose }: VideoPlayerProps) {
             setVideoSize({ w: v.videoWidth, h: v.videoHeight });
             void attemptAutoPlay();
           }}
+          onDurationChange={() => {
+            // 점진적 재생: 변환이 진행되며 재생목록이 커지면 duration도 커진다.
+            // 탐색바 길이를 갱신하고, 아직 못 한 이어보기 점프를 재시도한다.
+            const v = videoRef.current;
+            if (!v || !Number.isFinite(v.duration) || v.duration <= 0) return;
+            setDuration(v.duration);
+            if (!resumeDone.current) tryResume();
+          }}
           onCanPlay={() => {
             void attemptAutoPlay();
           }}
@@ -726,6 +796,23 @@ export function VideoPlayer({ session, onClose }: VideoPlayerProps) {
           </div>
         ) : null}
       </div>
+
+      {/* 점진적 재생: 재생 중에도 백그라운드에서 나머지 구간을 HLS 변환 중 —
+          화면 최상단에 얇은 진행 표시만 둔다(클릭 통과). */}
+      {proxyReady && !proxyComplete && proxyProgress != null && (
+        <div
+          className="absolute top-0 inset-x-0 z-40 h-0.5 bg-white/10 pointer-events-none"
+          title={
+            `변환 중 ${Math.floor(proxyProgress)}%`
+            + (proxyEtaSec != null && proxyEtaSec > 0 ? ` · ${formatEta(proxyEtaSec)}` : "")
+          }
+        >
+          <div
+            className="h-full bg-indigo-400 transition-[width] duration-700"
+            style={{ width: `${Math.max(2, Math.min(100, proxyProgress))}%` }}
+          />
+        </div>
+      )}
 
       {/* 자막·OSD — 영상 위, 컨트롤 아래 */}
       <div className="absolute inset-0 z-10 pointer-events-none">

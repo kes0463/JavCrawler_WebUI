@@ -15,6 +15,7 @@ import {
   fetchLibraryDetail,
   hasRealLibraryMetadata,
   openLibraryFolder,
+  regenerateWorkTranslationNote,
   saveWorkTranslationNote,
   startGrokStory,
   toggleLibraryLike,
@@ -332,8 +333,11 @@ export function LibraryDetailPanel({
   const [workNote, setWorkNote] = useState("");
   const [workNoteSaved, setWorkNoteSaved] = useState("");
   const [workNoteSaving, setWorkNoteSaving] = useState(false);
+  const [noteRegenerating, setNoteRegenerating] = useState(false);
+  const [noteUseGrok, setNoteUseGrok] = useState(true);
   const coverInputRef = useRef<HTMLInputElement>(null);
   const recrawlPollRef = useRef<number | null>(null);
+  const noteRegenPollRef = useRef<number | null>(null);
   const backdropCloseReadyRef = useRef(false);
 
   const handleActorClick = useCallback(async (name: string) => {
@@ -384,6 +388,54 @@ export function LibraryDetailPanel({
       setWorkNoteSaving(false);
     }
   }, [code, workNote, showToast]);
+
+  const handleRegenerateWorkNote = useCallback(async () => {
+    const hasExisting = Boolean((detail?.translation_note ?? "").trim());
+    if (
+      hasExisting &&
+      !window.confirm(`${code} 작품 번역 노트를 다시 생성할까요? 기존 노트는 덮어써집니다.`)
+    ) {
+      return;
+    }
+    setNoteRegenerating(true);
+    try {
+      const res = await regenerateWorkTranslationNote(code, noteUseGrok);
+      showToast(res.message, res.ok && res.queued > 0 ? "success" : res.ok ? "info" : "warn");
+      if (res.queued > 0) {
+        setDetail(d => (d ? { ...d, translation_note_running: true } : d));
+        if (noteRegenPollRef.current != null) {
+          window.clearInterval(noteRegenPollRef.current);
+        }
+        let attempts = 0;
+        noteRegenPollRef.current = window.setInterval(async () => {
+          attempts += 1;
+          if (attempts > 36) {
+            if (noteRegenPollRef.current != null) window.clearInterval(noteRegenPollRef.current);
+            noteRegenPollRef.current = null;
+            return;
+          }
+          try {
+            const refreshed = await fetchLibraryDetail(code);
+            if (!refreshed.translation_note_running) {
+              if (noteRegenPollRef.current != null) window.clearInterval(noteRegenPollRef.current);
+              noteRegenPollRef.current = null;
+              setDetail(refreshed);
+              setWorkNote(refreshed.translation_note ?? "");
+              setWorkNoteSaved(refreshed.translation_note ?? "");
+              onSaved?.(refreshed);
+              showToast(`${code} 작품 번역 노트 재생성 완료`, "success");
+            }
+          } catch {
+            /* ignore */
+          }
+        }, 4000);
+      }
+    } catch (e) {
+      showToast(e instanceof Error ? e.message : "번역 노트 재생성 시작 실패", "error");
+    } finally {
+      setNoteRegenerating(false);
+    }
+  }, [code, detail?.translation_note, noteUseGrok, onSaved, showToast]);
 
   const handleBackdropClose = useCallback(() => {
     if (!backdropCloseReadyRef.current) return;
@@ -1144,20 +1196,52 @@ export function LibraryDetailPanel({
                     <StickyNote className="w-5 h-5 text-muted-foreground" />
                     작품 번역 노트
                   </p>
-                  <button
-                    type="button"
-                    onClick={() => void handleSaveWorkNote()}
-                    disabled={workNoteSaving || !workNoteDirty}
-                    className={cn(
-                      "inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-base font-medium transition-colors disabled:opacity-40",
-                      workNoteDirty
-                        ? "bg-emerald-500/20 text-emerald-300 hover:bg-emerald-500/30"
-                        : "bg-white/[0.06] text-muted-foreground",
-                    )}
-                  >
-                    {workNoteSaving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
-                    {workNoteDirty ? "저장" : "저장됨"}
-                  </button>
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setNoteUseGrok(v => !v)}
+                      title={
+                        noteUseGrok
+                          ? "재생성 시 Grok 스토리 컨텍스트 캐시를 참조합니다(캐시 없으면 자동 무시)"
+                          : "재생성 시 Grok 컨텍스트를 참조하지 않습니다 — 제목·시놉시스·자막만 사용"
+                      }
+                      className={cn(
+                        "inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-base font-medium transition-colors",
+                        noteUseGrok
+                          ? "bg-amber-500/15 text-amber-200 hover:bg-amber-500/25"
+                          : "bg-white/[0.06] text-muted-foreground hover:bg-white/[0.10]",
+                      )}
+                    >
+                      <Sparkles className="w-4 h-4" />
+                      Grok 참조 {noteUseGrok ? "ON" : "OFF"}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => void handleRegenerateWorkNote()}
+                      disabled={noteRegenerating || Boolean(detail.translation_note_running)}
+                      title="JA 자막(및 선택 시 Grok 컨텍스트)으로 노트를 다시 생성합니다"
+                      className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-base font-medium transition-colors bg-violet-500/15 text-violet-200 hover:bg-violet-500/25 disabled:opacity-40"
+                    >
+                      {noteRegenerating || detail.translation_note_running
+                        ? <Loader2 className="w-4 h-4 animate-spin" />
+                        : <RefreshCw className="w-4 h-4" />}
+                      {detail.translation_note_running ? "생성 중…" : "재생성"}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => void handleSaveWorkNote()}
+                      disabled={workNoteSaving || !workNoteDirty}
+                      className={cn(
+                        "inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-base font-medium transition-colors disabled:opacity-40",
+                        workNoteDirty
+                          ? "bg-emerald-500/20 text-emerald-300 hover:bg-emerald-500/30"
+                          : "bg-white/[0.06] text-muted-foreground",
+                      )}
+                    >
+                      {workNoteSaving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
+                      {workNoteDirty ? "저장" : "저장됨"}
+                    </button>
+                  </div>
                 </div>
                 <p className="text-lg text-slate-400 mb-2">
                   이 작품 번역에만 적용됩니다(배우·전역 노트보다 우선).{" "}

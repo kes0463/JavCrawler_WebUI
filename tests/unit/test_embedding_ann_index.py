@@ -79,6 +79,34 @@ def test_build_and_search_ann_max_cosine(emb_cache: Path):
     assert "온천" in texts["BBB-002"]
 
 
+def test_build_ann_skips_source_signature_on_clean_cache(emb_cache: Path, monkeypatch):
+    from javstory.library.embeddings import ann_index as ann
+
+    model = "test-embed"
+    _write_payload(
+        emb_cache,
+        "AAA-001",
+        model,
+        [{"kind": "meta", "text": "a", "embedding": [1.0, 0.0]}],
+    )
+    assert ann.build_embedding_ann_index(model, force=True) is not None
+
+    calls = {"n": 0}
+    orig = ann._source_signature
+
+    def counted(m):
+        calls["n"] += 1
+        return orig(m)
+
+    monkeypatch.setattr(ann, "_source_signature", counted)
+    again = ann.build_embedding_ann_index(model, force=False)
+    assert again is not None
+    assert calls["n"] == 0
+    fetched = ann.get_embedding_ann_index(model)
+    assert fetched is not None
+    assert calls["n"] == 0
+
+
 def test_ann_invalidate_forces_rebuild(emb_cache: Path):
     from javstory.library.embeddings import ann_index as ann
 

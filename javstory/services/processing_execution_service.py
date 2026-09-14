@@ -57,6 +57,39 @@ def _subtitle_skip_existing(base_name: str) -> SubtitleJobResult | None:
     return None
 
 
+def _emit_work_note(
+    product_code: str,
+    on_translation_note: TranslationNoteFn | None,
+    *,
+    text: str | None = None,
+    status: str = "ready",
+) -> None:
+    """스킵/조기 종료 시에도 번역 탭 노트가 이전 작품에 머물지 않게 한다."""
+    if not on_translation_note:
+        return
+    body = text
+    if body is None:
+        body = ""
+        pc = (product_code or "").strip().upper()
+        if pc:
+            try:
+                from javstory.translation.translation_notes import load_work_translation_note
+
+                body = load_work_translation_note(pc)
+            except Exception:
+                body = ""
+    try:
+        on_translation_note(
+            {
+                "product_code": product_code or "",
+                "text": (body or "").strip(),
+                "status": status,
+            }
+        )
+    except Exception:
+        pass
+
+
 def run_stt_job(
     video_path: str,
     *,
@@ -199,6 +232,7 @@ def run_subtitle_job(
 
         pc = resolve_product_code_for_video(video)
     if not pc:
+        _emit_work_note("", on_translation_note, text="")
         return SubtitleJobResult(False, "품번을 확인할 수 없습니다.")
 
     if _has_builtin_subtitle_marker(video):
@@ -206,15 +240,18 @@ def run_subtitle_job(
         plain_srt = base_name + ".srt"
         res = ko_srt if os.path.exists(ko_srt) else (plain_srt if os.path.exists(plain_srt) else "")
         on_progress and on_progress("[완료] 자체자막 표기 → 번역 스킵", 100)
+        _emit_work_note(pc, on_translation_note)
         return SubtitleJobResult(True, "자체자막 표기: 번역 스킵", res, skipped=True)
 
     skip = _subtitle_skip_existing(base_name)
     if skip:
         on_progress and on_progress(f"[완료] {skip.message}", 100)
+        _emit_work_note(pc, on_translation_note)
         return skip
 
     ja_srt = base_name + ".ja.srt"
     if not os.path.exists(ja_srt):
+        _emit_work_note(pc, on_translation_note, text="")
         return SubtitleJobResult(False, "JA 자막 파일(.ja.srt)을 찾을 수 없습니다. STT를 먼저 실행하세요.")
 
     def _logger(msg: str) -> None:

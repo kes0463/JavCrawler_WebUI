@@ -112,13 +112,35 @@ export interface TranslationChunkOption {
   context_length: number | null;
 }
 
-export type TranslationChunkProvider = "llamacpp" | "ollama" | "openrouter" | "omniroute";
+export type TranslationChunkProvider =
+  | "llamacpp"
+  | "ollama"
+  | "openrouter"
+  | "omniroute"
+  | "gemini";
+
+export interface GeminiModelOption {
+  id: string;
+  label: string;
+  rpm: number | null;
+  tpm: number | null;
+  rpd: number | null;
+  is_pro: boolean;
+}
+
+export interface GeminiSettings {
+  model: string;
+  chain: string[];
+  has_api_key: boolean;
+  model_options: GeminiModelOption[];
+}
 
 export interface TranslationSettings {
   provider: string;
   openrouter_profile: string;
   llamacpp: LlamaCppSettings;
   omniroute: OmniRouteSettings;
+  gemini: GeminiSettings;
   chunk_options: Record<TranslationChunkProvider, TranslationChunkOption>;
   provider_options: TranslationProviderOption[];
   model_options: TranslationModelOption[];
@@ -130,6 +152,9 @@ export type TranslationSettingsPatch = Partial<{
   openrouter_profile: string;
   omniroute_url: string;
   omniroute_model: string;
+  gemini_chain: string[];
+  gemini_chunk_target_lines: number;
+  gemini_chunk_overlap_lines: number;
   llamacpp_chunk_target_lines: number;
   llamacpp_chunk_overlap_lines: number;
   ollama_chunk_target_lines: number;
@@ -214,6 +239,7 @@ export interface EmbeddingsSettings {
   search_min_score?: number;
   search_relative_ratio?: number;
   search_max_gap?: number;
+  batch_size?: number;
 }
 
 export type EmbeddingsSettingsPatch = Partial<{
@@ -224,6 +250,7 @@ export type EmbeddingsSettingsPatch = Partial<{
   search_min_score: number;
   search_relative_ratio: number;
   search_max_gap: number;
+  batch_size: number;
 }>;
 
 export interface EmbeddingsGgufOptions {

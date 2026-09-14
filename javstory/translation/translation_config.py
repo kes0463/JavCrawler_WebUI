@@ -20,13 +20,14 @@ from javstory.llm.llamacpp_backend import (
     resolve_translation_llamacpp_runtime,
 )
 
-TRANSLATION_PROVIDERS: tuple[str, ...] = ("llamacpp", "openrouter", "ollama", "omniroute")
+TRANSLATION_PROVIDERS: tuple[str, ...] = ("llamacpp", "openrouter", "ollama", "omniroute", "gemini")
 
 TRANSLATION_PROVIDER_LABELS: dict[str, str] = {
     "llamacpp": "llama.cpp (로컬 llama-server)",
     "openrouter": "OpenRouter (클라우드 API)",
     "ollama": "Ollama (로컬)",
     "omniroute": "OmniRoute (로컬 라우터)",
+    "gemini": "Gemini (Google API 직접 호출)",
 }
 
 OPENROUTER_PROFILES: tuple[tuple[str, str], ...] = (
@@ -67,7 +68,7 @@ def normalize_translation_provider(raw: str | None) -> str:
     p = (raw or "llamacpp").strip().lower()
     if p in TRANSLATION_PROVIDERS:
         return p
-    if p in ("openai", "gemini"):
+    if p == "openai":
         return "openrouter"
     return "llamacpp"
 
@@ -167,7 +168,7 @@ def build_llamacpp_command_preview() -> str:
 
 
 #: provider별 청크 env 접두사(``ko_translation_chunk.CHUNK_ENV_PREFIX_BY_PROVIDER``와 동일 키셋).
-_CHUNK_OPTION_PROVIDERS: tuple[str, ...] = ("llamacpp", "ollama", "openrouter", "omniroute")
+_CHUNK_OPTION_PROVIDERS: tuple[str, ...] = ("llamacpp", "ollama", "openrouter", "omniroute", "gemini")
 
 
 def _chunk_default_lines_for_provider(provider: str) -> tuple[int, int]:
@@ -280,12 +281,53 @@ def llamacpp_settings_snapshot() -> dict[str, Any]:
     }
 
 
+def gemini_model_from_env() -> str:
+    # 카탈로그 키(model_options[].id) 그대로 반환 — 정규화(별칭)는 하지 않는다.
+    # gemini_translation_llm_tier()를 거치면 내부에서 -preview 등으로 정규화되어
+    # 프론트 <select>의 옵션 id와 어긋나므로 여기서는 절대 정규화하지 않는다.
+    explicit = (os.environ.get("JAVSTORY_GEMINI_MODEL", "") or "").strip()
+    if explicit:
+        return explicit
+    from javstory.config.app_config import _GEMINI_PROFILE_MAP, _translation_profile
+
+    prof = _translation_profile()
+    return _GEMINI_PROFILE_MAP.get(prof, "gemini-2.0-flash")
+
+
+def gemini_chain_from_env() -> list[str]:
+    from javstory.config.app_config import gemini_translation_chain_from_env
+
+    return gemini_translation_chain_from_env()
+
+
+def gemini_settings_snapshot() -> dict[str, Any]:
+    from javstory.config.app_config import GEMINI_MODELS
+
+    return {
+        "model": gemini_model_from_env(),
+        "chain": gemini_chain_from_env(),
+        "has_api_key": bool((os.environ.get("JAVSTORY_GEMINI_API_KEY", "") or "").strip()),
+        "model_options": [
+            {
+                "id": mid,
+                "label": mid,
+                "rpm": meta.get("rpm"),
+                "tpm": meta.get("tpm"),
+                "rpd": meta.get("rpd"),
+                "is_pro": bool(meta.get("is_pro")),
+            }
+            for mid, meta in GEMINI_MODELS.items()
+        ],
+    }
+
+
 def translation_settings_snapshot() -> dict[str, Any]:
     return {
         "provider": translation_provider_from_env(),
         "openrouter_profile": openrouter_profile_from_env(),
         "llamacpp": llamacpp_settings_snapshot(),
         "omniroute": omniroute_settings_snapshot(),
+        "gemini": gemini_settings_snapshot(),
         "chunk_options": translation_chunk_options_snapshot(),
         "provider_options": [
             {"id": pid, "label": TRANSLATION_PROVIDER_LABELS.get(pid, pid)}

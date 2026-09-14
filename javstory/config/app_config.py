@@ -36,14 +36,19 @@ def ensure_project_env_loaded() -> None:
 
 
 def platform_env_suffix(platform: str | None = None) -> str:
-    """SettingsModel ``_platform_env_suffix`` 와 동일."""
+    """SettingsModel ``_platform_env_suffix`` 와 동일.
+
+    omniroute/gemini는 여기 포함하지 않는다 — 이 값은 harvest/correction/데스크톱
+    SettingsModel의 platform-suffixed override(``*_OPENAI`` 등)까지 공유하는 전역
+    스위치라, 새 버킷을 추가하면 그 소비자들이 기존 override를 못 찾고 조용히
+    기본값으로 폴백한다(번역 provider 판단은 ``_effective_translation_provider``의
+    ``JAVSTORY_TRANSLATION_PROVIDER`` 우선 분기로 별도 처리).
+    """
     p = (platform or llm_platform_from_env()).strip().lower()
     if p == "llamacpp":
         return "LLAMACPP"
     if p == "ollama":
         return "OLLAMA"
-    if p == "omniroute":
-        return "OMNIROUTE"
     return "OPENAI"
 
 
@@ -128,19 +133,23 @@ GEMINI_MODELS: dict[str, dict] = {
     # - rpm: requests/minute
     # - tpm: tokens/minute (input+output)
     # - rpd: requests/day (None=무제한 표기)
+    "gemini-3.5-flash":      {"rpm": 1000, "tpm": 2_000_000, "rpd": 10000,  "is_pro": False},
     "gemini-3.0-flash":      {"rpm": 1000, "tpm": 2_000_000, "rpd": 10000,  "is_pro": False},
     "gemini-3.1-flash-lite": {"rpm": 4000, "tpm": 4_000_000, "rpd": 150000, "is_pro": False},
     "gemini-2.5-flash":      {"rpm": 1000, "tpm": 1_000_000, "rpd": 10000,  "is_pro": False},
+    "gemini-2.5-flash-lite": {"rpm": 4000, "tpm": 4_000_000, "rpd": None,   "is_pro": False},
     "gemini-2.5-pro":        {"rpm": 150,  "tpm": 2_000_000, "rpd": 1000,   "is_pro": True},
+    "gemini-3.1-pro":        {"rpm": 25,   "tpm": 2_000_000, "rpd": 250,    "is_pro": True},
     "gemini-2.0-flash":      {"rpm": 2000, "tpm": 4_000_000, "rpd": None,   "is_pro": False},
     "gemini-2.0-flash-lite": {"rpm": 4000, "tpm": 4_000_000, "rpd": None,   "is_pro": False},
 }
 
 # Gemini 모델 ID 별칭(실제 ListModels에 있는 name 기준)
-# - UI/과거 문서에서 쓰던 슬러그가 API에서 그대로 노출되지 않는 경우가 있어, 런타임에서 정규화한다.
+# - UI/카탈로그에서 쓰는 슬러그가 API가 실제로 받는 이름과 다를 때만 등록한다
+#   (예: preview 태그가 붙는 모델). GA 전환 등으로 실제 이름이 바뀌면 여기만 갱신하면 된다.
 _GEMINI_MODEL_ALIASES: dict[str, str] = {
     "gemini-3.0-flash": "gemini-3-flash-preview",
-    "gemini-3.1-flash-lite": "gemini-3.1-flash-lite-preview",
+    "gemini-3.1-pro": "gemini-3.1-pro-preview",
 }
 
 
@@ -176,13 +185,43 @@ def gemini_default_chunk_params(model_id: str) -> tuple[float, float, int]:
     return 25.0, 6.0, 8
 
 _GEMINI_PROFILE_MAP: dict[str, str] = {
-    "gemini_3_flash":      "gemini-3.0-flash",
-    "gemini_3_flash_lite": "gemini-3.1-flash-lite",
-    "gemini_25_flash":     "gemini-2.5-flash",
-    "gemini_25_pro":       "gemini-2.5-pro",
-    "gemini_2_flash":      "gemini-2.0-flash",
-    "gemini_2_flash_lite": "gemini-2.0-flash-lite",
+    "gemini_35_flash":      "gemini-3.5-flash",
+    "gemini_3_flash":       "gemini-3.0-flash",
+    "gemini_3_flash_lite":  "gemini-3.1-flash-lite",
+    "gemini_25_flash":      "gemini-2.5-flash",
+    "gemini_25_flash_lite": "gemini-2.5-flash-lite",
+    "gemini_25_pro":        "gemini-2.5-pro",
+    "gemini_31_pro":        "gemini-3.1-pro",
+    "gemini_2_flash":       "gemini-2.0-flash",
+    "gemini_2_flash_lite":  "gemini-2.0-flash-lite",
 }
+
+#: 자막 번역 전용 — RPM/일일 쿼터에 걸리면 순서대로 다음 모델로 자동 전환.
+#: JAVSTORY_GEMINI_TRANSLATION_CHAIN(콤마 구분)으로 덮어쓰기 가능.
+GEMINI_TRANSLATION_CHAIN_DEFAULT: tuple[str, ...] = (
+    "gemini-3.5-flash",
+    "gemini-2.0-flash",
+    "gemini-3.1-flash-lite",
+    "gemini-2.5-flash-lite",
+)
+
+
+def gemini_translation_chain_from_env() -> list[str]:
+    """카탈로그 키(model_options[].id) 그대로 반환 — 별칭(-preview 등) 정규화는 하지 않는다.
+
+    여기서 정규화하면 저장 후 재조회 시 프론트 체인 텍스트가 -preview 슬러그로 바뀌어
+    보이고, gemini_model 승격 비교(``primary_model not in chain``)도 어긋난다.
+    실제 API 모델명 정규화는 호출 직전 ``gemini_translation_llm_tier()``에서만 한다.
+    """
+    raw = (os.environ.get("JAVSTORY_GEMINI_TRANSLATION_CHAIN", "") or "").strip()
+    if not raw:
+        return list(GEMINI_TRANSLATION_CHAIN_DEFAULT)
+    out: list[str] = []
+    for part in raw.split(","):
+        mid = part.strip()
+        if mid and mid not in out:
+            out.append(mid)
+    return out or list(GEMINI_TRANSLATION_CHAIN_DEFAULT)
 
 # [자동 폴백 티어]
 LLM_TIERS = [
@@ -397,11 +436,16 @@ if TRANSLATION_PROVIDER_DEFAULT not in ("openrouter", "ollama", "gemini", "llama
 
 
 def llm_platform_from_env() -> str:
-    """Settings ``llmPlatform``: openai | ollama | llamacpp | omniroute (openai → OpenRouter API)."""
+    """Settings ``llmPlatform``: openai | ollama | llamacpp (openai → OpenRouter API).
+
+    omniroute/gemini는 여기서 리턴하지 않는다 — harvest/correction/데스크톱 GUI가 이
+    값을 platform-suffixed override(``*_OPENAI`` 등) 조회에 그대로 쓰므로, 새 값을
+    추가하면 그쪽에서 기존 override를 놓치고 조용히 기본값으로 떨어진다.
+    """
     raw = (os.environ.get("JAVSTORY_LLM_PLATFORM", "llamacpp") or "llamacpp").strip().lower()
     if raw in ("openai", "openrouter"):
         return "openai"
-    if raw in ("ollama", "llamacpp", "omniroute"):
+    if raw in ("ollama", "llamacpp"):
         return raw
     return "openai"
 
@@ -448,14 +492,20 @@ def _translation_profile() -> str:
         return "qwen25_7"
     if v in ("jkv_12b", "ja-ko-vn", "jkv12b"):
         return "jkv_12b"
+    if v in ("gemini_35_flash", "gemini35flash"):
+        return "gemini_35_flash"
     if v in ("gemini_3_flash", "gemini3flash"):
         return "gemini_3_flash"
     if v in ("gemini_3_flash_lite", "gemini31flashlite", "gemini3flashlite"):
         return "gemini_3_flash_lite"
     if v in ("gemini_25_flash", "gemini25flash"):
         return "gemini_25_flash"
+    if v in ("gemini_25_flash_lite", "gemini25flashlite"):
+        return "gemini_25_flash_lite"
     if v in ("gemini_25_pro", "gemini25pro"):
         return "gemini_25_pro"
+    if v in ("gemini_31_pro", "gemini31pro"):
+        return "gemini_31_pro"
     if v in ("gemini_2_flash", "gemini2flash"):
         return "gemini_2_flash"
     if v in ("gemini_2_flash_lite", "gemini2flashlite"):
@@ -504,13 +554,18 @@ def _effective_translation_provider(translation_provider: str | None) -> str:
         p = str(translation_provider).strip().lower()
         if p in ("openrouter", "ollama", "gemini", "llamacpp", "omniroute"):
             return p
+    # omniroute/gemini는 JAVSTORY_LLM_PLATFORM(llamacpp|ollama|openai 3-way)에 대응하는
+    # 값이 없다 — 그 변수를 여기서만 쓰는 4번째 값으로 재활용하면 harvest/correction/
+    # 데스크톱 GUI가 공유하는 platform-suffixed override(*_OPENAI 등)가 깨지므로, 대신
+    # 명시적으로 저장된 JAVSTORY_TRANSLATION_PROVIDER를 platform/profile보다 먼저 신뢰한다.
+    env_p_early = os.environ.get("JAVSTORY_TRANSLATION_PROVIDER", "").strip().lower()
+    if env_p_early in ("omniroute", "gemini"):
+        return env_p_early
     platform = llm_platform_from_env()
     if platform == "llamacpp":
         return "llamacpp"
     if platform == "ollama":
         return "ollama"
-    if platform == "omniroute":
-        return "omniroute"
     prof = _translation_profile()
     if prof in _GEMINI_PROFILE_MAP:
         return "gemini"

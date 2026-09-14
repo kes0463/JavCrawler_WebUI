@@ -20,6 +20,7 @@ from javstory.library.embeddings.priority_queue import (
 )
 from javstory.library.embeddings.store import embeddings_cache_dir
 from javstory.llm.llamacpp_embeddings import (
+    embedding_batch_size,
     embeddings_gguf_scan_dir,
     list_embeddings_gguf_options,
 )
@@ -152,6 +153,7 @@ def embeddings_settings_snapshot() -> dict[str, Any]:
         "gguf_options": gguf_options,
         "backfill_running": embeddings_backfill_running(),
         "library_total": library_total,
+        "batch_size": embedding_batch_size(),
         **stats,
         **_embedding_search_thresholds(),
     }

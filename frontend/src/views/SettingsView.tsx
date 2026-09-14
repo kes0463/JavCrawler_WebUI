@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { Save, RotateCcw, HardDrive, Cpu, Globe, Shield, Mic2, Loader2, Languages, FileText, Sparkles, Film, Trash2, Wheat } from "lucide-react";
+import { Save, RotateCcw, HardDrive, Cpu, Globe, Shield, Mic2, Loader2, Languages, FileText, Sparkles, Film, Trash2, Wheat, Plus, ChevronUp, ChevronDown } from "lucide-react";
 import { GlassCard } from "@/components/ui/GlassCard";
 import { ActionButton } from "@/components/ui/ActionButton";
 import {
@@ -303,6 +303,7 @@ export default function SettingsView() {
     search_min_score: "0.36",
     search_relative_ratio: "0.84",
     search_max_gap: "0.10",
+    batch_size: "10",
   });
 
   const loadGgufOptions = useCallback(async () => {
@@ -349,6 +350,7 @@ export default function SettingsView() {
         search_min_score: String(snap.search_min_score ?? 0.36),
         search_relative_ratio: String(snap.search_relative_ratio ?? 0.84),
         search_max_gap: String(snap.search_max_gap ?? 0.1),
+        batch_size: String(snap.batch_size ?? 10),
       });
     } catch (e) {
       showToast(e instanceof Error ? e.message : "임베딩 설정 불러오기 실패", "error");
@@ -453,6 +455,11 @@ export default function SettingsView() {
         showToast("최대 격차는 0.01~0.5 사이여야 합니다", "error");
         return;
       }
+      const batchSize = Number(embDraft.batch_size);
+      if (!Number.isInteger(batchSize) || batchSize < 1 || batchSize > 64) {
+        showToast("병렬 처리 개수는 1~64 사이 정수여야 합니다", "error");
+        return;
+      }
       const snap = await patchEmbeddingsSettings({
         enabled: embDraft.enabled,
         backend: embDraft.backend,
@@ -461,6 +468,7 @@ export default function SettingsView() {
         search_min_score: minScore,
         search_relative_ratio: relRatio,
         search_max_gap: maxGap,
+        batch_size: batchSize,
       });
       setEmb(snap);
       setEmbDraft({
@@ -471,6 +479,7 @@ export default function SettingsView() {
         search_min_score: String(snap.search_min_score ?? 0.36),
         search_relative_ratio: String(snap.search_relative_ratio ?? 0.84),
         search_max_gap: String(snap.search_max_gap ?? 0.1),
+        batch_size: String(snap.batch_size ?? 10),
       });
       showToast("임베딩 설정 저장됨", "success");
     } catch (e) {
@@ -490,6 +499,7 @@ export default function SettingsView() {
       search_min_score: String(emb.search_min_score ?? 0.36),
       search_relative_ratio: String(emb.search_relative_ratio ?? 0.84),
       search_max_gap: String(emb.search_max_gap ?? 0.1),
+      batch_size: String(emb.batch_size ?? 10),
     });
   };
 
@@ -522,6 +532,7 @@ export default function SettingsView() {
   const [trLoading, setTrLoading] = useState(true);
   const [trSaving, setTrSaving] = useState(false);
   const [tr, setTr] = useState<TranslationSettings | null>(null);
+  const [geminiApiKeyDraft, setGeminiApiKeyDraft] = useState("");
   const [trDraft, setTrDraft] = useState({
     provider: "llamacpp",
     openrouter_profile: "default",
@@ -551,6 +562,14 @@ export default function SettingsView() {
     ollama_context_length: "2048",
     openrouter_chunk_target_lines: "16",
     openrouter_chunk_overlap_lines: "4",
+    gemini_chain: [
+      "gemini-3.5-flash",
+      "gemini-2.0-flash",
+      "gemini-3.1-flash-lite",
+      "gemini-2.5-flash-lite",
+    ] as string[],
+    gemini_chunk_target_lines: "16",
+    gemini_chunk_overlap_lines: "4",
   });
 
   const applyTrSnap = useCallback((snap: TranslationSettings) => {
@@ -585,6 +604,9 @@ export default function SettingsView() {
       ollama_context_length: String(co.ollama.context_length ?? 2048),
       openrouter_chunk_target_lines: String(co.openrouter.chunk_target_lines),
       openrouter_chunk_overlap_lines: String(co.openrouter.chunk_overlap_lines),
+      gemini_chain: snap.gemini.chain.length ? snap.gemini.chain : [snap.gemini.model],
+      gemini_chunk_target_lines: String(co.gemini.chunk_target_lines),
+      gemini_chunk_overlap_lines: String(co.gemini.chunk_overlap_lines),
     });
   }, []);
 
@@ -670,6 +692,8 @@ export default function SettingsView() {
       const omnirouteChunkTarget = parseChunkLines(trDraft.omniroute_chunk_target_lines, "OmniRoute");
       const omnirouteChunkOverlap = parseOverlapLines(trDraft.omniroute_chunk_overlap_lines, "OmniRoute");
       const omnirouteContextLen = parseContextLen(trDraft.omniroute_context_length, "OmniRoute");
+      const geminiChunkTarget = parseChunkLines(trDraft.gemini_chunk_target_lines, "Gemini");
+      const geminiChunkOverlap = parseOverlapLines(trDraft.gemini_chunk_overlap_lines, "Gemini");
       if (
         llamacppChunkTarget === null ||
         llamacppChunkOverlap === null ||
@@ -680,8 +704,16 @@ export default function SettingsView() {
         openrouterChunkOverlap === null ||
         omnirouteChunkTarget === null ||
         omnirouteChunkOverlap === null ||
-        omnirouteContextLen === null
+        omnirouteContextLen === null ||
+        geminiChunkTarget === null ||
+        geminiChunkOverlap === null
       ) {
+        return;
+      }
+
+      const geminiChain = trDraft.gemini_chain.filter(Boolean);
+      if (trDraft.provider === "gemini" && geminiChain.length === 0) {
+        showToast("Gemini 폴백 체인에 모델을 1개 이상 추가해주세요", "error");
         return;
       }
 
@@ -714,9 +746,14 @@ export default function SettingsView() {
         ollama_context_length: ollamaContextLen,
         openrouter_chunk_target_lines: openrouterChunkTarget,
         openrouter_chunk_overlap_lines: openrouterChunkOverlap,
+        gemini_chain: geminiChain,
+        gemini_chunk_target_lines: geminiChunkTarget,
+        gemini_chunk_overlap_lines: geminiChunkOverlap,
+        ...(geminiApiKeyDraft.trim() ? { gemini_api_key: geminiApiKeyDraft.trim() } : {}),
       });
       setTr(snap);
       applyTrSnap(snap);
+      setGeminiApiKeyDraft("");
       showToast("번역 엔진 설정 저장됨", "success");
     } catch (e) {
       showToast(e instanceof Error ? e.message : "번역 설정 저장 실패", "error");
@@ -728,12 +765,17 @@ export default function SettingsView() {
   const handleResetTranslation = () => {
     if (!tr) return;
     applyTrSnap(tr);
+    setGeminiApiKeyDraft("");
   };
 
   const providerOptions = (tr?.provider_options ?? []).map(o => ({ label: o.label, value: o.id }));
   const modelOptions = (tr?.model_options ?? []).map(o => ({ label: o.label, value: o.id }));
   const orProfileOptions = (tr?.openrouter_profile_options ?? []).map(o => ({ label: o.label, value: o.id }));
   const commandPreview = tr?.llamacpp.command_preview ?? "";
+  const geminiModelOptions = (tr?.gemini.model_options ?? []).map(o => ({
+    label: `${o.label} (${o.rpm ?? "?"} RPM · ${o.tpm ? `${(o.tpm / 1_000_000).toFixed(0)}M` : "?"} TPM · ${o.rpd ?? "무제한"} RPD)`,
+    value: o.id,
+  }));
 
   const [prLoading, setPrLoading] = useState(true);
   const [prSaving, setPrSaving] = useState(false);
@@ -1132,9 +1174,138 @@ export default function SettingsView() {
                   { label: "OpenRouter (클라우드 API)", value: "openrouter" },
                   { label: "Ollama (로컬)", value: "ollama" },
                   { label: "OmniRoute (로컬 라우터)", value: "omniroute" },
+                  { label: "Gemini (Google API 직접 호출)", value: "gemini" },
                 ]}
               />
             </SettingsRow>
+
+            {trDraft.provider === "gemini" && (
+              <>
+                <SettingsRow
+                  label="API 키"
+                  hint={
+                    tr?.gemini.has_api_key
+                      ? "이미 설정되어 있습니다 — 바꾸려면 새 키를 입력 후 저장"
+                      : "AI Studio에서 발급한 키를 입력하세요 (JAVSTORY_GEMINI_API_KEY로 저장)"
+                  }
+                >
+                  <SecretInput
+                    value={geminiApiKeyDraft}
+                    onChange={setGeminiApiKeyDraft}
+                    placeholder={tr?.gemini.has_api_key ? "설정됨 · 변경 시에만 입력" : "AIzaSy..."}
+                  />
+                </SettingsRow>
+
+                <div className="space-y-2">
+                  <div>
+                    <p className="text-base text-[#c8c8e0]">폴백 체인</p>
+                    <p className="text-sm text-muted-foreground mt-0.5">
+                      1순위가 기본 모델입니다. RPM/일일 쿼터 초과 시 자동으로 다음 모델로 전환됩니다.
+                    </p>
+                  </div>
+
+                  <div className="space-y-2">
+                    {trDraft.gemini_chain.map((modelId, idx) => (
+                      <div key={idx} className="flex items-center gap-2">
+                        <span className="text-sm text-muted-foreground w-4 shrink-0 text-right">
+                          {idx + 1}
+                        </span>
+                        <div className="flex-1 min-w-0">
+                          <SelectInput
+                            value={modelId}
+                            onChange={v =>
+                              setTrDraft(d => {
+                                const next = [...d.gemini_chain];
+                                next[idx] = v;
+                                return { ...d, gemini_chain: next };
+                              })
+                            }
+                            options={
+                              geminiModelOptions.length
+                                ? geminiModelOptions
+                                : [{ label: modelId, value: modelId }]
+                            }
+                          />
+                        </div>
+                        <ActionButton
+                          variant="ghost"
+                          size="icon"
+                          disabled={idx === 0}
+                          onClick={() =>
+                            setTrDraft(d => {
+                              const next = [...d.gemini_chain];
+                              [next[idx - 1], next[idx]] = [next[idx], next[idx - 1]];
+                              return { ...d, gemini_chain: next };
+                            })
+                          }
+                        >
+                          <ChevronUp className="w-4 h-4" />
+                        </ActionButton>
+                        <ActionButton
+                          variant="ghost"
+                          size="icon"
+                          disabled={idx === trDraft.gemini_chain.length - 1}
+                          onClick={() =>
+                            setTrDraft(d => {
+                              const next = [...d.gemini_chain];
+                              [next[idx + 1], next[idx]] = [next[idx], next[idx + 1]];
+                              return { ...d, gemini_chain: next };
+                            })
+                          }
+                        >
+                          <ChevronDown className="w-4 h-4" />
+                        </ActionButton>
+                        <ActionButton
+                          variant="ghost"
+                          size="icon"
+                          disabled={trDraft.gemini_chain.length <= 1}
+                          onClick={() =>
+                            setTrDraft(d => ({
+                              ...d,
+                              gemini_chain: d.gemini_chain.filter((_, i) => i !== idx),
+                            }))
+                          }
+                        >
+                          <Trash2 className="w-4 h-4" />
+                        </ActionButton>
+                      </div>
+                    ))}
+                  </div>
+
+                  <ActionButton
+                    variant="ghost"
+                    size="sm"
+                    icon={<Plus className="w-3.5 h-3.5" />}
+                    onClick={() =>
+                      setTrDraft(d => {
+                        const catalog = tr?.gemini.model_options ?? [];
+                        const unused = catalog.find(o => !d.gemini_chain.includes(o.id));
+                        const nextModel = unused?.id ?? catalog[0]?.id ?? "gemini-2.0-flash";
+                        return { ...d, gemini_chain: [...d.gemini_chain, nextModel] };
+                      })
+                    }
+                  >
+                    모델 추가
+                  </ActionButton>
+                </div>
+
+                <SettingsRow label="청크 길이 (줄)" hint="권장 16줄">
+                  <TextInput
+                    value={trDraft.gemini_chunk_target_lines}
+                    onChange={v => setTrDraft(d => ({ ...d, gemini_chunk_target_lines: v }))}
+                    placeholder="16"
+                  />
+                </SettingsRow>
+
+                <SettingsRow label="겹침 · 슬라이딩 윈도우 (줄)" hint="권장 4줄">
+                  <TextInput
+                    value={trDraft.gemini_chunk_overlap_lines}
+                    onChange={v => setTrDraft(d => ({ ...d, gemini_chunk_overlap_lines: v }))}
+                    placeholder="4"
+                  />
+                </SettingsRow>
+              </>
+            )}
 
             {trDraft.provider === "omniroute" && (
               <>
@@ -1725,6 +1896,15 @@ export default function SettingsView() {
               <TextInput
                 value={embDraft.search_max_gap}
                 onChange={v => setEmbDraft(d => ({ ...d, search_max_gap: v }))}
+              />
+            </SettingsRow>
+            <SettingsRow
+              label="병렬 처리 개수"
+              hint="텍스트를 한 번에 몇 개씩 묶어 요청할지 · 캐시 안 된 것만 대상 (기본 10, 1~64)"
+            >
+              <TextInput
+                value={embDraft.batch_size}
+                onChange={v => setEmbDraft(d => ({ ...d, batch_size: v }))}
               />
             </SettingsRow>
             {emb && (

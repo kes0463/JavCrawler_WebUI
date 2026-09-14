@@ -355,6 +355,41 @@ def refresh_flags_after_media_change(
     invalidate_lamp_flag_repair_cache()
 
 
+def _resolve_repair_video_path(cache, meta) -> tuple[Path | None, bool]:
+    """캐시된 video_path로 사이드카를 확인하되, 파일이 이동돼 죽은 경로면
+    jav_metadata.folder_path 기준으로 재탐색한다(다운로드 폴더 → 정리 폴더 이동 등).
+
+    재탐색으로 새 경로를 찾으면 캐시도 함께 갱신해 다음부터는 재탐색이 필요 없게 한다.
+    반환값: (video_path 또는 None, 캐시 video_path를 새로 고쳤는지 여부).
+    """
+    vp: Path | None = None
+    if cache.video_path:
+        try:
+            candidate = Path(cache.video_path)
+            if candidate.is_file():
+                vp = candidate
+        except Exception:
+            vp = None
+
+    if vp is not None:
+        return vp, False
+
+    folder_path = (getattr(meta, "folder_path", None) or "").strip() if meta is not None else ""
+    if not folder_path:
+        return None, False
+    try:
+        from javstory.library.video_discovery import guess_video_path_for_product_fast
+
+        vp = guess_video_path_for_product_fast(cache.product_code, folder_path)
+    except Exception:
+        vp = None
+    if vp is None:
+        return None, False
+    cache.video_path = str(vp)
+    cache.has_video = 1
+    return vp, True
+
+
 def repair_stale_lamp_sub_flags(*, force: bool = False) -> dict[str, int]:
     """lamp_sub=0 인데 영상 옆 KO/일반 SRT가 있으면 lamp_sub=1로 고친다.
 
@@ -372,6 +407,7 @@ def repair_stale_lamp_sub_flags(*, force: bool = False) -> dict[str, int]:
 
     checked = 0
     updated = 0
+    path_fixed = 0
     session = get_db_session()
     try:
         rows = (
@@ -387,16 +423,15 @@ def repair_stale_lamp_sub_flags(*, force: bool = False) -> dict[str, int]:
             checked += 1
             if meta is not None and bool(getattr(meta, "is_hardcoded", False)):
                 continue
-            if not cache.video_path:
-                continue
-            try:
-                vp = Path(cache.video_path)
-            except Exception:
+            vp, fixed = _resolve_repair_video_path(cache, meta)
+            if fixed:
+                path_fixed += 1
+            if vp is None:
                 continue
             if _sidecar_has_ko_or_plain(vp):
                 cache.lamp_sub = 1
                 updated += 1
-        if updated:
+        if updated or path_fixed:
             session.commit()
         else:
             session.rollback()
@@ -428,6 +463,7 @@ def repair_stale_lamp_stt_flags(*, force: bool = False) -> dict[str, int]:
 
     checked = 0
     updated = 0
+    path_fixed = 0
     session = get_db_session()
     try:
         rows = (
@@ -443,16 +479,15 @@ def repair_stale_lamp_stt_flags(*, force: bool = False) -> dict[str, int]:
             checked += 1
             if meta is not None and bool(getattr(meta, "is_hardcoded", False)):
                 continue
-            if not cache.video_path:
-                continue
-            try:
-                vp = Path(cache.video_path)
-            except Exception:
+            vp, fixed = _resolve_repair_video_path(cache, meta)
+            if fixed:
+                path_fixed += 1
+            if vp is None:
                 continue
             if _sidecar_has_ja(vp):
                 cache.lamp_stt = 1
                 updated += 1
-        if updated:
+        if updated or path_fixed:
             session.commit()
         else:
             session.rollback()

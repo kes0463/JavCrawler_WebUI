@@ -121,7 +121,10 @@
       "PowerShell(icacls *)",
       "Bash(awk '{print $2}')",
       "Read(//tmp/**)",
-      "Bash(xargs -a /tmp/untracked.txt grep -lIE \"api[_-]?key|secret|password|token\\\\s*=|BEGIN \\(RSA|OPENSSH|PRIVATE\\)\" -i)"
+      "Bash(xargs -a /tmp/untracked.txt grep -lIE \"api[_-]?key|secret|password|token\\\\s*=|BEGIN \\(RSA|OPENSSH|PRIVATE\\)\" -i)",
+      "Bash(git commit *)",
+      "Bash(pip show *)",
+      "Bash(pip install *)"
     ]
   }
 }

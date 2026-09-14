@@ -17,6 +17,7 @@ from javstory.library.path_markers import (
 )
 from javstory.library.paths import library_root
 from javstory.library.service import load_work
+from javstory.library.embeddings.query_format import is_known_concept_token
 from javstory.library.genre_filter import aggregate_genre_counts, apply_genre_filters
 from javstory.library.snapshots import discover_snapshot_paths
 
@@ -534,6 +535,7 @@ class LibraryService:
                 "embeddings_enabled": embeddings_on,
                 "embedding_channel_used": False,
                 "search_message": None,
+                "search_message_kind": None,
                 "hit_meta": {},
             }
 
@@ -607,6 +609,7 @@ class LibraryService:
 
         if not ranked_codes:
             msg = "검색 결과가 없습니다."
+            msg_kind: str | None = None
             if not embeddings_on:
                 msg = "임베딩이 꺼져 있어 시맨틱 검색을 할 수 없습니다. 설정에서 임베딩을 켜 주세요."
             else:
@@ -629,6 +632,7 @@ class LibraryService:
                             "Ollama 앱을 실행하거나 `ollama serve` 후 다시 검색하세요 "
                             f"(URL: {endpoint or 'http://localhost:11434'})."
                         )
+                    msg_kind = "connection_error"
                 elif status == "query_failed":
                     backend = str(emb_diag.get("backend") or "")
                     model_name = emb_diag.get("model") or "embeddings"
@@ -648,16 +652,19 @@ class LibraryService:
                         msg += " (pooling 설정이 필요할 수 있습니다)"
                     elif err_short:
                         msg += f" ({err_short[:120]})"
+                    msg_kind = "connection_error"
                 elif int(emb_diag.get("scored_n") or 0) == 0:
                     msg = (
                         "임베딩 캐시가 없어 시맨틱 검색 결과가 없습니다. "
                         "설정에서 임베딩 워밍업을 실행해 보세요."
                     )
+                    msg_kind = "no_embeddings"
                 elif int(emb_diag.get("scored_n") or 0) > 0:
                     msg = (
                         "유사도가 충분히 높은 작품이 없습니다. "
                         "검색어를 바꾸거나 임베딩 워밍업·모델 설정을 확인해 보세요."
                     )
+                    msg_kind = "low_similarity"
             return {
                 "total": 0,
                 "page": page,
@@ -667,6 +674,7 @@ class LibraryService:
                 "embeddings_enabled": embeddings_on,
                 "embedding_channel_used": False,
                 "search_message": msg,
+                "search_message_kind": msg_kind,
                 "hit_meta": {},
             }
 
@@ -760,24 +768,29 @@ class LibraryService:
                 page_rows = [by_code[c] for c in page_codes if c in by_code]
 
         message = None
+        message_kind: str | None = None
         if keyword_fallback_used:
             status = str(emb_diag.get("status") or "")
             if not embeddings_on:
                 message = "임베딩이 꺼져 있어 키워드 검색으로 대체했습니다."
             elif status == "query_failed":
                 message = "시맨틱 검색에 실패해 키워드 검색으로 대체했습니다."
+                message_kind = "connection_error"
             elif int(emb_diag.get("scored_n") or 0) == 0:
                 message = (
                     "임베딩 캐시가 없어 키워드 검색으로 대체했습니다. "
                     "설정에서 임베딩 워밍업을 실행해 보세요."
                 )
+                message_kind = "no_embeddings"
             else:
                 message = "유사도 높은 작품이 없어 키워드 검색으로 대체했습니다."
+                message_kind = "low_similarity"
         elif not embedding_used:
             message = (
                 "시맨틱 채널이 결과에 반영되지 않았습니다. "
                 "키워드·BM25 결과만 표시합니다. 설정에서 임베딩 워밍업을 실행해 보세요."
             )
+            message_kind = "no_embeddings"
 
         return {
             "total": total,
@@ -788,6 +801,7 @@ class LibraryService:
             "embeddings_enabled": embeddings_on,
             "embedding_channel_used": embedding_used,
             "search_message": message,
+            "search_message_kind": message_kind,
             "hit_meta": hit_meta,
         }
 
@@ -831,6 +845,8 @@ class LibraryService:
             return True
         if re.match(r"^[A-Za-z]{1,10}-?\d{2,6}[A-Za-z0-9\-]*$", t):
             return False
+        if is_known_concept_token(t):
+            return True
         if re.search(r"[가-힣]{4,}", t):
             return True
         return len(t) >= 12 and not re.match(r"^[A-Za-z0-9\-_.]+$", t)
@@ -1178,6 +1194,7 @@ class LibraryService:
             apply_library_metadata_fields,
             mark_metadata_as_manual,
         )
+        from javstory.search.library_search import invalidate_library_docs_cache
 
         pc = (code or "").strip().upper()
         if not pc:
@@ -1191,6 +1208,7 @@ class LibraryService:
             commit_with_retry(db)
             db.refresh(row)
             persist_metadata_row_and_sync_files(pc, row)
+            invalidate_library_docs_cache()
             return row
 
     def bind_folder(

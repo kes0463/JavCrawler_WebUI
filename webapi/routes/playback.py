@@ -132,7 +132,8 @@ def stream_hls_playlist(code: str, part: int):
         media_type="application/vnd.apple.mpegurl",
         filename="index.m3u8",
         content_disposition_type="inline",
-        headers={"Accept-Ranges": "bytes"},
+        # 변환 진행 중에는 재생목록이 계속 커지므로 캐시 금지(점진적 재생).
+        headers={"Accept-Ranges": "bytes", "Cache-Control": "no-cache, no-store"},
     )
 
 

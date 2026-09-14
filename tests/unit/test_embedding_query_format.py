@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from javstory.library.embeddings.query_format import (
     blend_embedding_lexical_score,
     clear_concept_lexicon_cache,
@@ -9,6 +11,7 @@ from javstory.library.embeddings.query_format import (
     expand_query_concepts,
     format_search_query_for_embedding,
     is_e5_mistral_model,
+    is_known_concept_token,
 )
 
 
@@ -106,3 +109,28 @@ def test_compound_token_resolves_massage_concept(monkeypatch):
     concepts = expand_query_concepts("마사지받는장면")
     assert len(concepts) == 1
     assert "마사지" in concepts[0]
+
+
+def test_is_known_concept_token_short_genre_aliases(monkeypatch):
+    monkeypatch.setattr(
+        "javstory.library.embeddings.query_format._load_live_genre_concepts",
+        lambda: {},
+    )
+    clear_concept_lexicon_cache()
+    assert is_known_concept_token("간호사") is True
+    assert is_known_concept_token("메이드") is True
+    assert is_known_concept_token("비서") is True
+    assert is_known_concept_token("office") is True
+    assert is_known_concept_token("미카미") is False
+    assert is_known_concept_token("") is False
+
+
+def test_blend_multi_concept_partial_match_is_gentler_than_floor():
+    cosine = 0.6
+    none = blend_embedding_lexical_score(cosine, 0.0, concept_n=2)
+    half = blend_embedding_lexical_score(cosine, 0.5, concept_n=2)
+    full = blend_embedding_lexical_score(cosine, 1.0, concept_n=2)
+    assert none == pytest.approx(cosine * 0.55)
+    assert half == pytest.approx(cosine * 0.775)
+    assert full == pytest.approx(cosine)
+    assert none < half < full

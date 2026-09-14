@@ -31,10 +31,33 @@ def _parse_retry_after_seconds(msg: str) -> float | None:
     return None
 
 
-def is_free_tier_daily_quota_exceeded(msg: str) -> bool:
-    """Gemini FreeTier 일 quota 초과(20/day 등) 여부."""
-    s = (msg or "")
-    return "GenerateRequestsPerDayPerProjectPerModel-FreeTier" in s or "requests, limit: 20" in s
+def is_free_tier_daily_quota_exceeded(exc_or_msg: BaseException | str) -> bool:
+    """Gemini FreeTier 일일(day) quota 초과 여부 — RPM(분당) 초과와 구분해 장기 쿨다운 판단에 쓴다.
+
+    `router.route()`는 실패를 `AllTiersExhaustedError`로 감싸며 원문 메시지는
+    `.last_error`에만 남기고 `str(e)`는 고정 요약 문구가 되므로, 예외 객체를 받으면
+    `last_error`까지 확인한다(`is_context_size_exceeded`와 동일 패턴).
+    """
+    if isinstance(exc_or_msg, BaseException):
+        last = getattr(exc_or_msg, "last_error", None)
+        if last and is_free_tier_daily_quota_exceeded(str(last)):
+            return True
+        msg = str(exc_or_msg or "")
+    else:
+        msg = str(exc_or_msg or "")
+    s = msg.lower()
+    if "generaterequestsperdayperprojectpermodel-freetier" in s.replace(" ", ""):
+        return True
+    if "requests, limit: 20" in s:
+        return True
+    # Google 쿼터 메타 실패(QuotaFailure)의 quota_metric/quota_id는 일일 한도일 때
+    # 관례적으로 "PerDay"를 포함한다 — 정확한 모델별 문자열이 바뀌어도 넓게 잡는다.
+    compact = s.replace("_", "").replace(" ", "")
+    if "resource_exhausted" in s and "perday" in compact:
+        return True
+    if "quota" in s and "perday" in compact:
+        return True
+    return False
 
 
 def is_openrouter_credit_exhausted(exc_or_msg: BaseException | str) -> bool:
@@ -80,6 +103,29 @@ def is_context_size_exceeded(exc_or_msg: BaseException | str) -> bool:
     return False
 
 
+def is_model_not_found(exc_or_msg: BaseException | str) -> bool:
+    """모델이 폐기·이동되어 영구적으로 404를 내는 경우(동일 요청 재시도 무의미).
+
+    예: Gemini가 구버전 모델을 은퇴시키면 ``models/gemini-2.0-flash-lite is no
+    longer available`` 같은 404 NOT_FOUND를 반환한다 — 몇 초 뒤 재시도해도
+    똑같이 실패하므로, 429/타임아웃과 달리 백오프 재시도 대상에서 제외한다.
+    """
+    if isinstance(exc_or_msg, BaseException):
+        last = getattr(exc_or_msg, "last_error", None)
+        if last and is_model_not_found(str(last)):
+            return True
+        status = getattr(exc_or_msg, "status_code", None)
+        msg = str(exc_or_msg or "")
+    else:
+        status = None
+        msg = str(exc_or_msg or "")
+    s = msg.lower()
+    has_404 = status == 404 or "404" in s or "not_found" in s or "'status': 'not_found'" in s
+    if not has_404:
+        return False
+    return "no longer available" in s or "not_found" in s or "not found" in s
+
+
 async def await_cancellable(
     coro: Any,
     *,
@@ -113,10 +159,12 @@ async def await_cancellable(
 
 
 def retryable_api_error(e: BaseException) -> bool:
-    if is_context_size_exceeded(e):
+    if is_context_size_exceeded(e) or is_model_not_found(e):
         return False
     msg = str(e).lower()
-    if "429" in msg or "rate" in msg or "limit" in msg or "timeout" in msg:
+    # 단어 경계 매칭 — 순수 substring이면 "recommend"/"delimiter"/"unlimited" 같은
+    # 무관한 단어에 "rate"/"limit"이 우연히 포함돼 영구 오류까지 재시도 대상으로 오판한다.
+    if "429" in msg or re.search(r"\brate\b", msg) or re.search(r"\blimit\b", msg) or "timeout" in msg:
         return True
     try:
         import openai

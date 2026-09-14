@@ -9,6 +9,7 @@ from javstory.harvest.database import WatchHistory, get_db_session_ctx
 from javstory.harvest.product_repository import resolve_video_paths_for_playback
 from javstory.library.multipart.detect import sort_video_parts
 from javstory.library.playback_proxy import (
+    ensure_hls_segment,
     needs_browser_proxy,
     prepare_playback_file,
     proxy_is_ready,
@@ -181,17 +182,12 @@ class PlaybackService:
             return None
         if not segment_name.endswith(".ts"):
             return None
-        hls_dir = self.resolve_hls_dir(product_code, part_index)
-        if not hls_dir:
+        source = self.resolve_part_path(product_code, part_index)
+        if not source:
             return None
-        segment = (hls_dir / segment_name).resolve()
-        try:
-            hls_resolved = hls_dir.resolve()
-        except OSError:
-            return None
-        if segment.parent != hls_resolved:
-            return None
-        return segment if segment.is_file() else None
+        # 온디맨드 빌드 중이고 세그먼트가 아직 없으면, 그 지점을 우선 인코딩한 뒤
+        # (시크 대응) 경로를 돌려준다. 이미 있으면 즉시 반환.
+        return ensure_hls_segment(source, segment_name)
 
     def prepare_stream(self, product_code: str, part_index: int) -> Optional[dict[str, Any]]:
         source = self.resolve_part_path(product_code, part_index)

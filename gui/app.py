@@ -73,15 +73,11 @@ def _find_ollama_exe() -> str | None:
 
 
 def _ollama_log_path() -> Path | None:
-    """
-    자동 실행 로그 파일 경로.
-    작업 디렉터리/패키징 환경과 무관하게 쓰기 가능한 위치(LOCALAPPDATA)를 우선한다.
-    """
+    """자동 실행 로그 파일 경로 — 프로젝트 `data/logs/`(윈도우 초기화에도 안전한 D: 드라이브)."""
     try:
-        base = (os.environ.get("LOCALAPPDATA", "") or "").strip()
-        if not base:
-            return None
-        d = Path(base) / "JAVSTORY" / "logs"
+        from javstory.config.app_config import DATA_ROOT
+
+        d = DATA_ROOT / "logs"
         d.mkdir(parents=True, exist_ok=True)
         return d / "ollama-serve.log"
     except Exception:

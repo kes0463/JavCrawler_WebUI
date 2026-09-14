@@ -69,6 +69,7 @@ export interface LibraryItemDetail extends LibraryItem {
   has_grok_story?: boolean;
   grok_story_running?: boolean;
   translation_note?: string | null;
+  translation_note_running?: boolean;
   /** 필드별 크롤 출처 { actors: "avwikinet", cover_url: "123av", ... } */
   crawl_sources?: Record<string, string>;
 }
@@ -101,6 +102,7 @@ export interface LibraryListResponse {
   embeddings_enabled?: boolean | null;
   embedding_channel_used?: boolean | null;
   search_message?: string | null;
+  search_message_kind?: "connection_error" | "no_embeddings" | "low_similarity" | null;
 }
 
 export interface LibraryStats {
@@ -568,6 +570,14 @@ export const saveWorkTranslationNote = (
   translationNote: string,
 ): Promise<LibraryItemDetail> =>
   patch(`/api/library/${code}/translation-note`, { translation_note: translationNote });
+
+export const regenerateWorkTranslationNote = (
+  code: string,
+  useGrok = true,
+): Promise<{ ok: boolean; queued: number; message: string }> =>
+  post(
+    `/api/library/${encodeURIComponent(code)}/translation-note/regenerate?use_grok=${useGrok ? "true" : "false"}`,
+  );
 
 export const openLibraryFolder = (code: string): Promise<{ ok: boolean; path?: string }> =>
   post(`/api/library/${code}/open-folder`);

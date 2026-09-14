@@ -534,6 +534,7 @@ class MultiTierRouter:
                     last_error = str(e) or type(e).__name__
                     from javstory.translation.llm_backoff import (
                         is_context_size_exceeded,
+                        is_model_not_found,
                         is_openrouter_credit_exhausted,
                     )
 
@@ -547,12 +548,26 @@ class MultiTierRouter:
                             else f"    ❌ {model_name} 컨텍스트 초과(동일 요청 재시도 생략): {e}"
                         )
                         break
+                    if is_model_not_found(e):
+                        self.logger(
+                            f"    ❌ [Manual Mode] {model_name} 모델 폐기/404(동일 요청 재시도 생략): {e}"
+                            if tier_override
+                            else f"    ❌ {model_name} 모델 폐기/404(동일 요청 재시도 생략): {e}"
+                        )
+                        break
+                    if attempt >= max_attempts - 1:
+                        # 마지막 시도 실패 — 더 이상 재시도가 없으므로 백오프 sleep도 낭비다.
+                        if tier_override:
+                            self.logger(f"    ❌ [Manual Mode] {model_name} 오류(재시도 소진): {e}")
+                        else:
+                            self.logger(f"    ❌ {model_name} 오류(재시도 소진): {e}")
+                        break
                     delay = self.get_backoff_delay(attempt)
                     if tier_override:
-                         self.logger(f"    ❌ [Manual Mode] {model_name} 오류: {e} | {delay:.1f}s 후 재시도 ({attempt+1}/4)")
+                         self.logger(f"    ❌ [Manual Mode] {model_name} 오류: {e} | {delay:.1f}s 후 재시도 ({attempt+1}/{max_attempts})")
                     else:
-                         self.logger(f"    ❌ {model_name} 오류: {e} | {delay:.1f}s 후 재시도 ({attempt+1}/4)")
-                    
+                         self.logger(f"    ❌ {model_name} 오류: {e} | {delay:.1f}s 후 재시도 ({attempt+1}/{max_attempts})")
+
                     await asyncio.sleep(delay)
             
             if tier_override: # 수동 모드 실패

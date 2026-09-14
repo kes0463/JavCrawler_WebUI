@@ -322,6 +322,11 @@ def _resolve_concept(
     return best_key, best_syns
 
 
+def is_known_concept_token(token: str) -> bool:
+    """단일 토큰이 등록된 분위기/장소/장르 개념(동의어 포함)과 매칭되는지."""
+    return _resolve_concept(token, _concept_lexicon()) is not None
+
+
 def expand_query_concepts(query: str) -> List[List[str]]:
     """
     쿼리에서 알려진 분위기·장소·장르 개념만 추출한다.
@@ -368,7 +373,7 @@ def blend_embedding_lexical_score(
 ) -> float:
     """
     코사인 × 개념 커버리지.
-    개념이 2개 이상일 때(예: 비오는+사무실) 한쪽만 맞으면 강하게 감점.
+    개념이 2개 이상일 때(예: 비오는+사무실) 미매칭은 깎되, 부분 매칭은 덜 가혹하게.
     """
     if not math.isfinite(float(cosine)):
         return float("-inf")
@@ -376,4 +381,4 @@ def blend_embedding_lexical_score(
         return float(cosine)
     if concept_n == 1:
         return float(cosine) * (0.85 + 0.15 * float(coverage))
-    return float(cosine) * (0.35 + 0.65 * float(coverage))
+    return float(cosine) * (0.55 + 0.45 * float(coverage))

@@ -12,6 +12,9 @@ llama-server 임베딩 백엔드.
   JAVSTORY_EMBEDDINGS_LLAMACPP_N_GPU_LAYERS  (-ngl, 미설정 시 -fit on)
   JAVSTORY_EMBEDDINGS_LLAMACPP_CTX     (-c, 기본 2048)
   JAVSTORY_EMBEDDINGS_LLAMACPP_MAX_CONCURRENT  동시 /v1/embeddings 요청 (기본 1)
+  JAVSTORY_EMBEDDINGS_LLAMACPP_BATCH_SIZE  텍스트 여러 개를 한 요청에 묶어 보내는 배치 크기
+                                           (기본 10) — 캐시 안 된 텍스트만 대상, 실패 시
+                                           해당 배치만 1개씩 폴백
   JAVSTORY_EMBEDDINGS_LLAMACPP_AUTO_START  1|0 (기본 1)
   JAVSTORY_EMBEDDINGS_LLAMACPP_POOLING     mean|last|cls|… (미설정 시 모델별 자동)
                                            e5-mistral → last, nomic/e5/bge → mean
@@ -64,6 +67,25 @@ _active_pooling: Optional[str] = None
 _log_path: Optional[Path] = None
 _last_activity_at: float = time.time()
 _active_requests: int = 0
+# 검색·백필 등 임베딩 요청마다 ensure_embeddings_llamacpp_ready()가 호출되는데, 이미
+# 우리가 관리 중인 서버가 살아있는 게 최근에 확인됐다면 매번 HTTP 헬스체크를 왕복하지
+# 않는다(로컬호스트라도 요청당 고정 오버헤드가 붙는다). (base, 확인 시각) 쌍으로 저장해
+# 포트/URL이 바뀌면 자동으로 무효화되게 한다.
+_last_health_ok: tuple[str, float] | None = None
+_HEALTH_RECHECK_SEC = 5.0
+
+
+def _recent_health_ok(base: str) -> bool:
+    entry = _last_health_ok
+    if entry is None:
+        return False
+    checked_base, checked_at = entry
+    return checked_base == base and (time.time() - checked_at) < _HEALTH_RECHECK_SEC
+
+
+def _mark_health_ok(base: str) -> None:
+    global _last_health_ok
+    _last_health_ok = (base, time.time())
 _idle_thread: threading.Thread | None = None
 _idle_stop_event = threading.Event()
 _idle_shutdown_logged = False
@@ -742,7 +764,8 @@ def _ensure_embeddings_llamacpp_ready_locked(
                 except Exception:
                     pass
 
-    if check_proc is not None and _server_health_ok(base):
+    if check_proc is not None and (_recent_health_ok(base) or _server_health_ok(base)):
+        _mark_health_ok(base)
         touch_embeddings_activity()
         _ensure_idle_monitor_started(logger_func=log)
         return alias
@@ -935,6 +958,18 @@ def _raise_embed_http_error(exc: BaseException) -> None:
     raise exc
 
 
+_EMBED_BATCH_SIZE_ENV = "JAVSTORY_EMBEDDINGS_LLAMACPP_BATCH_SIZE"
+
+
+def embedding_batch_size() -> int:
+    raw = (os.environ.get(_EMBED_BATCH_SIZE_ENV, "") or "").strip()
+    try:
+        n = int(raw) if raw else 10
+    except ValueError:
+        n = 10
+    return max(1, min(64, n))
+
+
 async def llamacpp_embed_texts(
     *,
     texts: List[str],
@@ -942,7 +977,13 @@ async def llamacpp_embed_texts(
     base_url: str | None = None,
     timeout_sec: float = 300.0,
 ) -> List[List[float]]:
-    """여러 텍스트를 llama-server /v1/embeddings 로 임베딩 (항목별 순차 요청)."""
+    """여러 텍스트를 llama-server /v1/embeddings 로 임베딩.
+
+    캐시 안 된 텍스트만 모아 배치(기본 10개, JAVSTORY_EMBEDDINGS_LLAMACPP_BATCH_SIZE)로
+    한 번에 요청한다 — 텍스트 수만큼 순차 왕복하는 것보다 GPU 배치 처리 이득이 있다.
+    배치 요청이 실패하면(컨텍스트 초과 등 원인을 개별 텍스트 단위로 격리해야 하므로)
+    해당 배치만 항목별 순차 요청+재시도로 폴백한다.
+    """
     cleaned = [truncate_embedding_input((t or "").strip()) for t in texts]
     if not cleaned or any(not t for t in cleaned):
         raise ValueError("llamacpp_embed_texts: empty text")
@@ -952,9 +993,11 @@ async def llamacpp_embed_texts(
 
     results: List[Optional[List[float]]] = [None] * len(cleaned)
 
-    async def _post_one(text: str, *, char_limit: int | None = None) -> Any:
-        payload_text = truncate_embedding_input(text, max_chars=char_limit)
-        payload: Dict[str, Any] = {"model": m, "input": payload_text}
+    async def _post(payload_texts: List[str]) -> Any:
+        payload: Dict[str, Any] = {
+            "model": m,
+            "input": payload_texts if len(payload_texts) > 1 else payload_texts[0],
+        }
 
         def _sync_post() -> Any:
             with _embed_http_semaphore(), embeddings_request_scope():
@@ -963,15 +1006,9 @@ async def llamacpp_embed_texts(
                     r.raise_for_status()
                     return r.json()
 
-        data = await asyncio.to_thread(_sync_post)
-        return data, payload_text
+        return await asyncio.to_thread(_sync_post)
 
     async def _embed_one(text: str) -> List[float]:
-        text_hash = hashlib.md5(text.encode()).hexdigest()
-        cached = cache_manager.get_embedding(text_hash)
-        if cached is not None:
-            return [float(x) for x in cached.tolist()]
-
         limit = embedding_max_input_chars()
         retry_limits: List[int | None] = [None, limit // 2, max(256, limit // 4)]
         last_exc: BaseException | None = None
@@ -980,10 +1017,11 @@ async def llamacpp_embed_texts(
             if attempt > 0:
                 await asyncio.sleep(0.25 * attempt)
             try:
-                data, sent = await _post_one(text, char_limit=char_limit)
+                payload_text = truncate_embedding_input(text, max_chars=char_limit)
+                data = await _post([payload_text])
                 vectors = _parse_embedding_response(data, expected=1)
                 vec = vectors[0]
-                cache_manager.set_embedding(hashlib.md5(sent.encode()).hexdigest(), vec)
+                cache_manager.set_embedding(hashlib.md5(payload_text.encode()).hexdigest(), vec)
                 return vec
             except Exception as e:
                 last_exc = e
@@ -1002,7 +1040,31 @@ async def llamacpp_embed_texts(
             raise last_exc
         raise RuntimeError("llamacpp embed: unexpected empty retry loop")
 
+    # 1) 캐시 히트 먼저 채우고, 나머지만 배치 대상으로 남긴다.
+    pending_idx: List[int] = []
     for i, t in enumerate(cleaned):
-        results[i] = await _embed_one(t)
+        cached = cache_manager.get_embedding(hashlib.md5(t.encode()).hexdigest())
+        if cached is not None:
+            results[i] = [float(x) for x in cached.tolist()]
+        else:
+            pending_idx.append(i)
+
+    batch_size = embedding_batch_size()
+    for start in range(0, len(pending_idx), batch_size):
+        chunk_idx = pending_idx[start : start + batch_size]
+        chunk_texts = [cleaned[i] for i in chunk_idx]
+        try:
+            data = await _post(chunk_texts)
+            vectors = _parse_embedding_response(data, expected=len(chunk_texts))
+            for i, vec in zip(chunk_idx, vectors):
+                results[i] = vec
+                cache_manager.set_embedding(hashlib.md5(cleaned[i].encode()).hexdigest(), vec)
+        except Exception as e:
+            if _is_connect_error(e) or _is_pooling_incompatible_error(e):
+                await asyncio.to_thread(ensure_embeddings_llamacpp_ready, wait_sec=90.0)
+            # 배치 실패 — 원인(컨텍스트 초과 등)을 개별 텍스트 단위로 격리하기 위해
+            # 이 배치만 항목별 순차 요청+재시도로 폴백한다.
+            for i in chunk_idx:
+                results[i] = await _embed_one(cleaned[i])
 
     return [r if r is not None else [] for r in results]

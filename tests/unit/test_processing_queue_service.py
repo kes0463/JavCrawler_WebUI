@@ -301,6 +301,57 @@ def test_remove_pending_while_running(
     asyncio.run(_run())
 
 
+def test_subtitle_emits_work_note_per_item(
+    svc: ProcessingQueueService,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "javstory.services.processing_queue_service.is_video_file",
+        lambda p: True,
+    )
+    v1 = tmp_path / "ABF-001 a.mp4"
+    v2 = tmp_path / "ABF-002 b.mp4"
+    v1.write_bytes(b"x")
+    v2.write_bytes(b"x")
+    events: list[dict] = []
+
+    async def _run() -> None:
+        async def _broadcast(event: dict) -> None:
+            events.append(event)
+
+        svc.set_broadcast(_broadcast)
+        svc.set_main_loop(asyncio.get_running_loop())
+
+        def fake_job(pc, _target, on_translation_note=None, **_k):
+            if on_translation_note:
+                on_translation_note(
+                    {"product_code": pc, "text": f"note-{pc}", "status": "ready"}
+                )
+            return SubtitleJobResult(True, "ok")
+
+        monkeypatch.setattr(
+            "javstory.services.processing_queue_service.run_subtitle_job",
+            fake_job,
+        )
+        svc.add_paths("subtitle", [str(v1), str(v2)])
+        await svc.start("subtitle")
+        for _ in range(80):
+            if not svc._running["subtitle"]:
+                break
+            await asyncio.sleep(0.05)
+
+        notes = [e for e in events if e.get("type") == "work_note"]
+        codes = [e.get("product_code") for e in notes if e.get("status") == "ready"]
+        generating = [e.get("product_code") for e in notes if e.get("status") == "generating"]
+        assert "ABF-001" in generating
+        assert "ABF-002" in generating
+        assert "ABF-001" in codes
+        assert "ABF-002" in codes
+
+    asyncio.run(_run())
+
+
 def test_subtitle_job_failure(
     svc: ProcessingQueueService,
     video_file: Path,

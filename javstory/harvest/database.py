@@ -15,7 +15,7 @@ from sqlalchemy import (
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, relationship
 from sqlalchemy.pool import NullPool
-from sqlalchemy.exc import OperationalError
+from sqlalchemy.exc import OperationalError, PendingRollbackError
 from contextlib import contextmanager
 import datetime
 import random
@@ -393,21 +393,36 @@ engine = create_engine(
 )
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
-_SQLITE_WRITE_LOCK = threading.Lock()
+# 재진입 가능(RLock): run_write_txn 이 스팬 전체에서 락을 잡은 채
+# 내부의 commit_with_retry 가 같은 스레드에서 다시 획득할 수 있어야 한다.
+_SQLITE_WRITE_LOCK = threading.RLock()
+
+
+def _is_locked_error(exc: BaseException) -> bool:
+    """SQLite write-lock 경합(`database is locked` / `is busy`)인지.
+
+    PendingRollbackError 는 flush 중 락이 터진 뒤 rollback 없이 세션을 계속 쓸 때
+    발생하며, 원본 예외 문구를 그대로 담고 있어 같은 방식으로 판별한다.
+    """
+    msg = str(exc).lower()
+    return "database is locked" in msg or "database is busy" in msg
 
 
 def commit_with_retry(session, *, max_attempts: int = 12, base_delay: float = 0.2) -> None:
-    """SQLite `database is locked` 발생 시 백오프 재시도 (Harvest 병렬 쓰기 대응)."""
+    """SQLite `database is locked` 발생 시 백오프 재시도하며 `session.commit()`.
+
+    commit 은 flush 를 포함하므로, flush 단계에서 락이 나도 여기서 잡아
+    rollback 후 재시도한다(쌓인 ORM 변경은 다음 commit 의 flush 에서 다시 emit).
+    """
     last_err: Exception | None = None
     for attempt in range(max_attempts):
         try:
             with _SQLITE_WRITE_LOCK:
                 session.commit()
             return
-        except OperationalError as e:
+        except (OperationalError, PendingRollbackError) as e:
             last_err = e
-            msg = str(e).lower()
-            if "database is locked" not in msg and "database is busy" not in msg:
+            if not _is_locked_error(e):
                 raise
             try:
                 session.rollback()
@@ -420,6 +435,40 @@ def commit_with_retry(session, *, max_attempts: int = 12, base_delay: float = 0.
     if last_err is not None:
         raise last_err
     raise RuntimeError("commit_with_retry: unknown failure")
+
+
+def run_write_txn(session, work, *, max_attempts: int = 4, base_delay: float = 0.3):
+    """쓰기 트랜잭션 한 단위(`work()`)를 프로세스 전역 write 락 아래에서 실행한다.
+
+    `work()` 는 ORM 변경을 쌓고 스스로 커밋해야 한다(예: 마지막에 `session.commit()`).
+    단위 어디에서든 `database is locked` 가 나면 **트랜잭션 전체를 rollback** 하고
+    `work()` 를 처음부터 다시 실행한다 — SQLAlchemy 는 flush 실패 후 rollback 없이는
+    세션을 못 쓰고, rollback 은 트랜잭션 전체를 되돌리므로 재시도 단위는 개별
+    flush/commit 이 아니라 "unit of work 전체"여야 한다.
+
+    따라서 `work()` 는 반드시:
+      - 반복 불가능한 부수효과가 없어야 한다(네트워크 요청·파일 쓰기 금지).
+      - 필요한 행을 매 호출마다 다시 조회해야 한다(rollback 시 세션 상태가 비워짐).
+    """
+    last_err: Exception | None = None
+    for attempt in range(max_attempts):
+        try:
+            with _SQLITE_WRITE_LOCK:
+                return work()
+        except (OperationalError, PendingRollbackError) as e:
+            last_err = e
+            if not _is_locked_error(e):
+                raise
+            try:
+                session.rollback()
+            except Exception:
+                pass
+            if attempt + 1 >= max_attempts:
+                break
+            delay = min(base_delay * (2 ** attempt) + random.uniform(0, 0.2), 8.0)
+            time.sleep(delay)
+    assert last_err is not None
+    raise last_err
 
 
 @event.listens_for(engine, "connect")
@@ -1259,6 +1308,9 @@ def upsert_jav_metadata(session, product_code, merge_empty_only=False, **kwargs)
             row.actors = kwargs['actors_ja']
         
     # 트랜잭션 경계는 호출자가 책임진다. (여기서는 PK 할당 등 필요 시 flush만)
+    # flush 는 INSERT/UPDATE 를 실제로 emit 하므로 `database is locked` 에 노출되지만,
+    # flush 만 재시도하는 건 불가능하다(락 후 rollback 없이는 세션 재사용 불가, rollback 하면
+    # 쌓인 변경이 사라짐). 호출자가 `run_write_txn` 으로 unit-of-work 전체를 감싸 재시도한다.
     session.flush()
     return row
 

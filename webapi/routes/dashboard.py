@@ -61,6 +61,18 @@ def clear_embedding_finished():
     return {"ok": True, "removed": removed}
 
 
+@router.delete("/embedding-queue/queued")
+def clear_embedding_queued():
+    """아직 시작하지 않은 대기 중 작업을 전부 제거(진행 중인 작업은 유지).
+
+    모델을 바꾼 뒤 이전 모델로 큐잉된 좀비 작업을 정리할 때 사용.
+    """
+    from javstory.library.embeddings.embedding_queue import embedding_queue_manager
+
+    removed = embedding_queue_manager.clear_queued()
+    return {"ok": True, "removed": removed}
+
+
 @router.delete("/embedding-queue/{job_id}")
 def remove_embedding_job(job_id: str):
     from javstory.library.embeddings.embedding_queue import embedding_queue_manager

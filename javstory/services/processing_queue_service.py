@@ -330,8 +330,35 @@ class ProcessingQueueService:
         item.status = "running"
         item.progress = 0
         item.message = "시작..."
-        await self._emit({"type": "item_started", "kind": kind, "id": item.id})
-        await self._emit({"type": "content_clear", "kind": kind, "id": item.id})
+        started = {
+            "type": "item_started",
+            "kind": kind,
+            "id": item.id,
+            "product_code": item.product_code or "",
+        }
+        await self._emit(started)
+        await self._emit(
+            {
+                "type": "content_clear",
+                "kind": kind,
+                "id": item.id,
+                "product_code": item.product_code or "",
+            }
+        )
+        # 다음 작품이 시작되는 즉시 UI 노트를 갈아끼운다. 실제 본문은
+        # 오케스트레이터의 work_note(ready)가 이어진다.
+        if kind == "subtitle":
+            await self._emit(
+                {
+                    "type": "work_note",
+                    "kind": kind,
+                    "id": item.id,
+                    "product_code": item.product_code or "",
+                    "text": "",
+                    "status": "generating",
+                    "ts": datetime.now().strftime("%H:%M:%S"),
+                }
+            )
 
         def progress_cb(msg: str, pct: int) -> None:
             if item.id in self._cancel_ids:

@@ -177,6 +177,24 @@ class EmbeddingQueueManager:
                     removed += 1
         return removed
 
+    def clear_queued(self) -> int:
+        """대기 중(아직 시작 안 한) 작업을 전부 제거. 진행 중(running)인 작업은 건드리지 않는다.
+
+        내부 queue.Queue에는 job_id가 남지만, _run_job()이 _jobs에서 못 찾으면
+        조용히 스킵하므로 안전하다(별도 정리 불필요).
+        """
+        removed = 0
+        with self._state_lock:
+            queued_ids = [
+                jid for jid, job in self._jobs.items() if job.status == "queued"
+            ]
+            for jid in queued_ids:
+                job = self._jobs.pop(jid, None)
+                if job:
+                    self._active_codes.discard(job.product_code)
+                    removed += 1
+        return removed
+
     def is_busy(self) -> bool:
         with self._state_lock:
             return any(j.status in {"queued", "running"} for j in self._jobs.values())

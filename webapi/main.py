@@ -13,6 +13,12 @@ from javstory.config.app_config import ensure_project_env_loaded
 
 ensure_project_env_loaded()
 
+from javstory.utils.console_log_file import install_stdout_file_tee
+
+_webapi_log_path = install_stdout_file_tee(_ROOT / "data" / "logs" / "webapi.log")
+if _webapi_log_path:
+    print(f"[webapi] 콘솔 로그 파일: {_webapi_log_path}", flush=True)
+
 from javstory.utils.ffmpeg_path import bootstrap_path_env
 
 bootstrap_path_env()

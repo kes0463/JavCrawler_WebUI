@@ -19,6 +19,14 @@ import { useToast } from "@/contexts/ToastContext";
 import { useNavigation } from "@/contexts/NavigationContext";
 
 let logSeq = 0;
+let favSeq = 0;
+
+interface FavItem {
+  id: string;
+  code: string;
+  status: "done" | "error";
+  message: string;
+}
 
 export default function HarvestView() {
   const { showToast } = useToast();
@@ -35,6 +43,8 @@ export default function HarvestView() {
   const dragDepthRef = useRef(0);
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const [favRunning, setFavRunning] = useState(false);
+  const [favProgress, setFavProgress] = useState<{ current: number; total: number } | null>(null);
+  const [favItems, setFavItems] = useState<FavItem[]>([]);
   const wsRef = useRef<WebSocket | null>(null);
 
   useEffect(() => {
@@ -102,7 +112,20 @@ export default function HarvestView() {
         showToast(event.message, "success");
       } else if (event.type === "favorites_started") {
         setFavRunning(true);
+        setFavItems([]);
+        setFavProgress({ current: 0, total: event.total });
         showToast(`♥ 좋아요 수집 시작 (${event.total}건)`, "info");
+      } else if (event.type === "favorites_progress") {
+        setFavProgress({ current: event.current, total: event.total });
+        setFavItems(prev => [
+          ...prev.slice(-199),
+          {
+            id: `fav-${++favSeq}`,
+            code: event.product_code,
+            status: event.status === "error" ? "error" : "done",
+            message: event.message,
+          },
+        ]);
       } else if (event.type === "favorites_finished") {
         setFavRunning(false);
         showToast(
@@ -485,6 +508,36 @@ export default function HarvestView() {
               전체
             </ActionButton>
           </div>
+          {favProgress && (favRunning || favItems.length > 0) && (
+            <div className="space-y-2 pt-1">
+              <div className="flex items-center justify-between text-sm text-muted-foreground">
+                <span>{favProgress.current} / {favProgress.total}</span>
+                {favRunning && <Loader2 className="w-3.5 h-3.5 text-rose-400 animate-spin" />}
+              </div>
+              <div className="h-1 rounded-full bg-white/[0.06] overflow-hidden">
+                <div
+                  className="h-full rounded-full bg-rose-400 transition-all duration-300"
+                  style={{
+                    width: `${favProgress.total > 0 ? (favProgress.current / favProgress.total) * 100 : 0}%`,
+                  }}
+                />
+              </div>
+              <div className="space-y-1 max-h-40 overflow-y-auto no-scrollbar">
+                {favItems.slice().reverse().map(item => (
+                  <div
+                    key={item.id}
+                    className="flex items-center gap-2 px-2 py-1 rounded-lg bg-bg-base/50 text-sm"
+                  >
+                    {item.status === "error"
+                      ? <AlertCircle className="w-3.5 h-3.5 text-rose-400 shrink-0" />
+                      : <CheckCircle className="w-3.5 h-3.5 text-emerald-400 shrink-0" />}
+                    <span className="font-mono text-indigo-300 shrink-0">{item.code}</span>
+                    <span className="text-muted-foreground truncate">{item.message}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
         </GlassCard>
       </div>
 

@@ -17,7 +17,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 # Harvest 내부 모듈 임포트
 from javstory.harvest.crawler import HybridJavCrawler
-from javstory.harvest.database import get_db_session_ctx, upsert_jav_metadata, Genre, Maker, commit_with_retry
+from javstory.harvest.database import get_db_session_ctx, upsert_jav_metadata, Genre, Maker, commit_with_retry, run_write_txn
 from javstory.harvest.translator import MetadataTranslator
 from javstory.utils.actress_resolver import ActressResolver
 from javstory.utils.assets_handler import MetadataAssetsHandler
@@ -166,6 +166,7 @@ async def run_crawler_for_video_path(
     db_cover_url, db_release_date = "", ""
     db_favorite_score = 0
     db_favorite_sources = None
+    db_crawl_sources = None
     original_title = ""
     db_folder_path: str | None = None
     trans_res = {}
@@ -216,6 +217,7 @@ async def run_crawler_for_video_path(
                         original_title = row.original_title or raw_title
                         db_favorite_score = int(getattr(row, "favorite_score", 0) or 0)
                         db_favorite_sources = getattr(row, "favorite_sources", None)
+                        db_crawl_sources = getattr(row, "crawl_sources_json", None)
                         log_ts(f"✅ {code} 원본 메타데이터가 완벽하여 웹 수집(크롤링)을 생략합니다.")
                     
                     # 2. 번역(KO) 데이터 확인
@@ -301,16 +303,19 @@ async def run_crawler_for_video_path(
                                 continue
 
                 with get_db_session_ctx() as session:
-                    row_fail = upsert_jav_metadata(session, code, 
-                        title_ko=f"[{code}] (수집 실패/정보 없음)", 
-                        folder_path=(stored_folder_path or db_folder_path),
-                        cover_image_local_path=local_cover, # 로컬 이미지 경로 등록
-                        analysis_status="FAILED_CRAWL"
-                    )
                     from javstory.harvest.product_repository import sync_product_from_metadata_row
 
-                    sync_product_from_metadata_row(session, row_fail)
-                    commit_with_retry(session)
+                    def _persist_skeleton() -> None:
+                        row_fail = upsert_jav_metadata(session, code,
+                            title_ko=f"[{code}] (수집 실패/정보 없음)",
+                            folder_path=(stored_folder_path or db_folder_path),
+                            cover_image_local_path=local_cover, # 로컬 이미지 경로 등록
+                            analysis_status="FAILED_CRAWL"
+                        )
+                        sync_product_from_metadata_row(session, row_fail)
+                        commit_with_retry(session)
+
+                    run_write_txn(session, _persist_skeleton)
                 
                 return {"error": "crawling_failed", "product_code": code, "skeleton_saved": True}
                 
@@ -541,143 +546,156 @@ async def run_crawler_for_video_path(
                         f"⚠️ {code} 시놉시스 KO가 비어 있습니다. 제목만 저장하고 계속합니다."
                     )
 
+        # 5. 자산 처리 (Assets - 표지 다운로드) — 네트워크·파일 쓰기라 재시도 불가.
+        #    DB 트랜잭션 재시도 밖에서 1회만 수행한다.
+        local_cover_path = await assets_handler.download_cover_image(db_cover_url, code)
+
         # 4. DB Upsert (Persistence)
+        row_id = 0
         with get_db_session_ctx() as session:
             from javstory.library.metadata_edit import (
                 harvest_merge_empty_only,
                 is_metadata_manual_protected,
             )
-
-            existing_row = session.query(JAVMetadata).filter_by(product_code=code).first()
-            merge_empty_only = harvest_merge_empty_only(
-                existing_row,
-                force_rebuild=force_rebuild_story_context,
-            )
-            if is_metadata_manual_protected(existing_row) and force_rebuild_story_context:
-                log_ts(
-                    f"✅ {code} 수동 편집 메타데이터 — 빈 크롤·번역 결과로 필드를 지우지 않습니다."
-                )
-
-            # [4-1] 제목·시놉시스: KO는 LLM, title_en / title_zh_* / synopsis_en / synopsis_zh_* 는 일본어 원문과 동일 문자열
-
-            _ja_crawl = (original_title or "").strip()
-            if not _ja_crawl or _is_boilerplate_title(_ja_crawl):
-                _ja_crawl = raw_title if not _has_hangul(raw_title) else _ja_crawl
-            _t_ja = (str(trans_res.get("title_ja") or "").strip() or _ja_crawl or raw_title or "").strip()
-            _s_ja = (str(trans_res.get("synopsis_ja") or raw_synopsis) or "").strip() or (raw_synopsis or "")
-            _ko_scraped = (
-                raw_title
-                if (
-                    _has_hangul(raw_title)
-                    and _looks_like_ko(raw_title, min_hangul=1)
-                    and not _is_boilerplate_title(raw_title)
-                )
-                else None
-            )
-            titles = {
-                "title_ja": _t_ja,
-                "title_ko": trans_res.get("title_ko") or _ko_scraped or raw_title,
-                "title_en": _t_ja,
-                "title_zh_cn": _t_ja,
-                "title_zh_tw": _t_ja,
-            }
-            synopses = {
-                "synopsis_ja": _s_ja,
-                # trans_res.get(..., raw_synopsis) 폴백은 KO 번역이 실패했을 때(dict에
-                # 키가 없을 때) 미번역 일본어 원문을 "번역 결과"인 것처럼 synopsis_ko에
-                # 그대로 저장하는 버그였다 — 번역 안 됐으면 빈 문자열로 남겨야
-                # UI(LibraryDetailPanel)의 overall_summary/synopsis_ko/synopsis_ja
-                # 폴백 체인이 정상적으로 synopsis_ja를 보여준다.
-                "synopsis_ko": trans_res.get("synopsis_ko") or "",
-                "synopsis_en": _s_ja,
-                "synopsis_zh_cn": _s_ja,
-                "synopsis_zh_tw": _s_ja,
-            }
-
-            # 배우·장르·제작사: 마스터 테이블(리졸버) 전용, LLM 병합 없음
-            actors_ko = tagify(resolved_actors["ko"])
-            actors_romaji = tagify(resolved_actors["romaji"])
-            actors_zh_cn = tagify(resolved_actors["zh_cn"])
-            actors_zh_tw = tagify(resolved_actors["zh_tw"])
-
-            genres_ko = tagify(resolved_genres["ko"])
-            genres_en = tagify(resolved_genres["en"])
-            genres_zh_cn = tagify(resolved_genres["zh_cn"])
-            genres_zh_tw = tagify(resolved_genres["zh_tw"])
-
-            maker_ko = resolved_maker["ko"]
-            maker_en = resolved_maker["en"]
-            maker_zh_cn = resolved_maker["zh_cn"]
-            maker_zh_tw = resolved_maker["zh_tw"]
-
-            row = upsert_jav_metadata(
-                session,
-                product_code=code,
-                merge_empty_only=merge_empty_only,
-                **titles,
-                original_title=original_title,
-                **synopses,
-                actors_ja=tagify(resolved_actors["ja"]),
-                actors_ko=actors_ko,
-                actors_romaji=actors_romaji,
-                actors_zh_cn=actors_zh_cn,
-                actors_zh_tw=actors_zh_tw,
-                genres_ja=tagify(resolved_genres["ja"]),
-                genres_ko=genres_ko,
-                genres_en=genres_en,
-                genres_zh_cn=genres_zh_cn,
-                genres_zh_tw=genres_zh_tw,
-                maker_ja=tagify(resolved_maker["ja"]),
-                maker_ko=maker_ko,
-                maker_en=maker_en,
-                maker_zh_cn=maker_zh_cn,
-                maker_zh_tw=maker_zh_tw,
-                cover_image_url=db_cover_url,
-                release_date=tagify(db_release_date),
-                actors=tagify(resolved_actors["ja"]),
-                title=titles["title_ko"],
-                synopsis=synopses["synopsis_ko"],
-                genres=genres_ko,
-                maker=maker_ko,
-                folder_path=(stored_folder_path or db_folder_path),
-                favorite_score=db_favorite_score,
-                favorite_sources=db_favorite_sources,
-                crawl_sources_json=db_crawl_sources,
-                # 정상 저장 경로이므로 이전 실패(FAILED_CRAWL) 흔적을 지운다 — 안 그러면
-                # 재크롤이 성공해도 라이브러리에서 계속 "미수집"으로 표시된다.
-                analysis_status=None,
-            )
-
-            # 폴더/영상 경로가 확정되는 시점에 1회 마커 감지 후 DB 저장
-            try:
-                from javstory.library.path_markers import (
-                    path_contains_mopa_marker,
-                    path_contains_self_subtitle_marker,
-                )
-
-                vp = path_obj if path_obj.is_file() else None
-                row.is_hardcoded = bool(path_contains_self_subtitle_marker(vp, stored_folder_path, code))
-                row.is_mopa = bool(path_contains_mopa_marker(vp, stored_folder_path))
-            except Exception:
-                pass
-
-            # 5. 자산 처리 (Assets - 표지 다운로드 등)
-            local_cover_path = await assets_handler.download_cover_image(db_cover_url, code)
-            if local_cover_path:
-                row.cover_image_local_path = local_cover_path
-
             from javstory.harvest.product_repository import sync_product_from_metadata_row
             from javstory.utils.actress_profile import sync_actress_works_for_product
 
-            sync_product_from_metadata_row(session, row)
-            sync_actress_works_for_product(session, code, source="harvest")
-            commit_with_retry(session)
+            def _persist() -> int:
+                """upsert + products/actress 동기화 + commit 을 한 unit-of-work 로.
+
+                `run_write_txn` 이 `database is locked` 시 이 함수를 통째로 재실행하므로,
+                세션을 쓰는 조회는 매번 새로 하고 부수효과(네트워크·파일)는 두지 않는다.
+                """
+                existing_row = session.query(JAVMetadata).filter_by(product_code=code).first()
+                merge_empty_only = harvest_merge_empty_only(
+                    existing_row,
+                    force_rebuild=force_rebuild_story_context,
+                )
+                if is_metadata_manual_protected(existing_row) and force_rebuild_story_context:
+                    log_ts(
+                        f"✅ {code} 수동 편집 메타데이터 — 빈 크롤·번역 결과로 필드를 지우지 않습니다."
+                    )
+
+                # [4-1] 제목·시놉시스: KO는 LLM, title_en / title_zh_* / synopsis_en / synopsis_zh_* 는 일본어 원문과 동일 문자열
+                _ja_crawl = (original_title or "").strip()
+                if not _ja_crawl or _is_boilerplate_title(_ja_crawl):
+                    _ja_crawl2 = raw_title if not _has_hangul(raw_title) else _ja_crawl
+                else:
+                    _ja_crawl2 = _ja_crawl
+                _t_ja = (str(trans_res.get("title_ja") or "").strip() or _ja_crawl2 or raw_title or "").strip()
+                _s_ja = (str(trans_res.get("synopsis_ja") or raw_synopsis) or "").strip() or (raw_synopsis or "")
+                _ko_scraped = (
+                    raw_title
+                    if (
+                        _has_hangul(raw_title)
+                        and _looks_like_ko(raw_title, min_hangul=1)
+                        and not _is_boilerplate_title(raw_title)
+                    )
+                    else None
+                )
+                titles = {
+                    "title_ja": _t_ja,
+                    "title_ko": trans_res.get("title_ko") or _ko_scraped or raw_title,
+                    "title_en": _t_ja,
+                    "title_zh_cn": _t_ja,
+                    "title_zh_tw": _t_ja,
+                }
+                synopses = {
+                    "synopsis_ja": _s_ja,
+                    # trans_res.get(..., raw_synopsis) 폴백은 KO 번역이 실패했을 때(dict에
+                    # 키가 없을 때) 미번역 일본어 원문을 "번역 결과"인 것처럼 synopsis_ko에
+                    # 그대로 저장하는 버그였다 — 번역 안 됐으면 빈 문자열로 남겨야
+                    # UI(LibraryDetailPanel)의 overall_summary/synopsis_ko/synopsis_ja
+                    # 폴백 체인이 정상적으로 synopsis_ja를 보여준다.
+                    "synopsis_ko": trans_res.get("synopsis_ko") or "",
+                    "synopsis_en": _s_ja,
+                    "synopsis_zh_cn": _s_ja,
+                    "synopsis_zh_tw": _s_ja,
+                }
+
+                # 배우·장르·제작사: 마스터 테이블(리졸버) 전용, LLM 병합 없음
+                actors_ko = tagify(resolved_actors["ko"])
+                actors_romaji = tagify(resolved_actors["romaji"])
+                actors_zh_cn = tagify(resolved_actors["zh_cn"])
+                actors_zh_tw = tagify(resolved_actors["zh_tw"])
+
+                genres_ko = tagify(resolved_genres["ko"])
+                genres_en = tagify(resolved_genres["en"])
+                genres_zh_cn = tagify(resolved_genres["zh_cn"])
+                genres_zh_tw = tagify(resolved_genres["zh_tw"])
+
+                maker_ko = resolved_maker["ko"]
+                maker_en = resolved_maker["en"]
+                maker_zh_cn = resolved_maker["zh_cn"]
+                maker_zh_tw = resolved_maker["zh_tw"]
+
+                row = upsert_jav_metadata(
+                    session,
+                    product_code=code,
+                    merge_empty_only=merge_empty_only,
+                    **titles,
+                    original_title=original_title,
+                    **synopses,
+                    actors_ja=tagify(resolved_actors["ja"]),
+                    actors_ko=actors_ko,
+                    actors_romaji=actors_romaji,
+                    actors_zh_cn=actors_zh_cn,
+                    actors_zh_tw=actors_zh_tw,
+                    genres_ja=tagify(resolved_genres["ja"]),
+                    genres_ko=genres_ko,
+                    genres_en=genres_en,
+                    genres_zh_cn=genres_zh_cn,
+                    genres_zh_tw=genres_zh_tw,
+                    maker_ja=tagify(resolved_maker["ja"]),
+                    maker_ko=maker_ko,
+                    maker_en=maker_en,
+                    maker_zh_cn=maker_zh_cn,
+                    maker_zh_tw=maker_zh_tw,
+                    cover_image_url=db_cover_url,
+                    release_date=tagify(db_release_date),
+                    actors=tagify(resolved_actors["ja"]),
+                    title=titles["title_ko"],
+                    synopsis=synopses["synopsis_ko"],
+                    genres=genres_ko,
+                    maker=maker_ko,
+                    folder_path=(stored_folder_path or db_folder_path),
+                    favorite_score=db_favorite_score,
+                    favorite_sources=db_favorite_sources,
+                    crawl_sources_json=db_crawl_sources,
+                    # 정상 저장 경로이므로 이전 실패(FAILED_CRAWL) 흔적을 지운다 — 안 그러면
+                    # 재크롤이 성공해도 라이브러리에서 계속 "미수집"으로 표시된다.
+                    analysis_status=None,
+                )
+
+                # 폴더/영상 경로가 확정되는 시점에 1회 마커 감지 후 DB 저장
+                try:
+                    from javstory.library.path_markers import (
+                        path_contains_mopa_marker,
+                        path_contains_self_subtitle_marker,
+                    )
+
+                    vp = path_obj if path_obj.is_file() else None
+                    row.is_hardcoded = bool(path_contains_self_subtitle_marker(vp, stored_folder_path, code))
+                    row.is_mopa = bool(path_contains_mopa_marker(vp, stored_folder_path))
+                except Exception:
+                    pass
+
+                if local_cover_path:
+                    row.cover_image_local_path = local_cover_path
+
+                sync_product_from_metadata_row(session, row)
+                sync_actress_works_for_product(session, code, source="harvest")
+                # commit_with_retry: commit 단계 락은 여기서 rollback+재시도.
+                # upsert_jav_metadata 의 flush 단계에서 락이 나면 예외가 그대로 올라가
+                # run_write_txn 이 _persist 전체를 재실행한다(flush 만 재시도는 불가능).
+                commit_with_retry(session)
+                # commit 후 expire 되기 전에 id 확보 (세션 종료 후 접근 시 DetachedInstanceError)
+                return int(getattr(row, "id", 0) or 0)
+
+            row_id = run_write_txn(session, _persist)
             log_ts(f"✅ {code} 수집 및 DB 저장 완료 (한국어 번역 + EN/ZH 제목·시놉은 일본어 원문, 배우·장르·제작사는 DB 매핑)")
             if progress_cb:
                 progress_cb(code, "DB 저장 완료", 70)
-            # 주의: SQLAlchemy는 commit 후 객체 속성을 expire할 수 있어,
-            # session 종료 후 row.id 접근 시 DetachedInstanceError가 날 수 있다.
-            row_id = int(getattr(row, "id", 0) or 0)
 
         if _harvest_should_run_story_context(enable_story_context):
             from javstory.translation.story_grok_module import run_story_grok_after_harvest_async

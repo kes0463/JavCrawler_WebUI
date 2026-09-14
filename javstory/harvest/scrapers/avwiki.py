@@ -300,7 +300,7 @@ def fetch_work_info(
     *,
     base_url: str = BASE_URL,
     path_template: str = WORK_PATH_TEMPLATE,
-    timeout: float = 30.0,
+    timeout: float = 12.0,
     session: Optional[requests.Session] = None,
     use_playwright: bool = False,
     playwright_headless: bool = True,

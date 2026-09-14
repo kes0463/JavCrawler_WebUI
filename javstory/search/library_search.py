@@ -12,12 +12,23 @@ import time
 from dataclasses import dataclass
 from typing import Any, Iterable, List, Sequence
 
-_docs_cache: List["_LibraryDoc"] | None = None
+# (timestamp, docs) — TTL 만료 시 재조회. 예전엔 무제한 캐시라 신규 하베스트·메타 수정이
+# 웹서버 재시작 전까지 BM25/메타데이터 채널·임베딩 히트 제목에 반영 안 됐다.
+_docs_cache: tuple[float, List["_LibraryDoc"]] | None = None
 _docs_cache_lock = threading.Lock()
+_docs_cache_version = 0
+_DOCS_CACHE_TTL_SEC = 60.0
+_DOCS_CACHE_TTL_ENV = "JAVSTORY_LIBRARY_SEARCH_DOCS_CACHE_TTL"
 _embed_result_cache: dict[str, tuple[float, list, dict[str, Any]]] = {}
 _embed_result_cache_lock = threading.Lock()
 _EMBED_RESULT_CACHE_TTL_SEC = 600.0
 _EMBED_RESULT_CACHE_MAX = 48
+
+# BM25는 코퍼스 전체(전 작품) 토큰화 + IDF 계산 비용이 커서, docs 캐시가 갱신될 때만
+# 다시 빌드한다. 키는 _docs_cache_version — id(docs)는 GC 후 메모리 주소가 재사용되면
+# 다른 리스트끼리 충돌할 수 있어(드물지만 실제 버그) 명시적 카운터를 쓴다.
+_bm25_index_cache: tuple[int, Any] | None = None
+_bm25_index_cache_lock = threading.Lock()
 
 try:
     from rank_bm25 import BM25Okapi
@@ -187,6 +198,47 @@ def embedding_search_thresholds_from_env() -> dict[str, float]:
         "search_relative_ratio": round(_embedding_relative_ratio_from_env(), 4),
         "search_max_gap": round(_embedding_max_gap_from_env(), 4),
     }
+
+def _docs_cache_ttl() -> float:
+    raw = (os.environ.get(_DOCS_CACHE_TTL_ENV, "") or "").strip()
+    if not raw:
+        return _DOCS_CACHE_TTL_SEC
+    try:
+        return max(5.0, float(raw))
+    except ValueError:
+        return _DOCS_CACHE_TTL_SEC
+
+
+def invalidate_library_docs_cache() -> None:
+    """라이브러리 메타데이터 변경(수정 등) 시 호출 — BM25/메타데이터 검색용 문서 캐시를 즉시 비운다.
+
+    TTL(기본 60초)이 안전망 역할을 하므로 모든 변경 경로에서 호출하지 않아도 결국은
+    반영되지만, 수동 편집처럼 호출 지점이 명확한 곳은 즉시 반영하는 게 낫다.
+    """
+    global _docs_cache, _docs_cache_version
+    with _docs_cache_lock:
+        _docs_cache = None
+        _docs_cache_version += 1
+
+
+def _get_bm25_ranker(docs: Sequence["_LibraryDoc"], *, version: int) -> Any:
+    """docs 캐시 세대(version) 단위로 BM25 인덱스를 캐시.
+
+    토큰화 + IDF 계산은 코퍼스 전체 크기에 비례해 비싸다. docs 캐시가 갱신될 때만
+    (버전이 바뀔 때만) 재빌드한다.
+    """
+    global _bm25_index_cache
+    with _bm25_index_cache_lock:
+        if _bm25_index_cache is not None and _bm25_index_cache[0] == version:
+            return _bm25_index_cache[1]
+
+    tokenized_docs = [_tokenize(doc.text) for doc in docs]
+    ranker = BM25Okapi(tokenized_docs) if BM25Okapi is not None else _FallbackBM25(tokenized_docs)
+
+    with _bm25_index_cache_lock:
+        _bm25_index_cache = (version, ranker)
+    return ranker
+
 
 def _embed_result_cache_ttl() -> float:
     raw = (os.environ.get("JAVSTORY_EMBEDDING_SEARCH_CACHE_TTL", "") or "").strip()
@@ -494,10 +546,14 @@ class HybridLibrarySearch:
         ]
 
     def _load_docs(self) -> List[_LibraryDoc]:
-        global _docs_cache
+        global _docs_cache, _docs_cache_version
+        now = time.time()
+        ttl = _docs_cache_ttl()
         with _docs_cache_lock:
             if _docs_cache is not None:
-                return _docs_cache
+                ts, docs = _docs_cache
+                if now - ts < ttl:
+                    return docs
         with get_db_session_ctx() as session:
             rows = session.query(JAVMetadata).all()
             docs = [
@@ -511,15 +567,17 @@ class HybridLibrarySearch:
                 if str(row.product_code or "").strip()
             ]
         with _docs_cache_lock:
-            _docs_cache = docs
+            _docs_cache = (now, docs)
+            _docs_cache_version += 1
             return docs
 
     def _search_bm25(self, query: str, docs: Sequence[_LibraryDoc], *, top_k: int) -> List[_SearchResult]:
-        tokenized_docs = [_tokenize(doc.text) for doc in docs]
         query_tokens = _tokenize(query)
         if not query_tokens:
             return []
-        ranker = BM25Okapi(tokenized_docs) if BM25Okapi is not None else _FallbackBM25(tokenized_docs)
+        with _docs_cache_lock:
+            version = _docs_cache_version
+        ranker = _get_bm25_ranker(docs, version=version)
         scores = ranker.get_scores(query_tokens)
         ranked = sorted(
             zip(docs, scores),
@@ -698,4 +756,5 @@ __all__ = [
     "HybridLibrarySearch",
     "clear_embed_search_cache",
     "embedding_search_thresholds_from_env",
+    "invalidate_library_docs_cache",
 ]

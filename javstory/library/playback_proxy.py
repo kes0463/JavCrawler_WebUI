@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import math
 import os
 import re
 import shutil
@@ -15,7 +16,12 @@ from pathlib import Path
 from typing import Any, Callable, Literal, Optional
 
 from javstory.config.app_config import DATA_ROOT
-from javstory.utils.ffmpeg_path import path_for_ffmpeg
+from javstory.utils.ffmpeg_path import (
+    FFMPEG_MISSING_MESSAGE,
+    ffmpeg_available,
+    ffprobe_available,
+    path_for_ffmpeg,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -42,8 +48,19 @@ _FFMPEG_TIME_RE = re.compile(r"time=(\d+):(\d+):(\d+(?:\.\d+)?)")
 
 _HLS_PLAYLIST = "playlist.m3u8"
 _HLS_SEGMENT_GLOB = "seg_*.ts"
+_HLS_BUILDING_MARKER = ".building"
+_HLS_COMPLETE_MARKER = ".complete"
+_ONDEMAND_MARKER = ".ondemand"        # 온디맨드(가상 VOD 재생목록) 빌드 디렉터리 표시
 _PROXY_CACHE_VERSION = "hlsv3"
 _HLS_SEGMENT_SEC = 4
+
+# 온디맨드(시크 지점 우선 변환) 모드 — 재인코딩이 필요한 소스에만 적용.
+# 전체 길이 가상 VOD 재생목록(ENDLIST 포함)을 즉시 깔고, 세그먼트는 블록 단위로
+# 필요 시 생성한다. hls.js가 항상 정상 VOD로 인식 → 처음부터 재생·전체 탐색 가능.
+_ONDEMAND_BLOCK_SEGMENTS = 8          # 한 번의 ffmpeg 실행이 담당하는 세그먼트 수(≈32초)
+_ONDEMAND_SEGMENT_WAIT_SEC = 30.0     # 세그먼트 요청 후 최대 대기(초)
+_ONDEMAND_MIN_RUN_SEC = 2.0           # 이 시간 안에 시작한 실행은 시크로 죽이지 않음(스래싱 방지)
+_ONDEMAND_RUN_PLAYLIST_GLOB = ".run_*"   # per-run 재생목록(.m3u8 및 .m3u8.tmp)
 
 
 def _building_payload(key: str) -> dict[str, Any]:
@@ -56,9 +73,19 @@ def _building_payload(key: str) -> dict[str, Any]:
         "ready": False,
         "needs_proxy": True,
         "status": "building",
+        "complete": False,
         "progress": progress,
         "eta_sec": eta,
     }
+
+
+def _hls_ondemand_enabled() -> bool:
+    """온디맨드(시크 지점 우선 변환) HLS를 켤지 여부. 기본 켜짐.
+
+    끄면 재인코딩 소스도 t=0부터 순차 변환하는 점진적(#1) 방식만 쓴다.
+    """
+    raw = (os.environ.get("JAVSTORY_PLAYBACK_HLS_ONDEMAND", "1") or "1").strip().lower()
+    return raw not in ("0", "false", "no", "off")
 
 
 def _playback_proxy_timeout_sec() -> int | None:
@@ -516,6 +543,92 @@ def _proxy_hls_ready(hls_dir: Path) -> bool:
         return False
 
 
+def _playlist_has_endlist(hls_dir: Path) -> bool:
+    """재생목록 끝에 #EXT-X-ENDLIST 가 있는지(마커와 무관한 raw 검사)."""
+    try:
+        with open(hls_dir / _HLS_PLAYLIST, "rb") as f:
+            try:
+                f.seek(-512, os.SEEK_END)
+            except OSError:
+                f.seek(0)
+            tail = f.read().decode("utf-8", errors="ignore")
+    except OSError:
+        return False
+    return "#EXT-X-ENDLIST" in tail
+
+
+def _proxy_hls_complete(hls_dir: Path) -> bool:
+    """전체 변환이 끝나 그대로 서빙 가능한 상태인지.
+
+    - `.building` 마커가 있으면 아직 진행 중(온디맨드 방식은 시작하자마자 ENDLIST가
+      들어간 가상 재생목록을 깔기 때문에 ENDLIST만으로는 판단할 수 없다).
+    - `.complete` 마커가 있으면 완료.
+    - 마커가 없는 레거시 캐시는 재생목록 끝의 #EXT-X-ENDLIST로 판정.
+    """
+    if (hls_dir / _HLS_BUILDING_MARKER).exists():
+        return False
+    if (hls_dir / _HLS_COMPLETE_MARKER).exists():
+        return True
+    return _playlist_has_endlist(hls_dir)
+
+
+def _proxy_hls_playable(hls_dir: Path) -> bool:
+    """미완성이어도 재생을 시작할 수 있는 상태인지.
+
+    **온디맨드 빌드만** 해당한다(`.ondemand` 마커 존재). 온디맨드는 전체 세그먼트를
+    나열한 가상 VOD 재생목록(ENDLIST 포함)을 시작 시 깔기 때문에, 첫 세그먼트만
+    있으면 hls.js가 정상 VOD로 인식해 처음부터 재생 + 전체 탐색이 된다.
+
+    순차(스트림카피) 빌드는 재생목록이 점진적으로 커지므로 완료 전까지는 재생 불가
+    (완료되면 `_proxy_hls_complete`가 True).
+    """
+    if _proxy_hls_complete(hls_dir):
+        return True
+    if not (hls_dir / _ONDEMAND_MARKER).exists():
+        return False
+    playlist = hls_dir / _HLS_PLAYLIST
+    try:
+        if not playlist.is_file() or playlist.stat().st_size <= 0:
+            return False
+        first = hls_dir / "seg_00000.ts"
+        return first.is_file() and first.stat().st_size > 0
+    except OSError:
+        return False
+
+
+def _hls_build_age_sec(hls_dir: Path) -> float | None:
+    """진행 중 HLS 빌드의 마지막 디스크 갱신 이후 경과(초). 산출물이 없으면 None.
+
+    순차 방식은 세그먼트마다 재생목록을 다시 쓰지만, 온디맨드 방식은 재생목록을
+    시작 시 한 번만 쓰므로 최신 세그먼트 mtime도 함께 본다. 이 값이 오래되면
+    (프로세스 크래시 등으로) 죽은 빌드로 보고 재시작/재개한다.
+    """
+    newest: float | None = None
+    for name in (_HLS_PLAYLIST, _HLS_BUILDING_MARKER):
+        try:
+            m = (hls_dir / name).stat().st_mtime
+            newest = m if newest is None else max(newest, m)
+        except OSError:
+            pass
+    try:
+        for seg in hls_dir.glob(_HLS_SEGMENT_GLOB):
+            m = seg.stat().st_mtime
+            newest = m if newest is None else max(newest, m)
+    except OSError:
+        pass
+    if newest is None:
+        return None
+    return max(0.0, time.time() - newest)
+
+
+def _is_live_hls_build(hls_dir: Path) -> bool:
+    """변환이 지금 이 순간 진행 중인 (아직 미완료) 빌드 디렉터리인지."""
+    if _proxy_hls_complete(hls_dir):
+        return False
+    age = _hls_build_age_sec(hls_dir)
+    return age is not None and age < _STALE_TMP_SEC
+
+
 def cache_max_bytes() -> int:
     """프록시 캐시 용량 상한(바이트). 기본 30GB, 0 이하이면 무제한(매우 큼)."""
     raw = (os.environ.get("JAVSTORY_PLAYBACK_CACHE_MAX_GB", "30") or "30").strip()
@@ -551,6 +664,13 @@ def proxy_cache_stats() -> dict[str, int]:
 
 def clear_proxy_cache() -> dict[str, int]:
     """프록시 캐시(HLS 디렉터리·레거시 MP4·tmp)를 모두 삭제한다."""
+    # 진행 중인 온디맨드 빌드부터 멈춘다(ffmpeg kill).
+    for build in list(_ONDEMAND.values()):
+        try:
+            build.stop()
+        except Exception:
+            pass
+    _ONDEMAND.clear()
     d = proxy_cache_dir()
     freed = 0
     removed = 0
@@ -588,6 +708,9 @@ def evict_proxy_cache(
         try:
             st = hls_dir.stat()
         except OSError:
+            continue
+        # 지금 변환이 진행 중인(=재생 중일 수 있는) 빌드는 건드리지 않는다.
+        if _is_live_hls_build(hls_dir):
             continue
         size = _dir_size(hls_dir)
         entries.append((hls_dir, size, st.st_mtime))
@@ -832,11 +955,16 @@ def _proxy_file_ready(path: Path) -> bool:
 
 
 def proxy_is_ready(source: Path) -> bool:
-    return _proxy_hls_ready(proxy_hls_dir(source))
+    """HLS 프록시가 전체 변환까지 끝났는지(= 재생목록에 ENDLIST)."""
+    return _proxy_hls_complete(proxy_hls_dir(source))
 
 
 def resolve_hls_dir_for_stream(source: Path) -> Path | None:
-    """HLS 스트리밍 핫패스 — ffprobe 없이 stat·캐시만 사용."""
+    """HLS 스트리밍 핫패스 — ffprobe 없이 stat·캐시만 사용.
+
+    변환이 진행 중이어도 첫 세그먼트가 나오면 디렉터리를 반환한다(점진적 재생).
+    아직 재생 불가한 동안에는 캐시에 넣지 않아, 세그먼트가 생기는 즉시 반영된다.
+    """
     if not source.is_file():
         return None
 
@@ -849,8 +977,9 @@ def resolve_hls_dir_for_stream(source: Path) -> Path | None:
     if cached and cached[0] == mtime and cached[1] == size:
         result = cached[2]
         if result is None:
+            # 프록시가 필요 없는 파일로 확정된 캐시 — 그대로 사용.
             return None
-        if not _proxy_hls_ready(result):
+        if not _proxy_hls_playable(result):
             _HLS_RESOLVE_CACHE.pop(key, None)
         else:
             try:
@@ -860,20 +989,20 @@ def resolve_hls_dir_for_stream(source: Path) -> Path | None:
             return result
 
     if not needs_browser_proxy_cached(source):
-        result: Path | None = None
-    else:
-        hls_dir = proxy_hls_dir(source)
-        if _proxy_hls_ready(hls_dir):
-            try:
-                os.utime(hls_dir, None)
-            except OSError:
-                pass
-            result = hls_dir
-        else:
-            result = None
+        _HLS_RESOLVE_CACHE[key] = (mtime, size, None)
+        return None
 
-    _HLS_RESOLVE_CACHE[key] = (mtime, size, result)
-    return result
+    hls_dir = proxy_hls_dir(source)
+    if _proxy_hls_playable(hls_dir):
+        try:
+            os.utime(hls_dir, None)
+        except OSError:
+            pass
+        _HLS_RESOLVE_CACHE[key] = (mtime, size, hls_dir)
+        return hls_dir
+
+    # 변환이 아직 첫 세그먼트 전 — 캐시하지 않고 다음 요청에서 다시 확인한다.
+    return None
 
 
 def get_proxy_job_state(source: Path) -> ProxyStatus | None:
@@ -966,17 +1095,33 @@ def prepare_playback_file(source: Path) -> dict[str, Any]:
         return payload
 
     if not source.is_file():
-        return _with_reason({"ready": False, "needs_proxy": False, "status": "failed", "error": "파일 없음"})
+        return _with_reason({"ready": False, "needs_proxy": False, "status": "failed", "error": "파일 없음", "complete": False})
 
     if not needs_browser_proxy(source):
-        return _with_reason({"ready": True, "needs_proxy": False, "status": "direct"})
-
-    if proxy_is_ready(source):
-        return _with_reason({"ready": True, "needs_proxy": True, "status": "ready"})
+        return _with_reason({"ready": True, "needs_proxy": False, "status": "direct", "complete": True})
 
     key = _job_key(source)
     hls_dir = proxy_hls_dir(source)
-    tmp_dir = hls_dir.with_name(f"{hls_dir.name}.tmp")
+
+    # 전체 변환 완료
+    if proxy_is_ready(source):
+        with _LOCK:
+            _JOBS[key] = {"status": "ready", "error": None}
+        return _with_reason({
+            "ready": True, "needs_proxy": True, "status": "ready",
+            "complete": True, "progress": 100.0,
+        })
+
+    def _playable_payload(progress: float | None, eta: float | None) -> dict[str, Any]:
+        """변환은 진행 중이지만 이미 재생 시작 가능한 상태의 응답."""
+        return {
+            "ready": True,
+            "needs_proxy": True,
+            "status": "building",
+            "complete": False,
+            "progress": progress,
+            "eta_sec": eta,
+        }
 
     with _LOCK:
         row = _JOBS.get(key)
@@ -990,37 +1135,57 @@ def prepare_playback_file(source: Path) -> dict[str, Any]:
                     "needs_proxy": True,
                     "status": "failed",
                     "error": err,
+                    "complete": False,
                 })
             if st == "building":
-                if proxy_is_ready(source):
-                    _JOBS[key] = {"status": "ready", "error": None}
-                    return _with_reason({"ready": True, "needs_proxy": True, "status": "ready"})
+                progress, eta = row.get("progress"), row.get("eta_sec")
+                if _proxy_hls_playable(hls_dir):
+                    return _with_reason(_playable_payload(progress, eta))
                 return _with_reason({
                     "ready": False,
                     "needs_proxy": True,
                     "status": "building",
-                    "progress": row.get("progress"),
-                    "eta_sec": row.get("eta_sec"),
+                    "complete": False,
+                    "progress": progress,
+                    "eta_sec": eta,
                 })
             if st == "ready":
-                if proxy_is_ready(source):
-                    return _with_reason({"ready": True, "needs_proxy": True, "status": "ready"})
+                # 완료 표시였으나 산출물이 사라짐 — 재시작을 위해 정리.
                 _JOBS.pop(key, None)
 
-    try:
-        tstat = tmp_dir.stat()
-        if tmp_dir.is_dir() or tstat.st_size > 0:
-            age = time.time() - tstat.st_mtime
-            if age < _STALE_TMP_SEC:
-                with _LOCK:
-                    _JOBS[key] = {"status": "building", "error": None}
-                return _with_reason(_building_payload(key))
-            logger.warning(
-                "Removing stale playback proxy tmp (age=%.0fs): %s", age, tmp_dir.name
-            )
-            _remove_path(tmp_dir)
-    except OSError:
-        pass
+    # 이 프로세스에 작업 기록이 없다.
+    # 온디맨드 빌더가 살아있으면(다른 요청이 방금 띄움) 그대로 진행 상황을 보고.
+    if key in _ONDEMAND:
+        with _LOCK:
+            _JOBS.setdefault(key, {"status": "building", "error": None})
+        if _proxy_hls_playable(hls_dir):
+            return _with_reason(_playable_payload(None, None))
+        return _with_reason(_building_payload(key))
+
+    age = _hls_build_age_sec(hls_dir)
+    # 산출물은 있는데 워커가 없다(웹서버 재시작 등) → 워커를 (재)기동한다.
+    # 온디맨드 빌드는 이미 만든 세그먼트를 이어받고, 순차 빌드는 처음부터 다시 만든다.
+    # 재생목록이 손상됐거나 너무 오래됐으면 통째로 지우고 새로 시작.
+    if age is not None and (age >= _STALE_TMP_SEC or not _proxy_hls_playable(hls_dir)):
+        logger.warning(
+            "Discarding stale/partial playback proxy HLS build (age=%.0fs): %s",
+            age, hls_dir.name,
+        )
+        _remove_path(hls_dir)
+
+    # 새 변환 작업을 띄우기 직전에만 ffmpeg/ffprobe 가용성 확인.
+    # 없으면 `[WinError 2]` 같은 모호한 메시지 대신 조치 가능한 안내를 돌려준다
+    # (진행 중이거나 이미 실패로 기록된 작업은 위에서 먼저 처리됨).
+    if not (ffmpeg_available() and ffprobe_available()):
+        with _LOCK:
+            _JOBS[key] = {"status": "failed", "error": FFMPEG_MISSING_MESSAGE}
+        return _with_reason({
+            "ready": False,
+            "needs_proxy": True,
+            "status": "failed",
+            "error": FFMPEG_MISSING_MESSAGE,
+            "complete": False,
+        })
 
     with _LOCK:
         _JOBS[key] = {"status": "building", "error": None}
@@ -1053,6 +1218,8 @@ def _run_ffmpeg(cmd: list[str], *, timeout: int | None = None) -> tuple[bool, st
         out = (exc.stdout or b"").decode("utf-8", errors="replace") if exc.stdout else ""
         tail = out[-2000:] if out else ""
         return False, tail or f"ffmpeg 시간 초과 ({timeout}s)"
+    except FileNotFoundError:
+        return False, FFMPEG_MISSING_MESSAGE
     except Exception as exc:
         return False, str(exc)
 
@@ -1069,6 +1236,8 @@ def _run_ffmpeg_progress(
         return _run_ffmpeg(cmd, timeout=timeout)
     try:
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    except FileNotFoundError:
+        return False, FFMPEG_MISSING_MESSAGE
     except Exception as exc:
         return False, str(exc)
 
@@ -1199,7 +1368,8 @@ def _clear_hls_tmp_dir(tmp_dir: Path) -> None:
     try:
         if tmp_dir.is_dir():
             for item in tmp_dir.iterdir():
-                if item.is_file():
+                # 점 파일(.building 등 빌드 마커)은 인코더 플랜 재시도 사이에도 보존.
+                if item.is_file() and not item.name.startswith("."):
                     item.unlink(missing_ok=True)
     except OSError:
         pass
@@ -1240,8 +1410,15 @@ def _run_hls_ffmpeg(
             "hls",
             "-hls_time",
             str(_HLS_SEGMENT_SEC),
+            # 정상 VOD 재생목록(끝에 #EXT-X-ENDLIST). 완료되면 서빙되므로 hls.js가
+            # 항상 유한 VOD로 인식 → 처음부터 재생 + 전체 탐색바 정상.
             "-hls_playlist_type",
             "vod",
+            # 전체 세그먼트를 재생목록에 유지. vod에선 기본 0이지만 명시.
+            "-hls_list_size",
+            "0",
+            # 완료 후에만 서빙하므로 temp_file 불필요(일부 ffmpeg 빌드에서 vod +
+            # temp_file 시 최종 재생목록이 .tmp로 남는 문제가 있어 뺀다).
             "-hls_flags",
             "independent_segments",
             "-hls_segment_filename",
@@ -1321,7 +1498,24 @@ def _build_proxy(
 
 
 def _run_proxy_job(source: Path, hls_dir: Path, key: str) -> None:
-    tmp_dir = hls_dir.with_name(f"{hls_dir.name}.tmp")
+    """변환 작업 진입점(스레드 타깃).
+
+    스트림카피 가능 여부·길이와 무관하게 모든 프록시 대상은 온디맨드(시크 지점
+    우선) 방식으로 변환한다 — 초반 블록만 끝나면 바로 재생을 시작하고 나머지는
+    백그라운드에서 이어서 변환하며, 앞으로 시크하면 그 블록을 우선 인코딩한다.
+    (길이를 못 구하면 가상 재생목록을 만들 수 없어 순차 방식으로 자동 폴백된다.)
+    """
+    if _hls_ondemand_enabled():
+        _run_ondemand_build(source, hls_dir, key)
+    else:
+        _run_sequential_build(source, hls_dir, key)
+
+
+def _run_sequential_build(source: Path, hls_dir: Path, key: str) -> None:
+    # 점진적 재생: 세그먼트가 만들어지는 즉시 브라우저가 가져갈 수 있도록
+    # 최종 디렉터리에 바로 쓴다(.tmp → rename 없음). 진행 중임은 .building 마커로
+    # 표시하고, 완료 판정은 재생목록의 #EXT-X-ENDLIST 로 한다.
+    marker = hls_dir / _HLS_BUILDING_MARKER
     duration_sec = _probe_duration_sec(source)
 
     def _on_progress(pct: float, eta: float | None) -> None:
@@ -1332,25 +1526,469 @@ def _run_proxy_job(source: Path, hls_dir: Path, key: str) -> None:
                 row["eta_sec"] = round(eta) if eta is not None else None
 
     try:
-        _remove_path(tmp_dir)
+        _remove_path(hls_dir)
+        _remove_path(hls_dir.with_name(f"{hls_dir.name}.tmp"))  # 구버전 잔재 정리
+        hls_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            marker.write_text("", encoding="utf-8")
+        except OSError:
+            pass
         ok, log = _build_proxy(
-            source, tmp_dir, duration_sec=duration_sec, on_progress=_on_progress
+            source, hls_dir, duration_sec=duration_sec, on_progress=_on_progress
         )
-        if ok and _proxy_hls_ready(tmp_dir):
-            if hls_dir.exists():
-                shutil.rmtree(hls_dir, ignore_errors=True)
-            tmp_dir.rename(hls_dir)
+        # 여기서는 마커 인지형 _proxy_hls_complete 대신 raw ENDLIST 검사를 쓴다
+        # (.building 마커를 우리가 방금 썼으므로 _proxy_hls_complete 는 항상 False).
+        if ok and _proxy_hls_ready(hls_dir) and _playlist_has_endlist(hls_dir):
+            try:
+                marker.unlink()
+            except OSError:
+                pass
+            try:
+                (hls_dir / _HLS_COMPLETE_MARKER).write_text("", encoding="utf-8")
+            except OSError:
+                pass
             with _LOCK:
                 _JOBS[key] = {"status": "ready", "error": None}
             logger.info("Playback proxy HLS ready: %s -> %s", source.name, hls_dir.name)
             _maybe_evict_after_build()
             return
-        _remove_path(tmp_dir)
+        _remove_path(hls_dir)
         err = log or "ffmpeg 변환 실패 (브라우저 호환 HLS 생성 불가)"
         logger.warning("Playback proxy HLS failed: %s (%s)", source, err[-400:])
         with _LOCK:
             _JOBS[key] = {"status": "failed", "error": err}
     except Exception as exc:
-        _remove_path(tmp_dir)
+        _remove_path(hls_dir)
         with _LOCK:
             _JOBS[key] = {"status": "failed", "error": str(exc)}
+
+
+# ───────────────────────── 온디맨드(시크 지점 우선) HLS ─────────────────────────
+
+# key -> _OndemandBuild. prepare_playback_file / ensure_hls_segment 이 공유한다.
+_ONDEMAND: dict[str, "_OndemandBuild"] = {}
+
+
+def _segment_count(duration_sec: float) -> int:
+    if duration_sec <= 0:
+        return 0
+    return max(1, math.ceil(duration_sec / _HLS_SEGMENT_SEC))
+
+
+def _covered_segments(hls_dir: Path) -> set[int]:
+    """디스크에 온전히 존재하는 seg_NNNNN.ts 인덱스 집합."""
+    out: set[int] = set()
+    try:
+        for p in hls_dir.glob(_HLS_SEGMENT_GLOB):
+            try:
+                if p.stat().st_size <= 0:
+                    continue
+            except OSError:
+                continue
+            stem = p.stem  # seg_00042
+            num = stem.split("_", 1)[-1]
+            if num.isdigit():
+                out.add(int(num))
+    except OSError:
+        pass
+    return out
+
+
+def _write_virtual_vod_playlist(hls_dir: Path, duration_sec: float, count: int) -> None:
+    """전체 세그먼트를 나열한 정적 VOD 재생목록을 쓴다(재생 시작 전에).
+
+    모든 세그먼트는 강제 키프레임(4초 간격)으로 정확히 _HLS_SEGMENT_SEC 이고,
+    마지막만 나머지 길이. 플레이어는 이 재생목록으로 처음부터 어디든 탐색할 수 있고,
+    없는 세그먼트는 서버가 요청 시 생성한다.
+    """
+    lines = [
+        "#EXTM3U",
+        "#EXT-X-VERSION:3",
+        f"#EXT-X-TARGETDURATION:{_HLS_SEGMENT_SEC}",
+        "#EXT-X-MEDIA-SEQUENCE:0",
+        "#EXT-X-PLAYLIST-TYPE:VOD",
+        "#EXT-X-INDEPENDENT-SEGMENTS",
+    ]
+    for i in range(count):
+        seg_len = _HLS_SEGMENT_SEC
+        if i == count - 1:
+            rem = duration_sec - i * _HLS_SEGMENT_SEC
+            if 0 < rem < _HLS_SEGMENT_SEC:
+                seg_len = round(rem, 3)
+        lines.append(f"#EXTINF:{float(seg_len):.3f},")
+        lines.append(f"seg_{i:05d}.ts")
+    lines.append("#EXT-X-ENDLIST")
+    playlist = hls_dir / _HLS_PLAYLIST
+    tmp = playlist.with_suffix(".m3u8.tmp")
+    tmp.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    tmp.replace(playlist)
+
+
+class _OndemandBuild:
+    """재인코딩 소스용 온디맨드 HLS 빌더. 워커 스레드 1개 + 우선순위 큐."""
+
+    def __init__(self, source: Path, hls_dir: Path, key: str, duration_sec: float) -> None:
+        self.source = source
+        self.hls_dir = hls_dir
+        self.key = key
+        self.duration = duration_sec
+        self.count = _segment_count(duration_sec)
+        self.lock = threading.Lock()
+        self.covered: set[int] = set()
+        self.dead: set[int] = set()          # 인코딩해도 안 나오는 세그먼트(손상 구간 등)
+        self.priority: set[int] = set()      # 블록 시작 인덱스들
+        self.cur_proc: subprocess.Popen | None = None
+        self.cur_range: tuple[int, int] | None = None
+        self.cur_started: float = 0.0
+        self.status = "building"
+        self.error: str | None = None
+        self._stop = False
+        self._plans = _h264_transcode_plans()
+        # 블록마다 -ss 로 잘라 인코딩하므로 오디오는 항상 AAC 재인코딩(+고정 48kHz).
+        # 스트림카피는 -ss preroll 때문에 블록 경계에서 0.5초씩 겹친다.
+        self._audio_opts = ["-c:a", "aac", "-b:a", "128k", "-ar", "48000"]
+        self._input_extra = _ffmpeg_input_opts(source)
+
+    # ---- 외부에서 호출 ----
+    def request(self, seg: int) -> None:
+        """세그먼트 seg 를 우선 인코딩하도록 요청(시크 시 세그먼트 라우트가 호출)."""
+        if seg < 0 or seg >= self.count:
+            return
+        blk = (seg // _ONDEMAND_BLOCK_SEGMENTS) * _ONDEMAND_BLOCK_SEGMENTS
+        with self.lock:
+            if seg in self.covered:
+                return
+            self.priority.add(blk)
+            cr = self.cur_range
+            # 현재 실행 블록 안이거나 "바로 다음 블록"이면 죽이지 않는다 — 순차 재생이
+            # 경계를 넘을 때마다 인코더를 죽였다 살리는 스래싱을 막는다(워커가 곧 도달).
+            near = cr is not None and cr[0] <= seg < cr[1] + _ONDEMAND_BLOCK_SEGMENTS
+            fresh = (time.time() - self.cur_started) < _ONDEMAND_MIN_RUN_SEC
+            proc = self.cur_proc if (not near and not fresh) else None
+        if proc is not None:
+            # 멀리 시크했다 → 현재 실행을 중단하고 워커가 우선 블록으로 점프하게 한다.
+            try:
+                proc.kill()
+            except Exception:
+                pass
+
+    def wait_for(self, seg: int, timeout: float) -> bool:
+        self.request(seg)
+        deadline = time.time() + timeout
+        seg_path = self.hls_dir / f"seg_{seg:05d}.ts"
+        while time.time() < deadline:
+            try:
+                if seg_path.is_file() and seg_path.stat().st_size > 0:
+                    return True
+            except OSError:
+                pass
+            with self.lock:
+                if self.status == "failed":
+                    return False
+            time.sleep(0.25)
+        return seg_path.is_file()
+
+    def seek_state(self) -> dict[str, Any]:
+        with self.lock:
+            return {
+                "status": self.status,
+                "covered": len(self.covered),
+                "count": self.count,
+                "cur_range": self.cur_range,
+            }
+
+    def stop(self) -> None:
+        with self.lock:
+            self._stop = True
+            proc = self.cur_proc
+        if proc is not None:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+
+    # ---- 워커 ----
+    def _next_block(self) -> tuple[int, int] | None:
+        """다음에 인코딩할 [start, end) 블록. 없으면 None(전부 커버/포기)."""
+        with self.lock:
+            done = self.covered | self.dead
+            # 1) 우선순위(시크) 블록 먼저
+            for blk in sorted(self.priority):
+                end = min(blk + _ONDEMAND_BLOCK_SEGMENTS, self.count)
+                if any(i not in done for i in range(blk, end)):
+                    return (blk, end)
+                self.priority.discard(blk)
+            # 2) 가장 앞의 미커버 세그먼트가 속한 블록
+            missing = next((i for i in range(self.count) if i not in done), None)
+            if missing is None:
+                return None
+            start = (missing // _ONDEMAND_BLOCK_SEGMENTS) * _ONDEMAND_BLOCK_SEGMENTS
+            end = min(start + _ONDEMAND_BLOCK_SEGMENTS, self.count)
+            return (start, end)
+
+    def _progress(self) -> None:
+        with self.lock:
+            done = len(self.covered | self.dead)
+            total = max(1, self.count)
+        pct = min(99.9, done / total * 100.0) if done < total else 100.0
+        with _LOCK:
+            row = _JOBS.get(self.key)
+            if row is not None and row.get("status") == "building":
+                row["progress"] = round(pct, 1)
+                row["eta_sec"] = None
+
+    def run(self) -> None:
+        marker = self.hls_dir / _HLS_BUILDING_MARKER
+        try:
+            self.hls_dir.mkdir(parents=True, exist_ok=True)
+            _remove_path(self.hls_dir.with_name(f"{self.hls_dir.name}.tmp"))
+            for name, txt in ((_HLS_BUILDING_MARKER, ""), (_ONDEMAND_MARKER, "")):
+                try:
+                    (self.hls_dir / name).write_text(txt, encoding="utf-8")
+                except OSError:
+                    pass
+            try:
+                (self.hls_dir / _HLS_COMPLETE_MARKER).unlink()
+            except OSError:
+                pass
+            # 이미 있는 세그먼트를 이어받고(웹서버 재시작 등), 가상 재생목록을 (재)기록.
+            with self.lock:
+                self.covered = _covered_segments(self.hls_dir)
+            _write_virtual_vod_playlist(self.hls_dir, self.duration, self.count)
+            self._progress()
+
+            last_log = ""
+            while True:
+                with self.lock:
+                    if self._stop:
+                        return
+                blk = self._next_block()
+                if blk is None:
+                    break
+                before = _covered_segments(self.hls_dir)
+                ok, log = self._encode_block(*blk)
+                last_log = log or last_log
+                after = _covered_segments(self.hls_dir)
+                with self.lock:
+                    self.covered |= after
+                self._progress()
+                progressed = bool(after - before)
+                with self.lock:
+                    stopping = self._stop
+                if not progressed and not stopping:
+                    # 이 블록은 인코딩해도 새 세그먼트가 안 나온다(손상 구간 등).
+                    if blk[0] == 0 and not self.covered:
+                        raise RuntimeError(log or "ffmpeg 블록 인코딩 실패(첫 블록)")
+                    with self.lock:
+                        self.dead |= set(range(blk[0], blk[1])) - self.covered
+                    logger.warning(
+                        "on-demand HLS: giving up on segments %d..%d (%s)",
+                        blk[0], blk[1] - 1, self.hls_dir.name,
+                    )
+
+            # 전부 커버 → 완료
+            try:
+                marker.unlink()
+            except OSError:
+                pass
+            try:
+                (self.hls_dir / _HLS_COMPLETE_MARKER).write_text("", encoding="utf-8")
+            except OSError:
+                pass
+            for run_pl in self.hls_dir.glob(_ONDEMAND_RUN_PLAYLIST_GLOB):
+                try:
+                    run_pl.unlink()
+                except OSError:
+                    pass
+            with self.lock:
+                self.status = "ready"
+            with _LOCK:
+                _JOBS[self.key] = {"status": "ready", "error": None}
+            logger.info("Playback proxy HLS (on-demand) ready: %s", self.hls_dir.name)
+            _maybe_evict_after_build()
+        except Exception as exc:  # noqa: BLE001
+            with self.lock:
+                self.status = "failed"
+                self.error = str(exc)
+            with _LOCK:
+                _JOBS[self.key] = {"status": "failed", "error": str(exc)}
+            logger.warning("Playback proxy HLS (on-demand) failed: %s (%s)", self.source, exc)
+        finally:
+            _ONDEMAND.pop(self.key, None)
+
+    def _encode_block(self, start: int, end: int) -> tuple[bool, str]:
+        """[start, end) 세그먼트를 단일 ffmpeg 실행으로 생성. 인코더 플랜 순차 폴백."""
+        from javstory.utils.ffmpeg_path import get_ffmpeg
+
+        ffmpeg = get_ffmpeg()
+        ss = start * _HLS_SEGMENT_SEC
+        length = (end - start) * _HLS_SEGMENT_SEC
+        run_pl = self.hls_dir / f".run_{start:05d}.m3u8"
+        seg_pattern = str(self.hls_dir / "seg_%05d.ts")
+        last_log = ""
+
+        def _seg_set() -> set[int]:
+            return {
+                i for i in range(start, end)
+                if (self.hls_dir / f"seg_{i:05d}.ts").is_file()
+            }
+
+        existing = _seg_set()
+        for idx, (_name, input_opts, video_opts) in enumerate(self._plans):
+            with self.lock:
+                if self._stop:
+                    return False, "stopped"
+            cmd = [
+                ffmpeg, "-hide_banner", "-y",
+                *input_opts,
+                *self._input_extra,
+                "-ss", f"{ss:.3f}",
+                "-i", path_for_ffmpeg(self.source),
+                "-t", f"{length:.3f}",
+                "-map", "0:v:0", "-map", "0:a:0?",
+                *video_opts,
+                # 4초 격자에 정확히 IDR을 박아 세그먼트 경계·독립성을 보장.
+                "-force_key_frames", "expr:gte(t,n_forced*%d)" % _HLS_SEGMENT_SEC,
+                *self._audio_opts,
+                # 블록마다 -ss 로 PTS가 0부터 다시 시작하므로, 이 블록의 전역 시작
+                # 위치(start*4초)만큼 출력 타임스탬프를 밀어준다 → 인접 블록이
+                # 하나의 연속 타임라인이 되어 EXT-X-DISCONTINUITY 없이 이어붙는다.
+                "-output_ts_offset", f"{ss:.3f}",
+                "-muxdelay", "0", "-muxpreload", "0",
+                "-f", "hls",
+                "-hls_time", str(_HLS_SEGMENT_SEC),
+                # per-run 재생목록은 무시하고 완료 시 삭제한다. event = 전부 유지 + ENDLIST 없음.
+                "-hls_playlist_type", "event",
+                "-hls_list_size", "0",
+                "-hls_flags", "independent_segments+temp_file+omit_endlist",
+                "-start_number", str(start),
+                "-hls_segment_filename", path_for_ffmpeg(Path(seg_pattern), output=True),
+                path_for_ffmpeg(run_pl, output=True),
+            ]
+            rc, log = self._spawn(cmd)
+            last_log = log or last_log
+            new_segs = _seg_set() - existing
+            with self.lock:
+                stopped = self._stop
+            if rc == 0 and not stopped:
+                # 이 플랜(인코더)로 정상 완료 → 이후 블록도 같은 인코더로 고정.
+                if len(self._plans) > 1:
+                    self._plans = [self._plans[idx]]
+                return bool(new_segs or _seg_set()), log
+            if new_segs:
+                # rc!=0 이지만 새 세그먼트가 생겼다 → 시크로 중단됐을 가능성.
+                # 성공 취급하고 워커가 다음(우선) 블록을 재평가하게 한다.
+                return True, log
+            if stopped:
+                return False, "stopped"
+        return False, last_log
+
+    def _spawn(self, cmd: list[str]) -> tuple[int, str]:
+        """ffmpeg 실행 + self.cur_proc 등록(시크 시 kill 가능). (returncode, tail) 반환."""
+        try:
+            proc = subprocess.Popen(
+                cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT
+            )
+        except FileNotFoundError:
+            return 1, FFMPEG_MISSING_MESSAGE
+        except Exception as exc:  # noqa: BLE001
+            return 1, str(exc)
+        start = int(cmd[cmd.index("-start_number") + 1])
+        end = min(start + _ONDEMAND_BLOCK_SEGMENTS, self.count)
+        with self.lock:
+            self.cur_proc = proc
+            self.cur_range = (start, end)
+            self.cur_started = time.time()
+        chunks: list[str] = []
+
+        def _drain() -> None:
+            if proc.stdout is None:
+                return
+            while True:
+                try:
+                    b = proc.stdout.read1(4096)
+                except (ValueError, OSError):
+                    break
+                if not b:
+                    break
+                chunks.append(b.decode("utf-8", errors="replace"))
+                if len(chunks) > 400:
+                    del chunks[:200]
+
+        reader = threading.Thread(target=_drain, daemon=True)
+        reader.start()
+        # 블록(≈32초 분량) 하나당 상한. 정상적으로는 수 초~수십 초면 끝난다.
+        blk_timeout = max(180.0, _ONDEMAND_BLOCK_SEGMENTS * _HLS_SEGMENT_SEC * 12)
+        try:
+            rc = proc.wait(timeout=blk_timeout)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            rc = 1
+        finally:
+            reader.join(timeout=3)
+            with self.lock:
+                self.cur_proc = None
+                self.cur_range = None
+        return int(rc), "".join(chunks)[-2000:]
+
+
+def _run_ondemand_build(source: Path, hls_dir: Path, key: str) -> None:
+    duration_sec = _probe_duration_sec(source)
+    if duration_sec <= 0:
+        # 길이를 못 구하면 가상 재생목록을 만들 수 없다 → 순차 방식으로.
+        _run_sequential_build(source, hls_dir, key)
+        return
+    build = _OndemandBuild(source, hls_dir, key, duration_sec)
+    _ONDEMAND[key] = build
+    build.run()
+
+
+def get_ondemand_seek_state(source: Path) -> dict[str, Any] | None:
+    build = _ONDEMAND.get(_job_key(source))
+    return build.seek_state() if build else None
+
+
+def ensure_hls_segment(
+    source: Path,
+    segment_name: str,
+    *,
+    timeout: float = _ONDEMAND_SEGMENT_WAIT_SEC,
+) -> Path | None:
+    """HLS 세그먼트 경로를 돌려준다. 온디맨드 빌드 중이고 아직 없으면 우선 생성 후 대기.
+
+    반환 None: (아직) 없음 → 라우트는 503(재시도) 또는 404 로 응답.
+    """
+    if (
+        not segment_name
+        or "/" in segment_name
+        or "\\" in segment_name
+        or ".." in segment_name
+        or not segment_name.endswith(".ts")
+        or not segment_name.startswith("seg_")
+    ):
+        return None
+    hls_dir = resolve_hls_dir_for_stream(source)
+    if hls_dir is None:
+        return None
+    seg_path = (hls_dir / segment_name).resolve()
+    try:
+        if seg_path.parent != hls_dir.resolve():
+            return None
+    except OSError:
+        return None
+    if seg_path.is_file():
+        try:
+            os.utime(hls_dir, None)
+        except OSError:
+            pass
+        return seg_path
+
+    build = _ONDEMAND.get(_job_key(source))
+    if build is None:
+        return None
+    num = segment_name[4:-3]
+    if not num.isdigit():
+        return None
+    if build.wait_for(int(num), timeout):
+        return seg_path if seg_path.is_file() else None
+    return None

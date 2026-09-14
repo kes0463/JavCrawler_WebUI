@@ -111,7 +111,9 @@ export default function LibraryView() {
   const [genreOpen, setGenreOpen] = useState(false);
   const [genreFiltering, setGenreFiltering] = useState(false);
   const [searchMessage, setSearchMessage] = useState<string | null>(null);
+  const [searchMessageKind, setSearchMessageKind] = useState<string | null>(null);
   const [searchModeUsed, setSearchModeUsed] = useState<string | null>(null);
+  const sortCorrectedForQRef = useRef<string | null>(null);
   const genreApiWarnedRef = useRef(false);
   const skipInitialFetchRef = useRef(boot.fromSession);
   const pendingScrollRef = useRef(boot.scrollTop);
@@ -224,7 +226,21 @@ export default function LibraryView() {
         const { items: newItems, total: t } = res;
         if (!append) {
           setSearchMessage(res.search_message ?? null);
+          setSearchMessageKind(res.search_message_kind ?? null);
           setSearchModeUsed(res.search_mode ?? null);
+          // 백엔드 mode가 진실. 휴리스틱이 놓친 개념어는 응답 후 유사도 정렬로 재보정.
+          if (res.search_mode === "hybrid") {
+            const qTerm = (q.q || "").trim();
+            if (sortCorrectedForQRef.current !== qTerm) {
+              sortCorrectedForQRef.current = qTerm;
+              setQuery(prev => {
+                if (prev.sort === "updated_at" || !prev.sort) {
+                  return { ...prev, sort: "similarity" };
+                }
+                return prev;
+              });
+            }
+          }
         }
         if (
           !append && !apiWarnedRef.current && newItems.length > 0
@@ -259,6 +275,7 @@ export default function LibraryView() {
           setItems([]);
           setTotal(0);
           setSearchMessage(null);
+          setSearchMessageKind(null);
           setSearchModeUsed(null);
         }
         if (!silent) {
@@ -307,18 +324,22 @@ export default function LibraryView() {
       setQuery(q => {
         const mode = q.search_mode ?? "auto";
         const trimmed = value.trim();
-        const looksNatural =
+        // 잠정 추정치 — 디바운스 중 즉시 유사도 정렬. 응답의 search_mode로 재보정.
+        const looksNaturalHeuristic =
           /\s/.test(trimmed)
           || /[가-힣]{4,}/.test(trimmed);
         const next: LibraryQuery = { ...q, q: value, page: 1 };
         if (
           trimmed
-          && (mode === "hybrid" || (mode === "auto" && looksNatural))
+          && (mode === "hybrid" || (mode === "auto" && looksNaturalHeuristic))
           && (q.sort === "updated_at" || q.sort === "similarity" || !q.sort)
         ) {
           next.sort = "similarity";
         } else if (!trimmed && q.sort === "similarity") {
           next.sort = "updated_at";
+        }
+        if (!trimmed) {
+          sortCorrectedForQRef.current = null;
         }
         return next;
       });
@@ -832,7 +853,7 @@ export default function LibraryView() {
       {searchMessage && (query.q || "").trim() && !isSemanticSearching && (
         <div className="flex flex-wrap items-center gap-2 rounded-xl border border-amber-500/25 bg-amber-500/10 px-3 py-2 text-sm text-amber-100/90">
           <span className="flex-1 min-w-0">{searchMessage}</span>
-          {searchMessage.includes("워밍업") && (
+          {searchMessageKind === "no_embeddings" && (
             <button
               type="button"
               className="shrink-0 h-8 px-3 rounded-lg bg-amber-500/20 hover:bg-amber-500/30 text-amber-100 text-xs"
@@ -843,6 +864,15 @@ export default function LibraryView() {
               }}
             >
               임베딩 워밍업
+            </button>
+          )}
+          {searchMessageKind === "connection_error" && (
+            <button
+              type="button"
+              className="shrink-0 h-8 px-3 rounded-lg bg-amber-500/20 hover:bg-amber-500/30 text-amber-100 text-xs"
+              onClick={() => loadItems(query, false)}
+            >
+              다시 시도
             </button>
           )}
         </div>

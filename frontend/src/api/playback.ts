@@ -109,12 +109,18 @@ export interface StreamPrepareResult {
   progress?: number | null;
   /** 예상 남은 시간(초) */
   eta_sec?: number | null;
+  /**
+   * 전체 HLS 변환 완료 여부. ready=true 이면서 complete=false 이면
+   * "재생은 시작 가능하지만 나머지 구간을 백그라운드 변환 중"을 뜻한다.
+   */
+  complete?: boolean;
 }
 
 export interface StreamPrepareProgress {
   proxyReason: string | null;
   progress: number | null;
   etaSec: number | null;
+  complete: boolean;
 }
 
 export const preparePlaybackStream = (
@@ -155,6 +161,7 @@ export async function waitForPlaybackStream(
       proxyReason: res.proxy_reason ?? null,
       progress: res.progress ?? null,
       etaSec: res.eta_sec ?? null,
+      complete: res.complete ?? res.status === "ready",
     });
     if (res.ready) return;
     if (res.status === "failed") {

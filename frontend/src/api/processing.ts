@@ -141,7 +141,7 @@ export type ProcessingWsEvent =
   | { type: "state"; stt: ProcessingQueueSection; subtitle: ProcessingQueueSection }
   | { type: "queue_started"; kind: ProcessingKind }
   | { type: "queue_finished"; kind: ProcessingKind }
-  | { type: "item_started"; kind: ProcessingKind; id: string }
+  | { type: "item_started"; kind: ProcessingKind; id: string; product_code?: string }
   | { type: "item_done"; kind: ProcessingKind; id: string; message?: string; progress?: number }
   | { type: "item_error"; kind: ProcessingKind; id: string; message: string }
   | { type: "item_cancelled"; kind: ProcessingKind; id: string }
@@ -165,8 +165,9 @@ export type ProcessingWsEvent =
       product_code: string;
       text: string;
       ts: string;
+      status?: "generating" | "ready";
     }
-  | { type: "content_clear"; kind: ProcessingKind; id: string };
+  | { type: "content_clear"; kind: ProcessingKind; id: string; product_code?: string };
 
 export function toQueueRow(item: ProcessingQueueItem) {
   return {

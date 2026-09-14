@@ -418,6 +418,31 @@ def _translation_chunk_cache_path(product_code: str, fingerprint: Dict[str, Any]
         return None
 
 
+def _clear_translation_chunk_cache_for_product(
+    product_code: str, *, log: Callable[[str], None] | None = None
+) -> int:
+    """번역이 정상 완료된 작품의 청크 캐시 파일을 모두 삭제.
+
+    캐시는 진행 중 재시도·재개용으로만 필요하며, 전체 번역이 성공적으로
+    끝나면 더 이상 쓸모가 없어 방치하면 파일이 계속 쌓인다.
+    """
+    removed = 0
+    try:
+        pc = _safe_cache_part((product_code or "").strip().upper())
+        cache_dir = _translation_chunk_cache_dir()
+        for entry in cache_dir.glob(f"{pc}_*.json"):
+            try:
+                entry.unlink()
+                removed += 1
+            except OSError:
+                continue
+    except Exception:
+        return removed
+    if removed and log:
+        log(f"[KO-TRANSLATE] 번역 완료 — 청크 캐시 {removed}개 삭제")
+    return removed
+
+
 def _cached_items_from_segments(tgt_segs: List[SimpleSegment]) -> List[Dict[str, Any]]:
     return [
         {
@@ -736,13 +761,14 @@ def _default_chunk_lines(tier: Dict[str, Any]) -> tuple[int, int]:
     return 40, 8
 
 
-#: provider별 청크·겹침 전용 env 접두사. 매핑에 없는 provider(gemini 등)는
+#: provider별 청크·겹침 전용 env 접두사. 매핑에 없는 provider는
 #: 공용 `JAVSTORY_TRANSLATION_CHUNK_*_LINES`만 적용된다.
 CHUNK_ENV_PREFIX_BY_PROVIDER: dict[str, str] = {
     "llamacpp": "LLAMACPP",
     "ollama": "OLLAMA",
     "openrouter": "OPENROUTER",
     "omniroute": "OMNIROUTE",
+    "gemini": "GEMINI",
 }
 
 
@@ -804,6 +830,85 @@ def _translation_concurrency(tier: Dict[str, Any]) -> int:
     return 1
 
 
+# ── Gemini 폴백 체인(RPM/일일 쿼터 자동 회피) ──────────────────────────
+# 프로세스 생존 기간 동안만 유지되는 in-memory 쿨다운 — 재시작 시 초기화되어도 무해
+# (쿨다운은 분/시간 단위 임시 회피용이라 재시작 직후 잠깐 재시도해 보는 정도는 괜찮다).
+_GEMINI_MODEL_COOLDOWN_UNTIL: dict[str, float] = {}
+_GEMINI_RPM_COOLDOWN_SEC = 70.0
+_GEMINI_DAILY_COOLDOWN_SEC = 6.0 * 3600.0
+
+
+def _gemini_model_available_at(model_id: str) -> float:
+    return _GEMINI_MODEL_COOLDOWN_UNTIL.get(model_id, 0.0)
+
+
+def _gemini_mark_cooldown(model_id: str, seconds: float, log: Callable[[str], None]) -> None:
+    until = time.time() + max(1.0, seconds)
+    _GEMINI_MODEL_COOLDOWN_UNTIL[model_id] = until
+    log(
+        f"[KO-TRANSLATE] Gemini {model_id} 쿨다운 {seconds:.0f}초 — "
+        f"{time.strftime('%H:%M:%S', time.localtime(until))} 이후 재시도"
+    )
+
+
+def _gemini_chain_order(chain: List[str]) -> List[str]:
+    """쿨다운 중이 아닌 모델은 원래(사용자 지정) 우선순위를 유지하고, 전부 쿨다운 중이면
+    가장 먼저 풀리는 모델을 앞으로 보낸다."""
+    now = time.time()
+
+    def _key(model_id: str) -> float:
+        until = _gemini_model_available_at(model_id)
+        return until if until > now else 0.0
+
+    return sorted(chain, key=_key)
+
+
+async def _route_gemini_chain(
+    router: Any,
+    messages: List[dict[str, str]],
+    chain: List[str],
+    *,
+    log: Callable[[str], None],
+    should_cancel: CancelCheck,
+) -> tuple[str, str]:
+    """체인의 각 모델을 순서대로 시도 — RPM/일일 쿼터 초과 시 해당 모델만 쿨다운시키고
+    즉시 다음 모델로 전환한다(같은 모델에 긴 백오프를 낭비하지 않음). (응답, 실제 사용 모델) 반환."""
+    from javstory.config.app_config import gemini_translation_llm_tier
+    from javstory.translation.llm_backoff import is_free_tier_daily_quota_exceeded
+
+    last_exc: BaseException | None = None
+    for model_id in _gemini_chain_order(chain):
+        if should_cancel and should_cancel():
+            raise STTCancelled()
+        # max_retries=1 + max_attempts=1: 같은 모델에 router.route()의 내부 백오프(최대 4회)와
+        # route_with_backoff의 백오프(최대 6회)가 이중으로 걸리면 한 모델에서 최대 ~8회·수십초를
+        # 태운 뒤에야 다음 모델로 넘어가 "즉시 failover"가 무색해진다 — 각각 1회로 낮춰 실패 즉시 전환한다.
+        tier_for_model = {**gemini_translation_llm_tier(model_id), "max_retries": 1}
+        try:
+            result = await route_with_backoff(
+                router,
+                messages,
+                tier_for_model,
+                log=_translation_retry_log(log),
+                should_cancel=should_cancel,
+                max_attempts=1,
+            )
+            return result, model_id
+        except STTCancelled:
+            raise
+        except Exception as e:
+            last_exc = e
+            cooldown = (
+                _GEMINI_DAILY_COOLDOWN_SEC
+                if is_free_tier_daily_quota_exceeded(e)
+                else _GEMINI_RPM_COOLDOWN_SEC
+            )
+            _gemini_mark_cooldown(model_id, cooldown, log)
+            log(f"[KO-TRANSLATE] Gemini {model_id} 실패 — 체인의 다음 모델로 전환: {e}")
+    assert last_exc is not None
+    raise last_exc
+
+
 def _build_chunks(segments: List[SimpleSegment], target_lines: int, overlap_lines: int) -> List[dict]:
     """자막을 `target_lines`줄 단위로 non-overlapping 분할한다(각 줄은 정확히 한 청크에서만 번역됨).
 
@@ -840,6 +945,68 @@ def _retry_translation_user_content(tier: Dict[str, Any], *, attempt: int) -> st
     if attempt == 1:
         return RETRY_TRANSLATION_PROMPT + tail
     return RETRY_TRANSLATION_PROMPT_STRICT + tail
+
+
+async def _retry_untranslated_lines_individually(
+    tgt_segs: List[SimpleSegment],
+    chunk_json: str,
+    tier: Dict[str, Any],
+    *,
+    route: Callable[[List[dict[str, str]]], Any],
+    log: Callable[[str], None],
+    idx: int,
+    total_chunks: int,
+) -> int:
+    """청크 전체 재시도가 모두 실패했을 때, 아직 일본어인 줄만 1줄씩 마지막으로 재시도.
+
+    여러 줄을 한 번에 보내면 그중 한 줄이 JSON 완전성 요건(require_complete)을
+    깨뜨려 청크 전체가 통째로 실패하는 경우가 많다. 실패한 줄만 격리해서
+    같은 모델로 다시 물으면 나머지 정상 줄까지 덩달아 버려지는 일을 막을 수 있다.
+    반환값: 새로 번역에 성공한 줄 수.
+    """
+    src_texts = _source_texts_from_chunk_json(chunk_json, len(tgt_segs))
+    sys_prompt = system_prompt_translation_chunk(tier)
+    fixed = 0
+    for i, seg in enumerate(tgt_segs):
+        ja_text = src_texts[i] if i < len(src_texts) else (seg.text or "")
+        if not ja_text.strip():
+            continue
+        if is_acceptable_ko_subtitle_line(seg.text or "", source_ja=ja_text):
+            continue
+        one_json = json.dumps([{"index": 0, "text": ja_text}], ensure_ascii=False)
+        messages = [
+            {"role": "system", "content": sys_prompt},
+            {
+                "role": "user",
+                "content": (
+                    "다음 한 줄만 자연스러운 구어체 한국어로 번역해 "
+                    "동일한 JSON 배열 형식으로만 답하세요:\n" + one_json
+                ),
+            },
+        ]
+        try:
+            res = await route(messages)
+        except Exception as e:
+            log(
+                f"[KO-TRANSLATE] 현재 {idx + 1} / {total_chunks} — "
+                f"줄 {i} 개별 재시도 오류 — {type(e).__name__}: {e}"
+            )
+            continue
+        seg.text = ja_text
+        ok = _apply_json_chunk(
+            [seg],
+            res or "",
+            log=log,
+            log_prefix="[KO-TRANSLATE]",
+            postprocess_text=postprocess_ko_translation_text,
+            require_start_end=False,
+            require_complete=True,
+        )
+        if ok and is_acceptable_ko_subtitle_line(seg.text or "", source_ja=ja_text):
+            fixed += 1
+        else:
+            seg.text = ja_text
+    return fixed
 
 
 def _want_full_translation_prompt_log(explicit: Optional[bool]) -> bool:
@@ -1025,6 +1192,17 @@ async def translate_ja_segments_to_ko_async(
         translation_tier=translation_tier,
     )
     prov_l = str(tier.get("provider") or "").lower()
+    gemini_chain: List[str] = []
+    if prov_l == "gemini":
+        from javstory.config.app_config import gemini_translation_chain_from_env
+
+        gemini_chain = gemini_translation_chain_from_env()
+        primary_model = tier.get("model")
+        if primary_model:
+            # 설정 화면에서 고른 기본 모델은 체인에 이미 있어도(기본 체인에 흔히 포함됨)
+            # 항상 1순위로 승격한다 — "not in chain일 때만 prepend"하면 그대로 있을 때
+            # 원래 순서를 유지해 버려 UI가 말하는 "#1로 자동 추가"와 어긋난다.
+            gemini_chain = [primary_model, *[m for m in gemini_chain if m != primary_model]]
     if prov_l == "omniroute":
         raw_ctx = (os.environ.get("JAVSTORY_TRANSLATION_OMNIROUTE_MAX_CTX", "") or "").strip()
         if raw_ctx:
@@ -1146,7 +1324,21 @@ async def translate_ja_segments_to_ko_async(
             "여전히 느리면 JAVSTORY_TRANSLATION_QWEN_MAX_TOKENS=512 등으로 추가 하향."
         )
 
+    gemini_chain_active = prov_l == "gemini" and len(gemini_chain) > 1
+    active_gemini_model: dict[str, str] = {"id": tier.get("model") or ""}
+    if gemini_chain_active:
+        log(
+            "[KO-TRANSLATE] Gemini 폴백 체인 활성화 — "
+            f"{' → '.join(gemini_chain)} (RPM/일일 쿼터 초과 시 자동 전환)"
+        )
+
     async def _route(messages: List[dict[str, str]], tier_use: Dict[str, Any] = tier) -> str:
+        if gemini_chain_active and tier_use is tier:
+            result, used_model = await _route_gemini_chain(
+                router, messages, gemini_chain, log=log, should_cancel=should_cancel
+            )
+            active_gemini_model["id"] = used_model
+            return result
         return await route_with_backoff(
             router,
             messages,
@@ -1154,6 +1346,8 @@ async def translate_ja_segments_to_ko_async(
             log=_translation_retry_log(log),
             should_cancel=should_cancel,
         )
+
+    completed_chunks = [0]
 
     async def _one(idx: int, chunk: dict) -> None:
         if should_cancel and should_cancel():
@@ -1173,6 +1367,14 @@ async def translate_ja_segments_to_ko_async(
                 )
                 if tgt_segs:
                     _restore_ja_texts_from_chunk_json(tgt_segs, chunk_json)
+            finally:
+                completed_chunks[0] += 1
+                remaining = total_chunks - completed_chunks[0]
+                if remaining > 0:
+                    log(
+                        f"[KO-TRANSLATE] 진행 {completed_chunks[0]}/{total_chunks} 청크 완료 "
+                        f"— {remaining}개 응답 대기 중"
+                    )
 
     async def _one_chunk(idx: int, chunk: dict) -> None:
             if should_cancel and should_cancel():
@@ -1189,12 +1391,19 @@ async def translate_ja_segments_to_ko_async(
                 video_end_sec=video_end_sec,
             )
             compact_hints = _use_compact_translation_hints(idx)
+            # 체인 모드에서는 실제 응답 모델을 생성 전에 알 수 없어 캐시 키에 특정 모델명 대신
+            # 체인 구성 자체를 사용 — 체인이 바뀌면 캐시가 자연스럽게 무효화된다.
+            fingerprint_model = (
+                "gemini-chain:" + ",".join(gemini_chain)
+                if gemini_chain_active
+                else (tier.get("model") or "")
+            )
             cache_fingerprint = {
                 "schema": _CACHE_SCHEMA_VERSION,
                 "prompt_version": _CACHE_PROMPT_VERSION,
                 "product_code": product_code,
                 "provider": tier.get("provider") or "",
-                "model": tier.get("model") or "",
+                "model": fingerprint_model,
                 "temperature": tier.get("temperature"),
                 "max_tokens": tier.get("max_tokens"),
                 "target_lines": target_lines,
@@ -1278,7 +1487,7 @@ async def translate_ja_segments_to_ko_async(
                     if not applied_ok:
                         log(
                             f"[KO-TRANSLATE] 현재 {idx + 1} / {total_chunks} "
-                            "— HTML 최종 실패 — 해당 구간 일본어 유지"
+                            "— HTML 최종 실패 — 줄 단위 재분할 재시도 예정"
                         )
                 if applied_ok and not segments_translation_quality_ok(tgt_segs):
                     log(
@@ -1308,21 +1517,45 @@ async def translate_ja_segments_to_ko_async(
                             s.text = apply_glossary_to_text(s.text or "", glossary_pairs)
                         except Exception:
                             pass
-                if not applied_ok:
-                    _restore_ja_texts_from_chunk_json(tgt_segs, chunk_json)
-                elif not segments_translation_quality_ok(tgt_segs):
+                if not applied_ok or not segments_translation_quality_ok(tgt_segs):
                     log(
                         f"[KO-TRANSLATE] 현재 {idx + 1} / {total_chunks} — "
-                        "최종 품질 불량 — 해당 구간 일본어 유지"
+                        + ("최종 품질 불량" if applied_ok else "HTML 적용 실패")
+                        + " — 줄 단위 재분할 재시도"
                     )
-                    _restore_ja_texts_from_chunk_json(tgt_segs, chunk_json)
-                    applied_ok = False
+                    fixed = await _retry_untranslated_lines_individually(
+                        tgt_segs,
+                        chunk_json,
+                        tier,
+                        route=_route,
+                        log=log,
+                        idx=idx,
+                        total_chunks=total_chunks,
+                    )
+                    if fixed:
+                        log(
+                            f"[KO-TRANSLATE] 현재 {idx + 1} / {total_chunks} — "
+                            f"줄 단위 재분할로 {fixed}줄 추가 복구"
+                        )
+                    still_bad = sum(
+                        1
+                        for s in tgt_segs
+                        if not is_acceptable_ko_subtitle_line(s.text or "")
+                    )
+                    if still_bad:
+                        log(
+                            f"[KO-TRANSLATE] 현재 {idx + 1} / {total_chunks} — "
+                            f"{still_bad}줄은 끝까지 일본어 유지"
+                        )
+                    # 나머지는 batch 시도에서 이미 성공한 줄들 — 실패한 줄만 되돌리고
+                    # 정상 번역된 줄은 그대로 유지·캐시한다(전체 재작성 방지).
+                    applied_ok = True
                 if applied_ok:
                     _notify_ko_content_lines(segments, tgt_segs, on_content_line)
                     _store_translation_chunk_cache(
                         cache_path,
                         product_code=product_code,
-                        tier=tier,
+                        tier={**tier, "model": active_gemini_model["id"]} if gemini_chain_active else tier,
                         chunk_idx=idx,
                         total_chunks=total_chunks,
                         tgt_segs=tgt_segs,
@@ -1427,6 +1660,7 @@ async def translate_ja_segments_to_ko_async(
                     )
             json_ok = _apply_ko_json(processed)
             quality_failed = False
+            line_retry_applied = False
             if json_ok and not _quality_ok():
                 quality_failed = True
                 log(
@@ -1553,8 +1787,37 @@ async def translate_ja_segments_to_ko_async(
                         quality_failed = True
                     if not json_ok:
                         log(
-                            f"[KO-TRANSLATE] 현재 {idx + 1} / {total_chunks} — 최종 실패 — 해당 구간 일본어 유지"
+                            f"[KO-TRANSLATE] 현재 {idx + 1} / {total_chunks} — "
+                            "최종 실패 — 줄 단위 재분할 재시도"
                         )
+                        _restore_ja_texts_from_chunk_json(tgt_segs, chunk_json)
+                        fixed = await _retry_untranslated_lines_individually(
+                            tgt_segs,
+                            chunk_json,
+                            tier,
+                            route=_route,
+                            log=log,
+                            idx=idx,
+                            total_chunks=total_chunks,
+                        )
+                        if fixed:
+                            log(
+                                f"[KO-TRANSLATE] 현재 {idx + 1} / {total_chunks} — "
+                                f"줄 단위 재분할로 {fixed}줄 복구"
+                            )
+                        still_bad = sum(
+                            1
+                            for s in tgt_segs
+                            if not is_acceptable_ko_subtitle_line(s.text or "")
+                        )
+                        if still_bad:
+                            log(
+                                f"[KO-TRANSLATE] 현재 {idx + 1} / {total_chunks} — "
+                                f"{still_bad}줄은 끝까지 일본어 유지"
+                            )
+                        json_ok = True
+                        quality_failed = False
+                        line_retry_applied = True
             applied_ok = bool(json_ok)
             # OpenRouter/Ollama 경로에도 동일하게 사용자 노트 글로서리 강제 치환
             if glossary_pairs and apply_glossary_to_text is not None:
@@ -1563,7 +1826,7 @@ async def translate_ja_segments_to_ko_async(
                         s.text = apply_glossary_to_text(s.text or "", glossary_pairs)
                     except Exception:
                         pass
-            if applied_ok and not _quality_ok():
+            if applied_ok and not _quality_ok() and not line_retry_applied:
                 log(
                     f"[KO-TRANSLATE] 현재 {idx + 1} / {total_chunks} — "
                     "최종 품질 불량 — 해당 구간 일본어 유지"
@@ -1577,7 +1840,7 @@ async def translate_ja_segments_to_ko_async(
                 _store_translation_chunk_cache(
                     cache_path,
                     product_code=product_code,
-                    tier=tier,
+                    tier={**tier, "model": active_gemini_model["id"]} if gemini_chain_active else tier,
                     chunk_idx=idx,
                     total_chunks=total_chunks,
                     tgt_segs=tgt_segs,
@@ -1589,6 +1852,8 @@ async def translate_ja_segments_to_ko_async(
     tasks = [asyncio.create_task(_one(i, c)) for i, c in enumerate(chunks_data)]
     try:
         await asyncio.gather(*tasks)
+        log(f"[KO-TRANSLATE] 전체 {total_chunks}개 청크 번역 완료 — 정리 중...")
+        _clear_translation_chunk_cache_for_product(product_code, log=log)
     except Exception:
         for t in tasks:
             if not t.done():

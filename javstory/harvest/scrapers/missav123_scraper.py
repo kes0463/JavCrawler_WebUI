@@ -287,7 +287,7 @@ def fetch_video_info(
     *,
     base_url: str = BASE_URL,
     path_template: str = VIDEO_PATH_TEMPLATE,
-    timeout: float = 30.0,
+    timeout: float = 12.0,
     session=None,
 ) -> MissavVideoInfo:
     product_id = (product_id or "").strip()
@@ -308,8 +308,9 @@ def fetch_video_info(
 
     for slug in candidates:
         url = base_url.rstrip("/") + path_template.format(product_id=slug)
-        max_tries = 3
-        backoffs = (0.0, 0.8, 1.6)
+        # 재시도는 전송 예외(일시적 실패)에만. 404/빈 페이지는 예외가 아니라 다음 슬러그로.
+        max_tries = 2
+        backoffs = (0.0, 0.7)
         disable_cffi = (os.environ.get("JAVSTORY_CURL_CFFI_DISABLED", "") or "").strip().lower() in (
             "1",
             "true",

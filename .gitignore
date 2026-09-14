@@ -34,6 +34,8 @@ data/db/
 data/db/backups/
 data/derived/
 data/folder_binding_inbox.json
+data/audio_separator_models/
+data/whisper_models/
 screenshots/
 
 # generated web/search artifacts (rebuildable)

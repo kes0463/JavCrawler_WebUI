@@ -125,8 +125,13 @@ def build_embedding_ann_index(model: str, *, force: bool = False) -> _AnnIndex |
     if not m:
         return None
     key = _model_key(m)
-    sig = _source_signature(m)
 
+    with _INDEX_LOCK:
+        cached = _MEMORY.get(key)
+        if not force and cached is not None and key not in _DIRTY:
+            return cached
+
+    sig = _source_signature(m)
     with _INDEX_LOCK:
         cached = _MEMORY.get(key)
         if (
@@ -257,8 +262,14 @@ def get_embedding_ann_index(model: str, *, rebuild_if_missing: bool = True) -> _
     if not m:
         return None
     key = _model_key(m)
-    sig = _source_signature(m)
 
+    with _INDEX_LOCK:
+        if key not in _DIRTY:
+            cached = _MEMORY.get(key)
+            if cached is not None:
+                return cached
+
+    sig = _source_signature(m)
     with _INDEX_LOCK:
         dirty = key in _DIRTY
         cached = _MEMORY.get(key)

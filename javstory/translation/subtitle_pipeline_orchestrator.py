@@ -260,8 +260,24 @@ class SubtitlePipelineOrchestrator:
         # JA 경로를 미리 해석해 노트 생성·번역에 공유
         ja_in = _resolve_ko_translation_input_path(merged)
         on_note = merged.get("on_translation_note")
+
+        def _notify_note(*, text: str, status: str) -> None:
+            if not callable(on_note):
+                return
+            try:
+                on_note(
+                    {
+                        "product_code": product_code,
+                        "text": (text or "").strip(),
+                        "status": status,
+                    }
+                )
+            except Exception as e:
+                log(f"[Orchestrator] 번역 노트 UI 알림 실패(무시): {e}")
+
         if ja_in is not None:
             segments = _load_simple_segments_from_srt(ja_in)
+            _notify_note(text="", status="generating")
             try:
                 work_note = await ensure_pipeline_work_note_async(
                     product_code=product_code,
@@ -273,24 +289,13 @@ class SubtitlePipelineOrchestrator:
                 )
                 if work_note:
                     merged["translation_note_work"] = work_note
-                if callable(on_note):
-                    try:
-                        on_note(
-                            {
-                                "product_code": product_code,
-                                "text": (work_note or "").strip(),
-                            }
-                        )
-                    except Exception as e:
-                        log(f"[Orchestrator] 번역 노트 UI 알림 실패(무시): {e}")
+                _notify_note(text=work_note or "", status="ready")
             except Exception as e:
                 log(f"[Orchestrator] 작품 번역 노트 자동 생성 오류(무시): {e}")
-                if callable(on_note):
-                    try:
-                        on_note({"product_code": product_code, "text": ""})
-                    except Exception:
-                        pass
+                _notify_note(text="", status="ready")
             _check_cancel()
+        else:
+            _notify_note(text="", status="ready")
 
         await self._translate_ko_chunks(**merged)
 

@@ -79,7 +79,7 @@ export default function ProcessingView() {
   const [noteLoading, setNoteLoading] = useState(true);
   const [noteSaving, setNoteSaving] = useState(false);
   const [generatedNotes, setGeneratedNotes] = useState<
-    { id: string; productCode: string; text: string; ts: string }[]
+    { id: string; productCode: string; text: string; ts: string; status?: "generating" | "ready" }[]
   >([]);
   const dragDepthRef = useRef(0);
   const wsRef = useRef<WebSocket | null>(null);
@@ -122,6 +122,14 @@ export default function ProcessingView() {
     if (event.type === "content_clear") {
       setSentenceLines([]);
       setActiveSentenceItemId(event.id);
+      if (event.kind === "subtitle") {
+        const productCode = event.product_code || "";
+        const ts = new Date().toLocaleTimeString();
+        setGeneratedNotes(prev => [
+          { id: event.id, productCode, text: "", ts, status: "generating" },
+          ...prev.filter(n => n.id !== event.id && (!productCode || n.productCode !== productCode)),
+        ].slice(0, 20));
+      }
       return;
     }
     if (event.type === "content_line") {
@@ -143,9 +151,11 @@ export default function ProcessingView() {
       return;
     }
     if (event.type === "work_note") {
+      const productCode = event.product_code || "";
+      const status = event.status ?? "ready";
       setGeneratedNotes(prev => [
-        { id: event.id, productCode: event.product_code, text: event.text, ts: event.ts },
-        ...prev.filter(n => n.id !== event.id),
+        { id: event.id, productCode, text: event.text, ts: event.ts, status },
+        ...prev.filter(n => n.id !== event.id && (!productCode || n.productCode !== productCode)),
       ].slice(0, 20));
       return;
     }
@@ -179,6 +189,11 @@ export default function ProcessingView() {
           message: event.message ?? "완료",
         }),
       }));
+      if (event.kind === "subtitle") {
+        setGeneratedNotes(prev =>
+          prev.map(n => (n.id === event.id && n.status === "generating" ? { ...n, status: "ready" } : n)),
+        );
+      }
       return;
     }
     if (event.type === "item_error") {
@@ -190,6 +205,11 @@ export default function ProcessingView() {
         }),
       }));
       pushLog("error", event.message);
+      if (event.kind === "subtitle") {
+        setGeneratedNotes(prev =>
+          prev.map(n => (n.id === event.id && n.status === "generating" ? { ...n, status: "ready" } : n)),
+        );
+      }
       return;
     }
     if (event.type === "item_cancelled") {
@@ -201,22 +221,26 @@ export default function ProcessingView() {
           message: "대기 중...",
         }),
       }));
+      if (event.kind === "subtitle") {
+        setGeneratedNotes(prev => prev.filter(n => n.id !== event.id || n.status !== "generating"));
+      }
     }
   }, [pushLog]);
 
   useEffect(() => {
-    if (currentView !== "processing") return;
     fetchProcessingQueue().then(setState).catch(e => {
       showToast(e instanceof Error ? e.message : "큐를 불러오지 못했습니다", "error");
     });
 
+    // 이 화면은 탭을 옮겨도 언마운트하지 않는다. 활성 탭일 때만 WS를 붙이면
+    // 다음 작품의 work_note를 놓치고 이전 작품 노트가 그대로 남는다.
     const ws = createProcessingWS(handleWsEvent);
     wsRef.current = ws;
     return () => {
       ws.close();
       wsRef.current = null;
     };
-  }, [currentView, handleWsEvent, showToast]);
+  }, [handleWsEvent, showToast]);
 
   useEffect(() => {
     if (currentView !== "processing") return;
@@ -707,7 +731,9 @@ export default function ProcessingView() {
                         <span className="text-xs text-muted-foreground">{n.ts}</span>
                       </div>
                       <p className="text-sm text-muted-foreground whitespace-pre-wrap">
-                        {n.text || "(생성 실패 — 노트 없음)"}
+                        {n.status === "generating"
+                          ? "작품 노트 생성 중…"
+                          : n.text || "(생성 실패 — 노트 없음)"}
                       </p>
                     </div>
                   ))}

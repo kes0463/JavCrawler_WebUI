@@ -235,7 +235,7 @@ async def scrape_njavtv_playwright_async(
     entry = (entry_url or "").strip()
     urls_to_try = [entry] if entry else njavtv_detail_urls(code)
     if settle_seconds is None:
-        settle_seconds = float(os.getenv("JAVSTORY_NJAV_SETTLE_SECONDS", "7"))
+        settle_seconds = float(os.getenv("JAVSTORY_NJAV_SETTLE_SECONDS", "3"))
 
     data: dict[str, Any] = {"code_requested": code}
     if not urls_to_try:
@@ -485,7 +485,7 @@ def scrape_njavtv_playwright(
     entry = (entry_url or "").strip()
     urls_to_try = [entry] if entry else njavtv_detail_urls(code)
     if settle_seconds is None:
-        settle_seconds = float(os.getenv("JAVSTORY_NJAV_SETTLE_SECONDS", "7"))
+        settle_seconds = float(os.getenv("JAVSTORY_NJAV_SETTLE_SECONDS", "3"))
 
     data: dict[str, Any] = {"code_requested": code}
     if not urls_to_try:
