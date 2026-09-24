@@ -16,6 +16,7 @@ const ProcessingView = lazy(() => import("@/views/ProcessingView"));
 const LibraryView    = lazy(() => import("@/views/LibraryView"));
 const ActressView   = lazy(() => import("@/views/ActressView"));
 const InsightView    = lazy(() => import("@/views/InsightView"));
+const PersonaChatView = lazy(() => import("@/views/PersonaChatView"));
 const SettingsView   = lazy(() => import("@/views/SettingsView"));
 
 const VIEW_MAP: { id: View; component: React.ComponentType }[] = [
@@ -25,11 +26,12 @@ const VIEW_MAP: { id: View; component: React.ComponentType }[] = [
   { id: "library",    component: LibraryView },
   { id: "actress",    component: ActressView },
   { id: "insight",    component: InsightView },
+  { id: "personaChat", component: PersonaChatView },
   { id: "settings",   component: SettingsView },
 ];
 
 /** 탭 전환 시 언마운트하지 않고 목록·스크롤·로그 상태를 유지할 화면 */
-const PERSIST_VIEWS: ReadonlySet<View> = new Set(["actress", "library", "processing"]);
+const PERSIST_VIEWS: ReadonlySet<View> = new Set(["actress", "library", "processing", "personaChat"]);
 
 function ViewStack() {
   const { currentView } = useNavigation();

@@ -315,12 +315,20 @@ class InsightModel(QObject):
         with path.open("a", encoding="utf-8") as f:
             f.write(json.dumps(record, ensure_ascii=False) + "\n")
 
+    _insight_service = None
+
+    @classmethod
+    def _get_insight_service(cls):
+        if cls._insight_service is None:
+            from javstory.services.insight_service import InsightService
+
+            cls._insight_service = InsightService()
+        return cls._insight_service
+
     @classmethod
     def _fetch_phase(cls, phase: str) -> dict[str, str]:
-        from javstory.services.insight_service import InsightService
-
         dump = lambda o: json.dumps(o, ensure_ascii=False)
-        raw = InsightService().fetch_phase(phase)
+        raw = cls._get_insight_service().fetch_phase(phase)
 
         if phase == cls._PHASE_CORE:
             from javstory.analytics.persona_card import get_persona_card

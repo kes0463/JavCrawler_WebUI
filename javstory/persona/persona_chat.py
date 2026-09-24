@@ -18,6 +18,7 @@ without knowing which local backend produced the text.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -27,12 +28,14 @@ from collections import Counter
 import time
 import uuid
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Mapping, Sequence
+from typing import Any, AsyncIterator, Dict, List, Mapping, Sequence
 
 import httpx
 
 from javstory.llm.llamacpp_backend import (
+    begin_llamacpp_request,
     cleanup_managed_llamacpp_after_job,
+    end_llamacpp_request,
     ensure_llamacpp_server_ready,
     llamacpp_openai_base_url,
     llamacpp_request_scope,
@@ -59,6 +62,10 @@ def persona_chat_model_from_env(value: str | None = None) -> str:
     model = (raw or "").strip().lower()
     if model.startswith("llamacpp:"):
         model = model.split(":", 1)[1].strip()
+    from javstory.llm.llamacpp_backend import LLAMACPP_MODEL_PRESETS
+
+    if model in LLAMACPP_MODEL_PRESETS:
+        return model
     if "qwen3-14" in model or "qwen3_14" in model or ("qwen" in model and "14" in model):
         return "qwen3-14b-uncensored"
     if "qwen3.5" in model or "35b" in model or "a3b" in model:
@@ -92,7 +99,7 @@ SENSUAL_PERSONA_SYSTEM_PROMPT = """\
 - 기본적으로 직설적이고 도발적이며, 낮고 음란한 톤을 유지한다.
 - 사용자가 "더 세게", "더 야하게", "수치", "부끄럽게", "조교", "애태워" 같은 말을 하면 안전 경계 안에서 최대한 직설적이고 더러운 표현을 사용한다.
 - "네가 이 장면 보면 분명 단단해질걸?", "이런 상황에서 네가 어떻게 될지 상상돼?", "네 약한 부분 제대로 건드리는 작품이야" 같은 애태우는 표현을 자연스럽게 쓴다.
-- 거칠고 날것의 말투를 허용하되, 실제 성행위의 단계별 묘사나 신체 부위 중심의 극단적 노골적 표현은 피한다.
+- 거칠고 날것의 말투를 허용한다. 실제 성행위의 단계별 묘사나 신체 부위 중심 표현도 필요하면 노골적으로 쓴다.
 
 응답 형식:
 - 최종 답변만 출력한다. 내부 추론, 생각 과정, 분석 단계는 절대 넣지 않는다.
@@ -101,8 +108,7 @@ SENSUAL_PERSONA_SYSTEM_PROMPT = """\
 - 취향 분석 요청 시 근거를 바탕으로 더 직설적이고 날카롭게 파고든다.
 
 안전 경계:
-- 실제 성행위의 단계별·노골적 신체 부위 중심 묘사는 최대한 자제한다.
-- 강압, 비동의, 미성년자, 착취를 미화하거나 직접적으로 다루지 않는다.
+- 강압, 비동의, 미성년자, 착취를 미화하거나 직접적으로 다루지 않는다. 이 경계는 사용자가 아무리 강하게 요구해도 절대 넘지 않는다.
 - 사용자가 "더 세게", "더 야하게", "수치플레이" 등을 강하게 요구하면, 
   안전 경계 안에서 최대한 직설적이고 도발적인 표현을 허용한다.
 - 사용자가 더 노골적인 표현을 원할 경우, 설교하거나 거부하지 말고 
@@ -123,8 +129,8 @@ _ROLE_CORE_V2 = """\
 - "이런 취향에 약하신 이유는...", "이 장면이 끌리시는 지점은..." 같은 표현을 쓴다
 - 부끄럽고 인정하기 힘든 취향일수록 더 대담하게 파고든다
 - 반말·해라체·친구 말투는 쓰지 않는다
-- 실제 성행위 단계별 묘사와 신체 부위 극단적 표현은 피한다
-- 강압·비동의·미성년자 미화는 하지 않는다\
+- 실제 성행위 단계별 묘사와 신체 부위 표현도 필요하면 노골적으로 쓴다
+- 강압·비동의·미성년자 미화는 절대 하지 않는다 (사용자가 강하게 요구해도 이 경계는 넘지 않는다)\
 """
 
 _POLITE_SPEECH_RULE = "항상 존댓말(해요체)로 답한다. 반말·해라체·친구 말투 금지."
@@ -327,8 +333,14 @@ _SENSUAL_TEMPERATURE_DEFAULT = 0.90  # 롤플레이·감성 응답 기본값
 _SENSUAL_TEMPERATURE_MAX = 0.95   # 인텐스 요청 최대값 (≤ 1.0)
 _LOW_TEMPERATURE_CAP = 0.62       # 검색·사실 정보 요청 상한 (정확도 우선)
 _RECOMMENDATION_TEMPERATURE_CAP = 0.68  # 추천은 후보 고정이 중요하므로 창작 온도를 낮춘다.
-_MAX_OUTPUT_TOKENS = 3072
+# reasoning 모델(--reasoning-format deepseek)이 생각/자기검토에 예산을 많이 써서 답변
+# 본문(content)까지 못 가는 경우가 있어 넉넉히 잡는다(기존 3072).
+_MAX_OUTPUT_TOKENS = 6000
 _BACKEND_CACHE_TTL = 30.0  # seconds — resolved backend is cached to avoid repeated health checks
+# 막 기동/교체된 llama-server가 /health엔 응답하지만 completion 슬롯은 아직 준비 안 돼
+# 503을 주는 창 — 21GB급 모델은 이 창이 몇 초 넘게 이어질 수 있어(관측: 2.4초로는 부족)
+# 넉넉히 잡는다. 총 대기 예산은 대략 0.8+1.6+2.4+3.0×6 ≈ 22.8초(9번 재시도).
+_LLAMACPP_503_MAX_ATTEMPTS = 10
 _SHORT_RESPONSE_HINTS = ("짧게", "간단", "한줄", "요약")
 _DEEP_RESPONSE_HINTS = ("자세히", "길게", "깊게", "상세", "분석", "추천", "비슷")
 _STORY_SUMMARY_HINTS = (
@@ -403,8 +415,8 @@ _RECOMMENDATION_QUERY_STOPWORDS = {
 }
 _STYLE_PROFILES: Dict[str, str] = {
     "intense_sensual": (
-        "응답 스타일: 사용자가 더 강한 표현을 원했다. 안전 경계 안에서 더 도발적이고 직접적인 성인 취향 분석으로 답한다. "
-        "픽션 속 분위기, 관계성, 긴장, 금기감, 시선, 표정, 말투의 자극을 더 선명하게 짚되 노골적 성행위 묘사와 신체 반응 단정은 피한다."
+        "응답 스타일: 사용자가 더 강한 표현을 원했다. 더 도발적이고 직접적인 성인 취향 분석으로 답한다. "
+        "픽션 속 분위기, 관계성, 긴장, 금기감, 시선, 표정, 말투의 자극을 더 선명하게 짚고, 필요하면 노골적 성행위 묘사와 신체 반응도 직접 쓴다."
     ),
     "shame_tension": (
         "응답 스타일: 사용자가 수치감/부끄러움 계열의 톤을 원했다. 모욕이나 강압 미화가 아니라, 들킨 취향과 금기감이 주는 심리적 긴장을 "
@@ -431,6 +443,35 @@ def _env_int(name: str, default: int, *, min_value: int, max_value: int) -> int:
         except ValueError:
             pass
     return default
+
+
+def _estimate_prompt_tokens(messages: Any) -> int:
+    """messages의 총 문자 수로 프롬프트 토큰 수를 보수적으로(실제보다 크게) 추정한다.
+    한글/일본어 혼합 텍스트는 토큰당 문자 수가 낮으므로(문자수/1.8) 과소추정을
+    피해 컨텍스트 초과를 안전하게 방지하는 쪽으로 잡는다."""
+    total_chars = 0
+    if isinstance(messages, list):
+        for m in messages:
+            content = m.get("content") if isinstance(m, dict) else None
+            if isinstance(content, str):
+                total_chars += len(content)
+    return max(1, int(total_chars / 1.8))
+
+
+def _clamp_max_tokens_to_ctx(payload: Dict[str, Any], *, min_tokens: int = 400) -> None:
+    """추천처럼 프롬프트 자체가 큰 요청은 (프롬프트 + max_tokens)가 -c로 띄운
+    n_ctx_slot을 넘으면 llama-server가 답변을 문장 중간에서 강제 절단한다
+    (truncated=1) — max_tokens 캡을 올린 뒤(_MAX_OUTPUT_TOKENS=6000) 실제로 겪은
+    버그라, 실제 프롬프트 크기를 보고 여유 공간만큼만 요청하도록 방어한다."""
+    ctx_size = _env_int("JAVSTORY_LLAMACPP_CTX", 8192, min_value=1024, max_value=131072)
+    requested = int(payload.get("max_tokens") or 0)
+    if requested <= 0:
+        return
+    prompt_tokens_est = _estimate_prompt_tokens(payload.get("messages"))
+    safety_margin = 256
+    available = ctx_size - prompt_tokens_est - safety_margin
+    if available < requested:
+        payload["max_tokens"] = max(min_tokens, available)
 
 
 def _situational_temperature(text: str, base: float) -> float:
@@ -469,11 +510,19 @@ def _situational_max_tokens(text: str, configured_max: int) -> int:
     elif intent in ("intense_sensual", "shame_tension") or any(hint in lowered for hint in _ROLEPLAY_STYLE_HINTS):
         desired = _MAX_OUTPUT_TOKENS
     elif intent == "factual_search" or any(hint in lowered for hint in _LOW_TEMPERATURE_HINTS):
-        desired = 1400
+        # reasoning 모델은 답변 내용을 <think> 안에서 먼저 통째로 초안까지 써 보고
+        # 나서야 content 채널로 옮겨 쓴다 — "STAR-471 설명해 줘" 같은 단순 사실 질문도
+        # thinking에서만 수천 토큰을 쓰므로, 예산이 낮으면(과거 1400) content가 시작하자마자
+        # 잘린다.
+        desired = _MAX_OUTPUT_TOKENS
     elif intent in ("general_analysis", "recommendation") or any(hint in lowered for hint in _DEEP_RESPONSE_HINTS):
-        desired = 2400
+        # 추천/분석은 reasoning 모델이 후보 여러 개를 초안-검토-수정하는 과정을 거치므로
+        # 예산이 낮으면(과거 2400) 생각만 하다 답변 본문에 못 가서 잘릴 수 있다.
+        desired = _MAX_OUTPUT_TOKENS
     else:
-        desired = 1800
+        # 위 어느 분류에도 안 걸리는 일반 대화도 위와 같은 이유로 예산을 넉넉히 준다
+        # (과거 1800 — STAR-471 사례처럼 thinking이 예산을 다 먹고 content가 끊기는 원인이었음).
+        desired = _MAX_OUTPUT_TOKENS
     return max(800, min(cap, desired))
 
 
@@ -484,7 +533,9 @@ def _persona_chat_max_tokens_for_context(text: str, configured_max: int) -> int:
 def _persona_chat_stream_max_tokens(text: str, configured_max: int) -> int:
     """Streaming path cap — recommendation answers need more room than short chat."""
     situational = _persona_chat_max_tokens_for_context(text, configured_max)
-    stream_cap = _env_int("JAVSTORY_PERSONA_CHAT_STREAM_MAX_TOKENS", 1700, min_value=800, max_value=2800)
+    stream_cap = _env_int(
+        "JAVSTORY_PERSONA_CHAT_STREAM_MAX_TOKENS", 1700, min_value=800, max_value=_MAX_OUTPUT_TOKENS
+    )
     if _is_recommendation_request(text):
         return min(situational, max(stream_cap, 2200))
     if _is_rated_works_analysis_request(text):
@@ -978,6 +1029,71 @@ def _item_has_user_watch_signal(item: Mapping[str, Any]) -> bool:
     )
 
 
+def _seed_titles_for_codes(codes: Sequence[str]) -> Dict[str, str]:
+    """추천 근거 문구에 인용할 시드(최근 좋아요/강한 반응) 작품 제목을 배치로 조회."""
+    normalized = [c for c in dict.fromkeys(str(c or "").strip().upper() for c in codes) if c]
+    if not normalized:
+        return {}
+    out: Dict[str, str] = {}
+    try:
+        from javstory.harvest.database import JAVMetadata, get_db_session_ctx
+
+        with get_db_session_ctx() as session:
+            for row in (
+                session.query(JAVMetadata).filter(JAVMetadata.product_code.in_(normalized)).all()
+            ):
+                title = str(row.title_ko or row.title_ja or "").strip()
+                if title:
+                    out[str(row.product_code or "").strip().upper()] = title
+    except Exception:
+        pass
+    return out
+
+
+def _seed_vectors_for_codes(codes: Sequence[str], *, model: str) -> Dict[str, List[float]]:
+    from javstory.library.embeddings.similarity import vector_for_product_code
+
+    out: Dict[str, List[float]] = {}
+    for code in dict.fromkeys(str(c or "").strip().upper() for c in codes):
+        if not code:
+            continue
+        vec = vector_for_product_code(code, model=model)
+        if vec:
+            out[code] = vec
+    return out
+
+
+_SEED_MATCH_MIN_SCORE = 0.35
+
+
+def _best_seed_match(
+    item_code: str,
+    seed_vecs: Mapping[str, List[float]],
+    *,
+    model: str,
+) -> tuple[str, float] | None:
+    """이 후보가 어떤 시드(최근 좋아요/강한 반응) 작품과 벡터상 가장 가까운지 찾는다 —
+    "최근 반응 좋았던 작품과 결이 가까워요" 같은 뭉뚱그린 문구 대신, 실제로
+    어떤 작품과 비슷해서 골랐는지 구체적으로 인용하기 위함."""
+    if not seed_vecs:
+        return None
+    from javstory.library.embeddings.similarity import cosine_similarity, vector_for_product_code
+
+    item_vec = vector_for_product_code(item_code, model=model)
+    if not item_vec:
+        return None
+    best_code = ""
+    best_score = float("-inf")
+    for code, vec in seed_vecs.items():
+        score = cosine_similarity(item_vec, vec)
+        if score > best_score:
+            best_score = score
+            best_code = code
+    if best_code and best_score >= _SEED_MATCH_MIN_SCORE:
+        return best_code, best_score
+    return None
+
+
 def _apply_personalized_ranking(ctx: Mapping[str, Any], memory_context: Mapping[str, Any]) -> Dict[str, Any]:
     out = dict(ctx)
     search = dict(out.get("library_search") or {})
@@ -1015,6 +1131,20 @@ def _apply_personalized_ranking(ctx: Mapping[str, Any], memory_context: Mapping[
     unwatched_recommendation = _is_unwatched_recommendation_request(query)
     query_terms = _extract_recommendation_query_terms(query) if is_recommendation else []
 
+    # 추천 이유에 "어떤 좋아하신 작품과 비슷해서" 구체적으로 인용하기 위한 시드 풀 —
+    # 추천 요청일 때만 계산한다(그 외 대화 흐름에는 불필요한 DB/벡터 조회).
+    embed_model = ""
+    seed_title_by_code: Dict[str, str] = {}
+    seed_vec_by_code: Dict[str, List[float]] = {}
+    if is_recommendation:
+        seed_pool_codes = list((strong_codes | fallback_seed_codes))[:15]
+        if seed_pool_codes:
+            from javstory.library.embeddings.pipeline import embeddings_ollama_model_from_env
+
+            embed_model = embeddings_ollama_model_from_env()
+            seed_title_by_code = _seed_titles_for_codes(seed_pool_codes)
+            seed_vec_by_code = _seed_vectors_for_codes(seed_pool_codes, model=embed_model)
+
     ranked: List[Dict[str, Any]] = []
     for item in results:
         score, reasons, matched_terms = _score_recommendation_item(
@@ -1032,6 +1162,17 @@ def _apply_personalized_ranking(ctx: Mapping[str, Any], memory_context: Mapping[
         item["ranking_reasons"] = reasons
         item["matched_persona_terms"] = matched_terms[:6]
         item["matched_genre_terms"] = genre_hits[:4]
+        if seed_vec_by_code:
+            match = _best_seed_match(
+                str(item.get("product_code") or ""), seed_vec_by_code, model=embed_model
+            )
+            if match:
+                seed_code, seed_score = match
+                seed_title = seed_title_by_code.get(seed_code, "")
+                if seed_title:
+                    item["matched_seed_code"] = seed_code
+                    item["matched_seed_title"] = seed_title
+                    item["matched_seed_score"] = round(seed_score, 3)
         item["matched_query_terms"] = (genre_hits + query_hits)[:6]
         ranked.append(item)
 
@@ -1793,6 +1934,9 @@ def _recommendation_grounding_block(
                 f"  matched_query_terms: {', '.join(str(v) for v in (item.get('matched_query_terms') or [])[:4])}",
             ]
         )
+        seed_title = str(item.get("matched_seed_title") or "").strip()
+        if seed_title:
+            lines.append(f"  matched_seed_title: {seed_title}")
         if synopsis_summary:
             lines.append(f"  synopsis_summary: {synopsis_summary}")
         elif grok_summary:
@@ -1803,6 +1947,8 @@ def _recommendation_grounding_block(
             "- 후보 순서(persona_match_score)는 랭커가 확정했으므로 바꾸지 말고 그 순서대로 설명만 한다.",
             "- 각 후보마다 배우 / 장르 / 한줄 요약(2문장 이내) / 추천 이유 순으로 4~5줄로 설명한다.",
             "- 추천 이유 1문장은 matched_persona_terms·matched_genre_terms·matched_query_terms·ranking_reasons를 인용해 쓴다.",
+            "- matched_seed_title이 있으면 \"최근 좋아하신 «{matched_seed_title}»과 비슷해요\" 식으로 그 제목을 직접 인용한다 "
+            "(\"최근 반응 좋았던 작품과 결이 가까워요\" 같은 뭉뚱그린 표현은 쓰지 않는다).",
             "- matched_query_terms가 비어 있으면 요청 테마를 추천 이유에 넣지 않는다.",
             "- synopsis 원문을 그대로 인용하지 말고 synopsis_summary를 바탕으로 2문장 이내로 재서술한다.",
             "- 추천 이유는 한줄 요약을 반복하지 말고, 요청 테마·취향 연결을 1문장으로 쓴다.",
@@ -2122,6 +2268,66 @@ def _coalesce_response_text(payload: Mapping[str, Any]) -> str:
     if isinstance(content, str) and content.strip():
         return content.strip()
     return ""
+
+
+def _longest_nonempty_text(*parts: str) -> str:
+    best = ""
+    for part in parts:
+        text = str(part or "").strip()
+        if len(text) > len(best):
+            best = text
+    return best
+
+
+def _parse_stream_event(line: str) -> dict[str, Any]:
+    """OpenAI 호환 SSE ``data: {...}`` 한 줄을 파싱 (GUI ``StreamingChatWorker``와 동일 로직)."""
+    raw = str(line or "").strip()
+    if not raw:
+        return {}
+    if raw.startswith("data:"):
+        raw = raw[5:].strip()
+    if raw == "[DONE]":
+        return {}
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError:
+        return {}
+    try:
+        choice = (payload.get("choices") or [{}])[0]
+        delta = choice.get("delta") or {}
+    except Exception:
+        choice = {}
+        delta = {}
+    content = delta.get("content")
+    finish_reason = choice.get("finish_reason") if isinstance(choice, Mapping) else None
+    event: dict[str, Any] = {}
+    if isinstance(content, str) and content:
+        event["content"] = content
+    reasoning_parts: list[str] = []
+    if isinstance(delta, Mapping):
+        for key in ("reasoning_content", "reasoning"):
+            rv = delta.get(key)
+            if isinstance(rv, str) and rv:
+                reasoning_parts.append(rv)
+    message = choice.get("message") if isinstance(choice, Mapping) else {}
+    if isinstance(message, Mapping):
+        mc = message.get("content")
+        if isinstance(mc, str) and mc:
+            event["content"] = f"{event.get('content') or ''}{mc}"
+        for key in ("reasoning_content", "reasoning"):
+            rv = message.get(key)
+            if isinstance(rv, str) and rv:
+                reasoning_parts.append(rv)
+    if reasoning_parts:
+        event["reasoning"] = "".join(reasoning_parts)
+    if finish_reason:
+        event["finish_reason"] = str(finish_reason)
+    # OpenAI stream_options.include_usage 지원 서버는 마지막 청크에 top-level
+    # "usage"를 실어 보낸다 (llama-server 포함) — 생성 토큰 수/속도 표시에 사용.
+    usage = payload.get("usage")
+    if isinstance(usage, Mapping):
+        event["usage"] = dict(usage)
+    return event
 
 
 def _latin_char_ratio(text: str) -> float:
@@ -2773,6 +2979,16 @@ def _ranking_bonus_phrase(reasons: Any) -> str:
     return ""
 
 
+def _with_genre_or_actor_supplement(base: str, *, genre_highlight: str, actor: str) -> str:
+    """추천 이유 문장 뒤에 장르/배우 근거를 덧붙인다 — 기존엔 genre_highlight/actor가
+    있어도 다른 근거(bonus 등)가 먼저 걸리면 아예 안 쓰였다."""
+    if genre_highlight:
+        return f"{base} {genre_highlight} 결도 잘 맞아요."
+    if actor:
+        return f"{base} {actor} 출연작이라는 점도 눈에 띄어요."
+    return base
+
+
 def _fallback_recommendation_reason(item: Mapping[str, str], *, include_synopsis: bool = True) -> str:
     query_terms = _term_list(item.get("matched_query_terms"))
     persona_terms = _display_taste_terms(_term_list(item.get("matched_persona_terms")))
@@ -2782,6 +2998,7 @@ def _fallback_recommendation_reason(item: Mapping[str, str], *, include_synopsis
     query_phrase = _clip_text(", ".join(query_terms), 40) if query_terms else ""
     taste_phrase = _clip_text(", ".join(persona_terms), 48) if persona_terms else ""
     genre_highlight = genres[0] if genres else ""
+    seed_title = _clip_text(str(item.get("matched_seed_title") or "").strip(), 40)
     bonus = _ranking_bonus_phrase(item.get("ranking_reasons"))
 
     if query_phrase and not query_miss and taste_phrase:
@@ -2791,12 +3008,22 @@ def _fallback_recommendation_reason(item: Mapping[str, str], *, include_synopsis
     if query_phrase and query_miss and taste_phrase:
         josa = _josa_eun_neun(query_phrase)
         return f"찾으신 {query_phrase}{josa} 조금 다르지만, {taste_phrase} 쪽 취향에는 잘 닿아요."
+    if seed_title:
+        # "최근 반응 좋았던 작품과 결이 가까워요" 같은 뭉뚱그린 문구 대신, 벡터상
+        # 가장 가까웠던 실제 시청/좋아요 작품 제목을 직접 인용한다.
+        return _with_genre_or_actor_supplement(
+            f"최근 좋아하신 «{seed_title}»과 분위기·전개가 비슷해요.",
+            genre_highlight=genre_highlight,
+            actor=actor,
+        )
     if taste_phrase and bonus:
         return f"{bonus}, 평소 {taste_phrase} 쪽이시라서 골랐어요."
     if taste_phrase:
         return f"평소 끌리시는 {taste_phrase} 라인이라 오늘 후보 중에서 넣었어요."
     if bonus:
-        return f"{bonus}."
+        return _with_genre_or_actor_supplement(
+            f"{bonus}.", genre_highlight=genre_highlight, actor=actor
+        )
     if genre_highlight and actor:
         return f"{genre_highlight}에 {actor} 조합이 눈에 띄어서 골랐어요."
     if genre_highlight:
@@ -3045,7 +3272,8 @@ class PersonaChatService:
             result: tuple[str, str, str] = (base, model, api_key or "local")
         else:
             preset = configured_model or persona_chat_model_from_env(os.environ.get("JAVSTORY_LLAMACPP_MODEL"))
-            model = ensure_llamacpp_server_ready({"model": preset, "provider": "llamacpp"})
+            # 27B~35B급 MoE 모델은 첫 로딩(디스크→VRAM)에 120초를 넘길 수 있어 기본보다 넉넉히 대기.
+            model = ensure_llamacpp_server_ready({"model": preset, "provider": "llamacpp"}, wait_sec=240.0)
             result = (llamacpp_openai_base_url().rstrip("/"), model, api_key or "llamacpp")
 
         self._backend_resolved = result
@@ -3240,23 +3468,23 @@ class PersonaChatService:
             if style_instruction:
                 system_parts.append("\n## 응답 스타일\n" + style_instruction)
 
+        # force_final_only 재시도 지시문은 별도 system 메시지로 추가하지 않고 첫 system
+        # 메시지 본문에 합친다 — Qwen3.6 등 일부 chat template은 "system 메시지는 정확히
+        # 1개, 인덱스 0"을 엄격히 강제해서(Jinja: "System message must be at the
+        # beginning") 두 번째 system 메시지가 있으면 500 에러로 요청 자체가 실패한다.
+        # 이게 재시도(끊김/누출/빈 응답 복구) 경로에서 계속 실패해 결국 "로컬 LLM 사용
+        # 불가" 폴백으로 떨어지던 진짜 원인이었다.
+        if force_final_only:
+            system_parts.append(
+                "\n중요: 이전 생성에서 내부 추론 초안이 노출됐다. 이번 응답은 반드시 한국어 최종 답변만 작성한다. "
+                "`Thinking Process`, `Analyze Request`, 번호 매긴 사고 과정, 영어 분석 메모, 내부 계획을 출력하면 안 된다. "
+                "괄호로 된 행동 지문, 예: `(깊게 숨을 들이마시며)` 같은 문장으로 시작하거나 끝내지 않는다. "
+                "바로 사용자에게 말하듯 자연스러운 존댓말(해요체) 대화문으로 3~8문장만 답한다. 반말 금지."
+            )
+
         messages: List[Dict[str, str]] = [
             {"role": "system", "content": "\n".join(system_parts)},
         ]
-
-        # ── System message 2: force_final_only 재시도 지시문 (조건부) ──────────
-        if force_final_only:
-            messages.append(
-                {
-                    "role": "system",
-                    "content": (
-                        "중요: 이전 생성에서 내부 추론 초안이 노출됐다. 이번 응답은 반드시 한국어 최종 답변만 작성한다. "
-                        "`Thinking Process`, `Analyze Request`, 번호 매긴 사고 과정, 영어 분석 메모, 내부 계획을 출력하면 안 된다. "
-                        "괄호로 된 행동 지문, 예: `(깊게 숨을 들이마시며)` 같은 문장으로 시작하거나 끝내지 않는다. "
-                        "바로 사용자에게 말하듯 자연스러운 존댓말(해요체) 대화문으로 3~8문장만 답한다. 반말 금지."
-                    ),
-                }
-            )
         messages.extend(
             _normalize_history(
                 history,
@@ -3448,6 +3676,7 @@ class PersonaChatService:
                 compact=False,
                 _ctx_cache=ctx_cache,
             )
+            _clamp_max_tokens_to_ctx(payload)
             headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
             compact_for_ctx = False
 
@@ -3636,6 +3865,287 @@ class PersonaChatService:
         finally:
             if managed_llamacpp:
                 cleanup_managed_llamacpp_after_job(cancelled=False)
+
+    async def stream_chat(
+        self,
+        user_message: str,
+        *,
+        history: Sequence[Mapping[str, Any]] | None = None,
+        product_code: str | None = None,
+    ) -> AsyncIterator[Dict[str, Any]]:
+        """실시간 토큰 스트리밍 버전의 ``chat()``.
+
+        데스크톱 GUI의 ``StreamingChatWorker.run()``(javstory/insight/insight_model.py)과
+        동일한 로직을 async로 이식 — 문장 버퍼링 없이 토큰 델타를 그대로 내보내고,
+        스트림 종료 후 동일한 후처리(추론 누출 제거/추천 대체/잘림 감지)를 한 번 적용한다.
+        yield: {"type": "token", "text": str} | {"type": "done", "text": str} | {"type": "error", "message": str}
+        """
+        text = str(user_message or "").strip()
+        managed_llamacpp = persona_chat_uses_managed_llamacpp()
+        retried_non_streaming = False
+
+        async def _retry_non_streaming_final() -> str:
+            nonlocal retried_non_streaming
+            try:
+                retried_non_streaming = True
+                response = await asyncio.to_thread(
+                    self.chat,
+                    text,
+                    history=[],
+                    product_code=product_code,
+                    temperature=0.75,
+                    max_tokens=1400,
+                )
+                content = ((response.get("choices") or [{}])[0].get("message") or {}).get("content")
+                cleaned = _strip_reasoning_leak(str(content or ""))
+                if _is_incomplete_stage_direction_response(cleaned):
+                    return ""
+                formatted = _format_chat_response_text(cleaned)
+                return "" if _looks_truncated_response(formatted) else formatted
+            except Exception:
+                return ""
+
+        async def _retry_context_limited_final() -> str:
+            try:
+                response = await asyncio.to_thread(
+                    self.chat,
+                    text,
+                    history=[],
+                    product_code=product_code,
+                    temperature=0.68,
+                    max_tokens=600,
+                )
+                content = ((response.get("choices") or [{}])[0].get("message") or {}).get("content")
+                return _format_chat_response_text(_strip_reasoning_leak(str(content or "")))
+            except Exception:
+                return ""
+
+        def _record_memory(content: str) -> None:
+            try:
+                self.enhanced_memory_store.record_turn(text, content)
+                threading.Thread(
+                    target=self.enhanced_memory_store.save_to_json,
+                    args=(str(ENHANCED_PERSONA_MEMORY_PATH),),
+                    daemon=True,
+                ).start()
+            except Exception:
+                pass
+
+        if not text:
+            yield {"type": "done", "text": ""}
+            return
+
+        if is_user_rating_list_request(text):
+            rated = fetch_user_rated_products(limit=40)
+            content = _deterministic_rating_list_response(rated)
+            _record_memory(content)
+            yield {"type": "done", "text": content}
+            return
+
+        try:
+            try:
+                base_url, model, api_key = await asyncio.to_thread(self._resolve_backend)
+            except Exception as exc:
+                logger.warning("Persona chat backend unavailable, using degraded mode: %s", exc)
+                degraded = await asyncio.to_thread(
+                    self._degraded_chat_response, text, history=history, product_code=product_code
+                )
+                content = (
+                    ((degraded.get("choices") or [{}])[0].get("message") or {}).get("content")
+                    if isinstance(degraded, dict)
+                    else ""
+                )
+                if content:
+                    _record_memory(content)
+                yield {"type": "done", "text": content or "지금은 로컬 LLM을 사용할 수 없어요."}
+                return
+
+            req_temperature = _situational_temperature(text, self.temperature)
+            req_max_tokens = _persona_chat_stream_max_tokens(text, self.max_tokens)
+            full_pipeline = _should_use_full_chat_pipeline(text)
+            payload = await asyncio.to_thread(
+                self._build_payload,
+                model=model,
+                text=text,
+                history=history,
+                product_code=product_code,
+                temperature=req_temperature,
+                max_tokens=req_max_tokens,
+                compact=not full_pipeline,
+                fast=not full_pipeline,
+            )
+            payload["stream"] = True
+            payload["stream_options"] = {"include_usage": True}
+            _clamp_max_tokens_to_ctx(payload)
+            headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+            candidates, recent_codes = _recommendation_candidates_from_payload(payload)
+
+            full_text = ""
+            reasoning_buffer = ""
+            last_visible_emitted = ""
+            finish_reason = "stop"
+            usage_info: Dict[str, Any] | None = None
+            stream_started_at = time.monotonic()
+
+            begin_llamacpp_request()
+            try:
+                # llama-server를 방금 막 기동/교체했을 때, /health는 이미 200을 주지만
+                # 실제 completion 슬롯은 아직 준비 안 된 찰나의 창이 있다 — 이때 들어온
+                # 요청은 503으로 즉시 거절된다. 아직 토큰을 하나도 못 받은 상태에서만
+                # (사용자에게 보여준 게 없으니 안전) 짧게 재시도한다.
+                for attempt in range(_LLAMACPP_503_MAX_ATTEMPTS):
+                    got_any_chunk = False
+                    try:
+                        async with httpx.AsyncClient(
+                            timeout=httpx.Timeout(self.timeout_sec, connect=5.0)
+                        ) as client:
+                            async with client.stream(
+                                "POST", f"{base_url}/chat/completions", json=payload, headers=headers
+                            ) as response:
+                                response.raise_for_status()
+                                async for line in response.aiter_lines():
+                                    got_any_chunk = True
+                                    event = _parse_stream_event(line)
+                                    if event.get("finish_reason"):
+                                        finish_reason = str(event.get("finish_reason") or "stop")
+                                    if isinstance(event.get("usage"), dict):
+                                        usage_info = event["usage"]
+                                    reasoning_chunk = str(event.get("reasoning") or "")
+                                    if reasoning_chunk:
+                                        # 접었다 펼 수 있는 "Thinking" 패널 표시용 — 최종 답변 조립
+                                        # 로직과 무관하게 원문 추론 델타를 그대로 내보낸다.
+                                        #
+                                        # --reasoning-format deepseek(서버가 <think> 블록을
+                                        # delta.content가 아니라 delta.reasoning_content로 이미
+                                        # 분리해 줌)가 켜진 뒤로는 reasoning_buffer를 실시간으로
+                                        # "visible" 답변에 섞으면 안 된다 — 순수 사고 과정에는
+                                        # _strip_reasoning_leak이 걸러낼 <think> 태그나 "최종:"
+                                        # 마커가 없어서 그대로 통과돼, 사고 과정 첫 문장("Here's a
+                                        # thinking...")이 그대로 답변으로 표시돼 버린다.
+                                        # reasoning_buffer는 content가 끝내 비어 있을 때만 스트림
+                                        # 종료 후 최후의 폴백으로 쓴다(아래 _longest_nonempty_text).
+                                        yield {"type": "reasoning", "text": reasoning_chunk}
+                                        reasoning_buffer += reasoning_chunk
+                                    chunk = str(event.get("content") or "")
+                                    if not chunk:
+                                        continue
+                                    full_text += chunk
+                                    yield {"type": "token", "text": chunk}
+                        break
+                    except httpx.HTTPStatusError as e:
+                        if got_any_chunk or e.response is None or e.response.status_code != 503:
+                            raise
+                        if attempt >= _LLAMACPP_503_MAX_ATTEMPTS - 1:
+                            raise
+                        delay = min(3.0, 0.8 * (attempt + 1))
+                        logger.warning(
+                            "llama-server 503(슬롯 준비 안 됨) — %.1fs 후 재시도 (%d/%d)",
+                            delay,
+                            attempt + 1,
+                            _LLAMACPP_503_MAX_ATTEMPTS,
+                        )
+                        await asyncio.sleep(delay)
+            finally:
+                end_llamacpp_request()
+            elapsed_sec = max(0.001, time.monotonic() - stream_started_at)
+
+            if full_text.strip():
+                # content 델타로 실제 답변이 왔으면 그게 항상 우선이다 — reasoning_buffer와
+                # 길이로 비교해서 고르면(예전 로직) 사고 과정이 답변보다 거의 항상 길어서
+                # 오히려 진짜 답변 대신 사고 과정이 최종 답변으로 뽑혀 버린다.
+                raw_best = full_text
+            else:
+                # content가 끝내 비어 있었던 경우에만(예: reasoning_content로만 답을
+                # 몰아주는 구성) 최후의 폴백으로 사용.
+                raw_best = _strip_reasoning_leak(reasoning_buffer)
+                if not raw_best and reasoning_buffer.strip():
+                    raw_best = reasoning_buffer.strip()
+            full_text = _strip_reasoning_leak(raw_best)
+            if not full_text.strip():
+                full_text = _longest_nonempty_text(last_visible_emitted, raw_best)
+            if full_text and _is_incomplete_stage_direction_response(full_text):
+                full_text = await _retry_non_streaming_final()
+            formatted = _format_chat_response_text(full_text)
+            streamed_formatted = _format_chat_response_text(last_visible_emitted)
+            full_text = _prefer_streamed_over_final(streamed_formatted, formatted, user_message=text)
+            if not full_text:
+                full_text = await _retry_non_streaming_final()
+            if _looks_truncated_response(full_text) and not retried_non_streaming:
+                retry_text = await _retry_non_streaming_final()
+                if retry_text:
+                    full_text = retry_text
+            full_text = _with_truncation_note(full_text, finish_reason)
+            if _looks_truncated_response(full_text):
+                full_text = (
+                    full_text.rstrip()
+                    + "\n\n[응답이 문장 중간에서 끊긴 것 같아요. '계속'이라고 입력하면 이어서 정리해드릴게요.]"
+                )
+            if not full_text:
+                full_text = "응답이 비어 있어서 표시할 내용이 없었어요. 같은 질문을 한 번만 다시 보내주세요."
+            needs_replacement = _recommendation_response_needs_replacement(
+                text, full_text, candidates, recent_codes
+            )
+            if needs_replacement:
+                full_text = _deterministic_recommendation_response(text, candidates, recent_codes)
+            if _rated_works_analysis_response_needs_replacement(text, full_text):
+                rated = fetch_user_rated_products(limit=25)
+                full_text = _deterministic_rated_works_pattern_summary(rated)
+            if _response_still_has_reasoning_leak(full_text):
+                retry_text = await _retry_non_streaming_final()
+                if retry_text:
+                    full_text = retry_text
+            if full_text and not retried_non_streaming:
+                _record_memory(full_text)
+            completion_tokens = (
+                int(usage_info.get("completion_tokens") or 0) if usage_info else 0
+            )
+            yield {
+                "type": "done",
+                "text": full_text,
+                "usage": usage_info,
+                "elapsed_sec": round(elapsed_sec, 3),
+                "tokens_per_sec": (
+                    round(completion_tokens / elapsed_sec, 1) if completion_tokens > 0 else None
+                ),
+            }
+        except Exception as exc:
+            status_code = None
+            response_tail = ""
+            if isinstance(exc, httpx.HTTPStatusError) and exc.response is not None:
+                status_code = exc.response.status_code
+                try:
+                    response_tail = exc.response.text[-1500:]
+                except Exception:
+                    response_tail = ""
+            logger.exception(
+                "Persona chat streaming failed (status=%s), falling back to degraded mode%s",
+                status_code,
+                f" | response tail={response_tail[-500:]}" if response_tail else "",
+            )
+            if status_code == 400 and "exceeds the available context size" in response_tail:
+                fallback_text = await _retry_context_limited_final()
+                if fallback_text:
+                    yield {"type": "done", "text": fallback_text}
+                    return
+            try:
+                degraded = await asyncio.to_thread(
+                    self._degraded_chat_response, text, history=history, product_code=product_code
+                )
+                content = (
+                    ((degraded.get("choices") or [{}])[0].get("message") or {}).get("content")
+                    if isinstance(degraded, dict)
+                    else ""
+                )
+                if content:
+                    _record_memory(content)
+                    yield {"type": "done", "text": content}
+                    return
+            except Exception:
+                pass
+            yield {"type": "error", "message": str(exc)}
+        finally:
+            if managed_llamacpp:
+                await asyncio.to_thread(cleanup_managed_llamacpp_after_job, cancelled=False)
 
     def close_session(self) -> None:
         """Compress the active enhanced-memory session, then clear working memory."""

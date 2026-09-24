@@ -33,7 +33,9 @@ def test_persona_chat_dynamic_temperature_and_tokens(monkeypatch):
     assert _situational_max_tokens("짧게 요약해줘", 2000) == 800
     assert _situational_max_tokens("더 세게 자세히 분석해줘", 2000) == 2000
     assert _situational_max_tokens("비슷한 추천 자세히", 2000) == 2000
-    assert _situational_max_tokens("비슷한 추천 자세히", 2600) == 2400
+    # 추천/분석 의도의 desired가 이제 _MAX_OUTPUT_TOKENS(넉넉한 상한)라서, configured_max가
+    # 그보다 낮으면 configured_max 자체가 기준이 된다(과거엔 하드코딩된 2400이 항상 이겼음).
+    assert _situational_max_tokens("비슷한 추천 자세히", 2600) == 2600
     assert _situational_max_tokens("더 세게 자세히 분석해줘", 3072) == 3072
     monkeypatch.setenv("JAVSTORY_PERSONA_CHAT_MODEL", "qwen3-14b-uncensored")
     monkeypatch.setenv("JAVSTORY_LLAMACPP_CTX", "4096")
@@ -649,6 +651,11 @@ def test_persona_chat_final_only_prompt_blocks_parenthetical_stage_direction(mon
     messages = service.build_messages("더 세게 말해줘", force_final_only=True)
 
     assert any("괄호로 된 행동 지문" in message["content"] for message in messages)
+    # 일부 chat template(예: Qwen3.6)은 system 메시지가 정확히 1개, 인덱스 0에만 있어야
+    # 한다고 엄격히 강제한다 — 위반 시 llama-server가 500(Jinja Exception)을 낸다.
+    system_messages = [m for m in messages if m["role"] == "system"]
+    assert len(system_messages) == 1
+    assert messages[0]["role"] == "system"
 
 
 def test_persona_chat_close_session_compresses_enhanced_memory(tmp_path, monkeypatch):

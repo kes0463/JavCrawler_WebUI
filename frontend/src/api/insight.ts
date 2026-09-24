@@ -1,4 +1,4 @@
-import { get, post } from "./client";
+import { get, post, WS_BASE } from "./client";
 
 /** 집계·추천 재계산은 라이브러리 규모에 따라 30초 이상 걸릴 수 있음 */
 const INSIGHT_TIMEOUT_MS = 120_000;
@@ -135,5 +135,47 @@ export const fetchInsightRecommend = (force = false): Promise<InsightRecommend> 
 export const fetchInsightCollection = (force = false): Promise<InsightCollection> =>
   get(`/api/insight/collection${force ? "?force=true" : ""}`, INSIGHT_TIMEOUT_MS);
 
-export const refreshInsight = (): Promise<InsightOverview> =>
-  post("/api/insight/refresh", undefined, INSIGHT_TIMEOUT_MS);
+export interface InsightPersonaCard {
+  persona_type: string;
+  summary: string;
+  sensual_summary: string;
+  drift_note: string;
+  affinities: string[];
+  turn_ons: string[];
+  avoidances: string[];
+  evidence: { product_code?: string; reason?: string }[];
+  model: string;
+  generated_at: string;
+  generated_reason: string;
+  stale: boolean;
+}
+
+export const fetchPersonaCard = (force = false): Promise<InsightPersonaCard> =>
+  get(`/api/insight/persona-card${force ? "?force=true" : ""}`, INSIGHT_TIMEOUT_MS);
+
+export interface InsightRefreshStartResult {
+  started: boolean;
+  already_running?: boolean;
+}
+
+/** 새로고침을 백그라운드에서 시작 — 진행률은 /api/insight/ws로 브로드캐스트됨 */
+export const startInsightRefresh = (): Promise<InsightRefreshStartResult> =>
+  post("/api/insight/refresh");
+
+export type InsightWsEvent =
+  | { type: "state"; refreshing: boolean }
+  | { type: "progress"; phase: string; progress: number }
+  | { type: "refresh_complete"; progress: number }
+  | { type: "refresh_error"; message: string };
+
+export function createInsightWS(onMessage: (event: InsightWsEvent) => void): WebSocket {
+  const ws = new WebSocket(`${WS_BASE}/api/insight/ws`);
+  ws.onmessage = (e) => {
+    try {
+      onMessage(JSON.parse(e.data) as InsightWsEvent);
+    } catch {
+      /* ignore malformed */
+    }
+  };
+  return ws;
+}

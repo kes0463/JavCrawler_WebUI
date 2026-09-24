@@ -53,7 +53,19 @@ def insight_client(monkeypatch):
                 "pipeline": {"days": 30},
             }
 
+        def fetch_phase(self, phase, *, force_refresh=False):
+            if phase == "core":
+                return self.fetch_overview(force_refresh=force_refresh)
+            if phase == "trends":
+                return self.fetch_trends()
+            if phase == "recommend":
+                return self.fetch_recommend(force_refresh=force_refresh)
+            if phase == "collection":
+                return self.fetch_collection(force_refresh=force_refresh)
+            return {}
+
     monkeypatch.setattr(insight_mod, "_insight", FakeInsight())
+    insight_mod._refresh_running = False
 
     app = FastAPI()
     app.include_router(insight_mod.router, prefix="/api/insight")
@@ -88,7 +100,59 @@ def test_insight_collection(insight_client) -> None:
     assert "distribution" in res.json()
 
 
-def test_insight_refresh(insight_client) -> None:
+def test_insight_refresh_starts_background_job(insight_client) -> None:
+    """POST /refresh no longer blocks — it kicks off a background job with WS progress."""
     res = insight_client.post("/api/insight/refresh")
     assert res.status_code == 200
-    assert res.json()["stats"]["total"] == 10
+    assert res.json() == {"started": True}
+
+
+def test_insight_refresh_rejects_when_already_running(insight_client) -> None:
+    from webapi.routes import insight as insight_mod
+
+    insight_mod._refresh_running = True
+    try:
+        res = insight_client.post("/api/insight/refresh")
+        assert res.status_code == 200
+        assert res.json() == {"started": False, "already_running": True}
+    finally:
+        insight_mod._refresh_running = False
+
+
+def test_run_refresh_job_broadcasts_progress_and_keeps_llamacpp_warm(monkeypatch) -> None:
+    import asyncio
+
+    from webapi.routes import insight as insight_mod
+
+    class FakeInsight:
+        def __init__(self):
+            self.calls: list[str] = []
+
+        def invalidate_recommend_cache(self):
+            pass
+
+        def fetch_phase(self, phase, *, force_refresh=False):
+            self.calls.append(phase)
+            return {}
+
+    fake_insight = FakeInsight()
+    monkeypatch.setattr(insight_mod, "_insight", fake_insight)
+
+    events: list[dict] = []
+
+    async def _fake_broadcast(event):
+        events.append(event)
+
+    monkeypatch.setattr(insight_mod, "_broadcast", _fake_broadcast)
+
+    monkeypatch.setattr(
+        "javstory.analytics.persona_card.get_persona_card",
+        lambda **kw: fake_insight.calls.append("persona_card") or {},
+    )
+
+    insight_mod._refresh_running = True
+    asyncio.run(insight_mod._run_refresh_job())
+
+    assert fake_insight.calls == ["core", "persona_card", "trends", "recommend", "collection"]
+    assert insight_mod._refresh_running is False
+    assert events[-1]["type"] == "refresh_complete"

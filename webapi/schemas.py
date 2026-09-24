@@ -1163,3 +1163,85 @@ class InsightCollectionResponse(BaseModel):
     distribution: dict[str, Any] = {}
     actor_collections: dict[str, Any] = {}
     pipeline: dict[str, Any] = {}
+
+
+class InsightPersonaCardResponse(BaseModel):
+    persona_type: str = ""
+    summary: str = ""
+    sensual_summary: str = ""
+    drift_note: str = ""
+    affinities: list[str] = []
+    turn_ons: list[str] = []
+    avoidances: list[str] = []
+    evidence: list[dict[str, Any]] = []
+    model: str = ""
+    generated_at: str = ""
+    generated_reason: str = ""
+    stale: bool = False
+
+
+class LlamaCppModelOption(BaseModel):
+    id: str
+    label: str
+
+
+class LlamaCppModelsResponse(BaseModel):
+    models: list[LlamaCppModelOption]
+    insight_active_preset_id: str
+    persona_chat_active_preset_id: str
+
+
+class LlamaCppStatusResponse(BaseModel):
+    state: str
+    active_preset_id: Optional[str] = None
+    active_label: Optional[str] = None
+    base_url: str
+    active_requests: int
+    persona_chat_managed: bool
+
+
+class LlamaCppSelectRequest(BaseModel):
+    feature: Literal["insight", "persona_chat"]
+    preset_id: str
+
+
+class LlamaCppSelectResponse(BaseModel):
+    accepted: bool
+    already_active: bool
+
+
+class PersonaChatMessageRequest(BaseModel):
+    message: str
+    history: list[dict[str, str]] = []
+    product_code: Optional[str] = None
+    session_id: Optional[str] = None
+
+
+class PersonaChatSessionSummary(BaseModel):
+    id: str
+    title: str
+    created_at: str
+    updated_at: str
+
+
+class PersonaChatSessionsResponse(BaseModel):
+    sessions: list[PersonaChatSessionSummary]
+
+
+class PersonaChatSessionMessage(BaseModel):
+    role: str
+    content: str
+    reasoning: str = ""
+    ts: str = ""
+
+
+class PersonaChatSessionDetail(BaseModel):
+    id: str
+    title: str
+    created_at: str
+    updated_at: str
+    messages: list[PersonaChatSessionMessage]
+
+
+class PersonaChatSessionRenameRequest(BaseModel):
+    title: str

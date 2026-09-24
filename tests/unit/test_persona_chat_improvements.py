@@ -61,6 +61,37 @@ def test_apply_personalized_ranking_hard_excludes_recent_recommendations():
     assert "BBB-222" in codes
 
 
+def test_apply_personalized_ranking_attaches_matched_seed_title(monkeypatch):
+    """추천 랭킹 단계에서 후보마다 어떤 시드(좋아요/강한 반응) 작품과 가장
+    비슷했는지(matched_seed_title)를 실제로 계산해 붙이는지 종단으로 검증."""
+    import javstory.persona.persona_chat as pc
+
+    monkeypatch.setattr(pc, "_seed_titles_for_codes", lambda codes: {"SEED-1": "좋아하는 작품 제목"})
+    monkeypatch.setattr(
+        pc, "_seed_vectors_for_codes", lambda codes, *, model: {"SEED-1": [1.0, 0.0]}
+    )
+    monkeypatch.setattr(
+        "javstory.library.embeddings.similarity.vector_for_product_code",
+        lambda code, *, model: {"CAND-1": [0.95, 0.05]}.get(code),
+    )
+
+    ctx = {
+        "library_search": {
+            "query": "오늘 볼만한 작품 추천해줘",
+            "results": [{"product_code": "CAND-1", "score": 0.9, "title_ko": "후보"}],
+            "source_policy": {"mode": "taste_recommendation"},
+            "fallback_seed_codes": ["SEED-1"],
+        },
+        "persona": {},
+        "sensual_recommendation_focus": {},
+    }
+    memory = {"strong_reaction_notes": [], "negative_feedback_notes": []}
+    out = pc._apply_personalized_ranking(ctx, memory)
+    item = out["library_search"]["results"][0]
+    assert item["matched_seed_code"] == "SEED-1"
+    assert item["matched_seed_title"] == "좋아하는 작품 제목"
+
+
 def test_diversify_ranked_results_prefers_genre_diversity():
     from javstory.persona import persona_chat as pc
 
@@ -809,3 +840,74 @@ def test_recommendation_reason_notes_query_miss_without_internal_tags():
     assert "미매칭" not in reason
     assert "감점" not in reason
     assert "거리" in reason or "맞아요" in reason
+
+
+def test_recommendation_reason_cites_matched_seed_title_instead_of_generic_bonus():
+    """임베딩 유사도로만 골라진 후보는 예전엔 "최근 반응 좋았던 작품과 결이
+    가까워요"라는 뭉뚱그린 문구만 나왔다 — 실제로 가장 가까웠던 시드 작품 제목이
+    있으면 그걸 직접 인용해야 한다."""
+    from javstory.persona.persona_chat import _fallback_recommendation_reason
+
+    item = {
+        "product_code": "SSPD-175",
+        "title_ko": "SSPD-175 테스트",
+        "genres": ["액션", "격투"],
+        "actors": "나나미 티나",
+        "ranking_reasons": ["임베딩 유사도 근거"],
+        "matched_seed_title": "STAR-471",
+    }
+    reason = _fallback_recommendation_reason(item, include_synopsis=False)
+    assert "STAR-471" in reason
+    assert "최근 반응 좋았던 작품과 결이 가까워요" not in reason
+    # 장르 정보가 있으면 시드 인용 뒤에 보조 문구로 덧붙는다.
+    assert "액션" in reason
+
+
+def test_recommendation_reason_falls_back_to_genre_when_no_seed_match():
+    """matched_seed_title이 없으면 기존 generic bonus로 폴백하되, 장르/배우
+    정보가 있으면 그마저도 덧붙여서 완전히 뭉뚱그려지지 않게 한다."""
+    from javstory.persona.persona_chat import _fallback_recommendation_reason
+
+    item = {
+        "product_code": "PRWF-007",
+        "title_ko": "PRWF-007 테스트",
+        "genres": ["유부녀", "거유"],
+        "ranking_reasons": ["임베딩 유사도 근거"],
+    }
+    reason = _fallback_recommendation_reason(item, include_synopsis=False)
+    assert "최근 반응 좋았던 작품과 결이 가까워요" in reason
+    assert "유부녀" in reason
+
+
+def test_best_seed_match_picks_highest_cosine(monkeypatch):
+    from javstory.persona import persona_chat as pc
+
+    vectors = {
+        "SEED-A": [1.0, 0.0],
+        "SEED-B": [0.0, 1.0],
+        "CAND": [0.9, 0.1],
+    }
+    monkeypatch.setattr(
+        "javstory.library.embeddings.similarity.vector_for_product_code",
+        lambda code, *, model: vectors.get(code),
+    )
+
+    match = pc._best_seed_match(
+        "CAND", {"SEED-A": vectors["SEED-A"], "SEED-B": vectors["SEED-B"]}, model="test-model"
+    )
+    assert match is not None
+    seed_code, score = match
+    assert seed_code == "SEED-A"
+    assert score > 0.9
+
+
+def test_best_seed_match_returns_none_below_threshold(monkeypatch):
+    from javstory.persona import persona_chat as pc
+
+    monkeypatch.setattr(
+        "javstory.library.embeddings.similarity.vector_for_product_code",
+        lambda code, *, model: {"CAND": [1.0, 0.0], "SEED-A": [0.0, 1.0]}.get(code),
+    )
+
+    match = pc._best_seed_match("CAND", {"SEED-A": [0.0, 1.0]}, model="test-model")
+    assert match is None

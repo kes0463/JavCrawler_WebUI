@@ -12,6 +12,13 @@ llama.cpp + TurboQuant KV 캐시 — subprocess ``llama-server`` + OpenAI 호환
   JAVSTORY_LLAMACPP_FIT          on|off (기본 on, N_GPU 미설정 시)
   JAVSTORY_LLAMACPP_CTX          (-c, 기본 8192 × parallel 슬롯 수)
   JAVSTORY_LLAMACPP_PARALLEL     (--parallel, 미지정 시 JAVSTORY_HARVEST_CONCURRENCY 값 사용, 기본 1)
+  JAVSTORY_LLAMACPP_REASONING_FORMAT  --reasoning-format (기본 deepseek, "none"이면 비활성).
+    Qwen3 계열 등 <think>...</think> reasoning 모델에서 생각 과정을 delta.reasoning_content로
+    분리 — 없으면 사고 과정이 그대로 content에 섞여 나와 max_tokens를 낭비하고 답변에도 노출됨.
+  JAVSTORY_LLAMACPP_BATCH_SIZE   -b (프롬프트 처리/prefill 배치 크기, 미지정 시 llama.cpp 기본).
+    크게 잡을수록 prefill(첫 토큰 전 프롬프트 처리)이 빨라지지만 VRAM을 더 씀 — 예: 1024, 2048.
+  JAVSTORY_LLAMACPP_UBATCH_SIZE  -ub (micro-batch, 미지정 시 llama.cpp 기본). 위와 같은 취지.
+    둘 다 안 지정하면 기존과 동일하게 동작(회귀 없음) — VRAM 여유를 보며 조금씩 올려서 테스트 권장.
   JAVSTORY_HARVEST_LLAMACPP_SLOT_CTX  Harvest 번역 슬롯당 ctx (미설정 시 preset.default_ctx × parallel)
   JAVSTORY_HARVEST_CONCURRENCY   Harvest 동시 실행 수 (1~5, parallel 기본 연동)
   JAVSTORY_EMBEDDINGS_PAUSE_DURING_HARVEST  Harvest 중 임베딩 일시정지 (기본 1)
@@ -31,6 +38,24 @@ Harvest 성능 튜닝 (12GB VRAM, 5병렬 예시):
   JAVSTORY_LLAMACPP_PROMPT_CACHE_MB  프롬프트 캐시 RAM 상한 MiB (0=비활성, 기본 0)
   JAVSTORY_LLAMACPP_AUTO_START   1|0 (LLM 작업 시 자동 기동, 기본 1)
   JAVSTORY_LLAMACPP_PREWARM       1|0 (앱 시작 시 선기동, 기본 0)
+
+듀얼 GPU (예: GPU0=3080Ti 12GB 기본, GPU1=5060Ti 16GB 보조):
+  JAVSTORY_LLAMACPP_GPU0_INDEX   기본 GPU의 CUDA 인덱스 (기본 0, 3080Ti)
+  JAVSTORY_LLAMACPP_GPU1_INDEX   보조 GPU의 CUDA 인덱스 (기본 1, 5060Ti)
+  JAVSTORY_LLAMACPP_MULTI_GPU    auto|on|off (기본 auto)
+    - auto: GPU가 실제로 2장 이상 감지되고, GGUF 파일 크기가 임계값을 넘을 때만
+      GPU1도 노출해 분할 로딩. GPU가 1장뿐이면(예: 아직 3080Ti 미장착) 항상 단일 GPU.
+    - on/off: 감지 결과와 무관하게 강제
+  JAVSTORY_LLAMACPP_GPU_SPLIT_THRESHOLD_GB  분할 임계값 GiB (기본 12 = 3080Ti VRAM)
+  JAVSTORY_LLAMACPP_MAIN_GPU     분할 시 llama-server --main-gpu (기본 0 = GPU0/3080Ti)
+  JAVSTORY_LLAMACPP_SPLIT_MODE   layer|row|none (기본 layer, --split-mode)
+  JAVSTORY_LLAMACPP_TENSOR_SPLIT 수동 비율 오버라이드 (예: "1,0.5"). 미지정 시 --tensor-split을
+    아예 안 넘겨 llama.cpp -fit이 ngl과 분배 비율을 함께 계산하게 둔다 — 직접 넘기면
+    ("model_params::tensor_split already set by user") -fit의 자체 적합성 검사가
+    건너뛰어져 VRAM이 실제로 부족할 때 Windows 드라이버가 시스템 RAM으로 조용히
+    넘쳐서(spillover) 10~50배 느려질 수 있다. 지정할 거면 JAVSTORY_LLAMACPP_N_GPU_LAYERS도
+    함께 명시해 -fit을 완전히 끄고 수동으로 다 책임지는 걸 권장.
+  JAVSTORY_LLAMACPP_GPU_COUNT_OVERRIDE  감지된 GPU 수 강제 지정(테스트/디버그용)
 """
 
 from __future__ import annotations
@@ -69,6 +94,7 @@ _idle_shutdown_logged = False
 _idle_managed_port: int | None = None
 _reuse_log_base: str | None = None
 _active_server_config_key: str | None = None
+_spawning: bool = False
 
 LoggerFunc = Callable[[str], Any]
 
@@ -187,10 +213,17 @@ def harvest_concurrency_for_llamacpp() -> int:
 
 def server_config_fingerprint(cfg: "LlamaCppServerConfig", gguf: Path) -> str:
     ngl = cfg.n_gpu_layers if cfg.n_gpu_layers is not None else "fit"
+    # tensor_split은 사용자가 JAVSTORY_LLAMACPP_TENSOR_SPLIT을 명시한 경우에만 지문에
+    # 반영한다 — 매 호출 값이 흔들릴 수 있는 값을 그대로 넣으면 실제로는 설정이 안
+    # 바뀌었는데도 "불일치"로 오인해 llama-server를 매번 재시작하게 될 수 있다.
+    ts_explicit = (os.environ.get("JAVSTORY_LLAMACPP_TENSOR_SPLIT", "") or "").strip()
+    ts_key = ts_explicit if ts_explicit else "auto"
     return (
         f"{gguf.resolve()}|c={cfg.ctx_size}|p={cfg.parallel}|ngl={ngl}|"
         f"fit={int(cfg.fit_vram)}|k={cfg.cache_type_k}|v={cfg.cache_type_v}|"
-        f"pcm={cfg.prompt_cache_mib}"
+        f"pcm={cfg.prompt_cache_mib}|cvd={cfg.cuda_visible_devices}|mg={cfg.main_gpu}|"
+        f"ts={ts_key}|sm={cfg.split_mode}|rf={cfg.reasoning_format}|"
+        f"b={cfg.batch_size or '-'}|ub={cfg.ubatch_size or '-'}"
     )
 
 
@@ -200,7 +233,7 @@ def describe_llamacpp_spawn_diagnostics(
     """Return would-be llama-server argv and env snapshot for troubleshooting."""
     try:
         runtime = resolve_translation_llamacpp_runtime(model_cfg)
-        cfg = LlamaCppServerConfig.from_env(runtime.preset)
+        cfg = LlamaCppServerConfig.from_env(runtime.preset, runtime.gguf)
         argv = build_server_argv(runtime.gguf, cfg, runtime.preset)
         log_path = Path(__file__).resolve().parents[2] / "data" / "logs" / "llama-server.log"
         return {
@@ -217,6 +250,7 @@ def describe_llamacpp_spawn_diagnostics(
             "log_exists": log_path.is_file(),
             "harvest_concurrency": harvest_concurrency_for_llamacpp(),
             "harvest_slot_ctx_env": os.environ.get("JAVSTORY_HARVEST_LLAMACPP_SLOT_CTX", ""),
+            "gpu_plan": resolve_llamacpp_gpu_plan(runtime.gguf),
         }
     except Exception as e:
         return {"error": f"{type(e).__name__}: {e}"}
@@ -246,9 +280,10 @@ def _finalize_server_ready(
     config_key: str | None = None,
     logger_func: LoggerFunc | None = None,
 ) -> None:
-    global _active_server_config_key
+    global _active_server_config_key, _spawning
     if config_key:
         _active_server_config_key = config_key
+    _spawning = False
     _track_managed_server(runtime_id or preset.id, base)
     _ensure_idle_monitor_started(logger_func=logger_func)
 
@@ -285,8 +320,18 @@ def cleanup_managed_llamacpp_after_job(
     cancelled: bool = False,
     logger_func: LoggerFunc | None = None,
 ) -> None:
-    if persona_chat_uses_managed_llamacpp():
-        cleanup_llamacpp_after_job(cancelled=cancelled, logger_func=logger_func)
+    """페르소나챗 턴 종료 후 정리 — ``cleanup_llamacpp_after_job``과 달리
+    ``JAVSTORY_LLAMACPP_STOP_AFTER_JOB``(번역/교정 배치용 플래그)은 무시한다.
+
+    채팅은 턴마다 연속으로 이어지므로, 매 턴 정상 완료 시 서버를 내렸다 올리면
+    (특히 대형 모델) 다음 메시지마다 VRAM을 통째로 재로딩하게 된다. 사용자가
+    직접 중지(``cancelled=True``)했을 때만 즉시 종료하고, 그 외엔 유휴 타임아웃
+    모니터가 자동으로 정리하게 둔다.
+    """
+    if not persona_chat_uses_managed_llamacpp():
+        return
+    if cancelled:
+        stop_llamacpp_server(logger_func=logger_func)
 
 
 def _env_bool(key: str, default: bool = True) -> bool:
@@ -301,6 +346,103 @@ def _env_int(key: str, default: int) -> int:
         return int((os.environ.get(key, str(default)) or "").strip())
     except ValueError:
         return default
+
+
+def _env_float(key: str, default: float) -> float:
+    try:
+        return float((os.environ.get(key, str(default)) or "").strip())
+    except ValueError:
+        return default
+
+
+_gpu_count_cache: int | None = None
+
+
+def _detected_cuda_gpu_count() -> int:
+    """설치된 NVIDIA GPU 개수 (``nvidia-smi -L`` 기준, 프로세스 수명 동안 캐시)."""
+    global _gpu_count_cache
+    override = (os.environ.get("JAVSTORY_LLAMACPP_GPU_COUNT_OVERRIDE", "") or "").strip()
+    if override:
+        try:
+            return max(0, int(override))
+        except ValueError:
+            pass
+    if _gpu_count_cache is not None:
+        return _gpu_count_cache
+    count = 0
+    try:
+        cflags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0  # type: ignore[attr-defined]
+        result = subprocess.run(
+            ["nvidia-smi", "-L"],
+            capture_output=True, text=True, check=False, timeout=5,
+            creationflags=cflags,
+        )
+        count = sum(1 for ln in result.stdout.splitlines() if ln.strip().upper().startswith("GPU "))
+    except Exception:
+        count = 0
+    _gpu_count_cache = count
+    return count
+
+
+def llamacpp_gpu_split_threshold_gb() -> float:
+    return max(0.1, _env_float("JAVSTORY_LLAMACPP_GPU_SPLIT_THRESHOLD_GB", 12.0))
+
+
+def _gguf_size_gb(gguf: Path | None) -> float:
+    if gguf is None:
+        return 0.0
+    try:
+        return gguf.stat().st_size / (1024**3)
+    except OSError:
+        return 0.0
+
+
+def resolve_llamacpp_gpu_plan(gguf: Path | None = None) -> Dict[str, Any]:
+    """GPU0(기본, 예: 3080Ti) + GPU1(보조, 예: 5060Ti) 분할 로딩 계획.
+
+    기본은 GPU0 단독 사용. ``JAVSTORY_LLAMACPP_MULTI_GPU=auto``(기본)에서는
+    GPU가 실제로 2장 이상 감지되고 GGUF 파일 크기가 임계값을 넘을 때만 GPU1을
+    노출해 llama.cpp가 레이어를 분할 로딩하게 한다 — GPU가 1장뿐이면(예: 아직
+    3080Ti를 재장착하기 전) 크기와 무관하게 항상 GPU0 단독으로 동작해 기존
+    ``-fit``(VRAM 자동 맞춤) 동작을 그대로 보존한다.
+    """
+    gpu0 = max(0, _env_int("JAVSTORY_LLAMACPP_GPU0_INDEX", 0))
+    gpu1 = max(0, _env_int("JAVSTORY_LLAMACPP_GPU1_INDEX", 1))
+    mode = (os.environ.get("JAVSTORY_LLAMACPP_MULTI_GPU", "auto") or "auto").strip().lower()
+    threshold_gb = llamacpp_gpu_split_threshold_gb()
+    size_gb = _gguf_size_gb(gguf)
+    gpu_count = _detected_cuda_gpu_count()
+
+    if mode in ("on", "1", "true", "yes", "always"):
+        multi = True
+    elif mode in ("off", "0", "false", "no", "never"):
+        multi = False
+    else:
+        multi = gpu_count > gpu1 and size_gb > threshold_gb
+
+    cuda_visible = f"{gpu0},{gpu1}" if multi else str(gpu0)
+    main_gpu = max(0, _env_int("JAVSTORY_LLAMACPP_MAIN_GPU", 0))
+    # tensor_split을 명시하지 않은 채로 두면 -fit이 ngl과 GPU 분배 비율을 함께
+    # 계산해 VRAM에 안전하게 맞춘다. 여기서 자동으로 비율을 계산해 넘기면(과거엔
+    # GPU0 대역폭 가중치를 줬었음) llama.cpp가 "tensor_split already set by user"로
+    # 보고 그 fit 계산 자체를 건너뛰어 버려서(-ngl 강제와 동일한 문제) VRAM
+    # 오버플로 시 Windows 드라이버가 시스템 RAM으로 조용히 넘겨(spillover)
+    # 10~50배 느려질 수 있다 — 그래서 명시적으로 지정한 경우에만 넘긴다.
+    tensor_split = (os.environ.get("JAVSTORY_LLAMACPP_TENSOR_SPLIT", "") or "").strip() or None
+    split_mode = (os.environ.get("JAVSTORY_LLAMACPP_SPLIT_MODE", "layer") or "layer").strip().lower()
+
+    return {
+        "multi_gpu": multi,
+        "gpu0_index": gpu0,
+        "gpu1_index": gpu1,
+        "detected_gpu_count": gpu_count,
+        "cuda_visible_devices": cuda_visible,
+        "main_gpu": main_gpu,
+        "tensor_split": tensor_split,
+        "split_mode": split_mode,
+        "gguf_size_gb": round(size_gb, 2),
+        "threshold_gb": threshold_gb,
+    }
 
 
 def touch_llamacpp_activity() -> None:
@@ -332,6 +474,38 @@ def llamacpp_request_scope():
         end_llamacpp_request()
 
 
+def get_active_llamacpp_requests() -> int:
+    with _lock:
+        return _active_requests
+
+
+def _wait_for_llamacpp_idle(
+    timeout: float = 30.0,
+    *,
+    poll_interval: float = 0.25,
+    logger_func: LoggerFunc | None = None,
+) -> bool:
+    """진행 중인 요청(_active_requests)이 0이 될 때까지 대기.
+
+    다른 기능(번역/교정/페르소나챗/페르소나카드)이 공유 llama-server를 쓰는 중에
+    모델 교체를 위해 프로세스를 죽이지 않도록, kill 직전 호출한다. 타임아웃되면
+    경고만 남기고 False를 반환 — 호출자는 그래도 진행한다(영원히 막지 않음).
+    """
+    if get_active_llamacpp_requests() <= 0:
+        return True
+    log = logger_func or print
+    log("[llama.cpp] 다른 작업이 llama-server를 사용 중 — 완료 대기 중...")
+    deadline = time.time() + max(0.0, timeout)
+    while time.time() < deadline:
+        if get_active_llamacpp_requests() <= 0:
+            return True
+        time.sleep(poll_interval)
+    log(
+        f"[llama.cpp] {timeout:.0f}초 대기 후에도 사용 중 — 진행(모델 교체를 계속합니다)"
+    )
+    return False
+
+
 def llamacpp_base_url() -> str:
     if _active_base_url:
         return _active_base_url.rstrip("/")
@@ -345,6 +519,40 @@ def llamacpp_base_url() -> str:
 
 def llamacpp_openai_base_url() -> str:
     return f"{llamacpp_base_url().rstrip('/')}/v1"
+
+
+def llamacpp_server_status() -> Dict[str, Any]:
+    """Insight/Persona Chat 모델 드롭다운의 상태 폴링용 스냅샷.
+
+    state: "stopped" | "spawning" | "ready" | "busy"
+    """
+    with _lock:
+        proc = _server_proc
+        preset_id = _active_preset_id
+        spawning = _spawning
+        active = _active_requests
+
+    if proc is None and not spawning:
+        state = "stopped"
+    elif spawning:
+        state = "spawning"
+    elif active > 0:
+        state = "busy"
+    else:
+        state = "ready"
+
+    label = preset_id
+    if preset_id and preset_id in LLAMACPP_MODEL_PRESETS:
+        label = LLAMACPP_MODEL_PRESETS[preset_id].label
+
+    return {
+        "state": state,
+        "active_preset_id": preset_id,
+        "active_label": label,
+        "base_url": llamacpp_base_url(),
+        "active_requests": active,
+        "persona_chat_managed": persona_chat_uses_managed_llamacpp(),
+    }
 
 
 def llamacpp_bin_path() -> Path:
@@ -416,6 +624,101 @@ LLAMACPP_MODEL_PRESETS: Dict[str, LlamaCppModelPreset] = {
         default_ngl=99,
         extra_args=("--flash-attn", "on"),
         serve_alias="qwen2.5-14b",
+    ),
+    # 듀얼 GPU(3080Ti 12GB + 5060Ti 16GB) 대형 모델 — GGUF 크기가
+    # JAVSTORY_LLAMACPP_GPU_SPLIT_THRESHOLD_GB(기본 12GB)를 넘으면 자동으로
+    # GPU0+GPU1 분할 로딩된다 (resolve_llamacpp_gpu_plan 참고).
+    "gemma-3-12b": LlamaCppModelPreset(
+        id="gemma-3-12b",
+        label="Gemma-3-12B-Instruct",
+        gguf_env="JAVSTORY_LLAMACPP_GEMMA3_12B_GGUF",
+        default_ctx=LLAMACPP_DEFAULT_CTX_DENSE,
+        default_ngl=-1,
+        extra_args=("--flash-attn", "on"),
+        serve_alias="gemma-3-12b",
+    ),
+    "gemma4-31b-uncensored": LlamaCppModelPreset(
+        id="gemma4-31b-uncensored",
+        label="HauhauCS/Gemma4-31B-QAT-Uncensored-Balanced",
+        gguf_env="JAVSTORY_LLAMACPP_GEMMA4_31B_UNC_GGUF",
+        default_ctx=LLAMACPP_DEFAULT_CTX_DENSE,
+        default_ngl=-1,
+        extra_args=("--flash-attn", "on"),
+        serve_alias="gemma4-31b-uncensored",
+    ),
+    "qwen38-27b-hauhaucs-uncensored": LlamaCppModelPreset(
+        id="qwen38-27b-hauhaucs-uncensored",
+        label="HauhauCS/Qwen3.8-27B-Uncensored-Aggressive",
+        gguf_env="JAVSTORY_LLAMACPP_QWEN38_27B_HAUHAU_GGUF",
+        default_ctx=LLAMACPP_DEFAULT_CTX_DENSE,
+        default_ngl=-1,
+        extra_args=("--flash-attn", "on"),
+        serve_alias="qwen38-27b-hauhaucs-uncensored",
+    ),
+    "qwen38-27b-obliterated": LlamaCppModelPreset(
+        id="qwen38-27b-obliterated",
+        label="OBLITERATUS/Qwen3.8-27B-OBLITERATED",
+        gguf_env="JAVSTORY_LLAMACPP_QWEN38_27B_OBLITERATED_GGUF",
+        default_ctx=LLAMACPP_DEFAULT_CTX_DENSE,
+        default_ngl=-1,
+        extra_args=("--flash-attn", "on"),
+        serve_alias="qwen38-27b-obliterated",
+    ),
+    "qwen38-27b-orcarouter-uncensored": LlamaCppModelPreset(
+        id="qwen38-27b-orcarouter-uncensored",
+        label="orcarouter/Qwen3.8-27B-Uncensored",
+        gguf_env="JAVSTORY_LLAMACPP_QWEN38_27B_ORCAROUTER_GGUF",
+        default_ctx=LLAMACPP_DEFAULT_CTX_DENSE,
+        default_ngl=-1,
+        extra_args=("--flash-attn", "on"),
+        serve_alias="qwen38-27b-orcarouter-uncensored",
+    ),
+    # mmproj(비전) 동봉본이지만 --mmproj 인자는 아직 배선되지 않아 텍스트 전용으로만 서빙됨.
+    "qwen25-vl-7b-abliterated": LlamaCppModelPreset(
+        id="qwen25-vl-7b-abliterated",
+        label="Qwen2.5-VL-7B-Instruct-abliterated",
+        gguf_env="JAVSTORY_LLAMACPP_QWEN25_VL_7B_GGUF",
+        default_ctx=LLAMACPP_DEFAULT_CTX_DENSE,
+        default_ngl=-1,
+        extra_args=("--flash-attn", "on"),
+        serve_alias="qwen25-vl-7b-abliterated",
+    ),
+    "qwen35-9b-uncensored": LlamaCppModelPreset(
+        id="qwen35-9b-uncensored",
+        label="Qwen3.5-9B-Uncensored-HauhauCS-Aggressive",
+        gguf_env="JAVSTORY_LLAMACPP_QWEN35_9B_GGUF",
+        default_ctx=LLAMACPP_DEFAULT_CTX_DENSE,
+        default_ngl=-1,
+        extra_args=("--flash-attn", "on"),
+        serve_alias="qwen35-9b-uncensored",
+    ),
+    # MoE(A3B, 활성 파라미터 ~3B) — dense 프리셋과 동일한 argv로 기동(전용 --n-cpu-moe 오프로드 미구현).
+    "qwen36-35b-a3b-uncensored": LlamaCppModelPreset(
+        id="qwen36-35b-a3b-uncensored",
+        label="Qwen3.6-35B-A3B-Uncensored-HauhauCS-Aggressive",
+        gguf_env="JAVSTORY_LLAMACPP_QWEN36_35B_A3B_GGUF",
+        default_ctx=LLAMACPP_DEFAULT_CTX_DENSE,
+        default_ngl=-1,
+        extra_args=("--flash-attn", "on"),
+        serve_alias="qwen36-35b-a3b-uncensored",
+    ),
+    "translategemma-12b": LlamaCppModelPreset(
+        id="translategemma-12b",
+        label="TranslateGemma-12B-it",
+        gguf_env="JAVSTORY_LLAMACPP_TRANSLATEGEMMA_12B_GGUF",
+        default_ctx=LLAMACPP_DEFAULT_CTX_DENSE,
+        default_ngl=-1,
+        extra_args=("--flash-attn", "on"),
+        serve_alias="translategemma-12b",
+    ),
+    "qwen38-27b-unsloth": LlamaCppModelPreset(
+        id="qwen38-27b-unsloth",
+        label="unsloth/Qwen3.8-27B-UD-Q4_K_XL",
+        gguf_env="JAVSTORY_LLAMACPP_QWEN38_27B_UNSLOTH_GGUF",
+        default_ctx=LLAMACPP_DEFAULT_CTX_DENSE,
+        default_ngl=-1,
+        extra_args=("--flash-attn", "on"),
+        serve_alias="qwen38-27b-unsloth",
     ),
 }
 
@@ -743,17 +1046,36 @@ class LlamaCppServerConfig:
     fit_vram: bool = True
     prompt_cache_mib: int = LLAMACPP_DEFAULT_PROMPT_CACHE_MIB
     extra_cli: List[str] = field(default_factory=list)
+    multi_gpu: bool = False
+    main_gpu: int = 0
+    tensor_split: str | None = None
+    split_mode: str = "layer"
+    cuda_visible_devices: str = "0"
+    reasoning_format: str = "deepseek"
+    batch_size: int | None = None
+    ubatch_size: int | None = None
 
     @classmethod
-    def from_env(cls, preset: LlamaCppModelPreset) -> "LlamaCppServerConfig":
+    def from_env(
+        cls, preset: LlamaCppModelPreset, gguf: Path | None = None
+    ) -> "LlamaCppServerConfig":
         base = urlparse(llamacpp_base_url())
         host = base.hostname or "127.0.0.1"
         port = base.port or _env_int("JAVSTORY_LLAMACPP_PORT", 8081)
         ctk = (os.environ.get("JAVSTORY_LLAMACPP_CACHE_TYPE_K", "turbo3") or "turbo3").strip()
         ctv = (os.environ.get("JAVSTORY_LLAMACPP_CACHE_TYPE_V", "q8_0") or "q8_0").strip()
+        gpu_plan = resolve_llamacpp_gpu_plan(gguf)
         ngl_raw = (os.environ.get("JAVSTORY_LLAMACPP_N_GPU_LAYERS", "") or "").strip()
-        if ngl_raw:
-            ngl: int | None = max(0, int(ngl_raw))
+        if ngl_raw and gpu_plan["multi_gpu"]:
+            # 듀얼 GPU 분할 로딩(대형 모델)에서는 -ngl 강제값을 무시하고 -fit에 맡긴다.
+            # llama.cpp는 -ngl이 명시되면 "실제로 다 들어가는지" 자체 적합성 검사를
+            # 건너뛰고 그대로 밀어붙이는데(로그: "failed to fit params to free device
+            # memory: n_gpu_layers already set by user, abort"), 안 들어가면 Windows
+            # 드라이버가 에러 없이 시스템 RAM으로 넘쳐서(spillover) 10~50배 느려진다.
+            # 단일 GPU에 이미 다 들어가는 작은 모델에서는 강제값을 그대로 존중한다.
+            ngl: int | None = None
+        elif ngl_raw:
+            ngl = max(0, int(ngl_raw))
         elif preset.default_ngl >= 0:
             ngl = preset.default_ngl
         else:
@@ -800,6 +1122,23 @@ class LlamaCppServerConfig:
             prompt_cache_mib = LLAMACPP_DEFAULT_PROMPT_CACHE_MIB
         extra_raw = (os.environ.get("JAVSTORY_LLAMACPP_EXTRA_ARGS", "") or "").strip()
         extra = [x for x in extra_raw.split() if x] if extra_raw else []
+        reasoning_format = (
+            os.environ.get("JAVSTORY_LLAMACPP_REASONING_FORMAT", "deepseek") or "deepseek"
+        ).strip().lower()
+        batch_raw = (os.environ.get("JAVSTORY_LLAMACPP_BATCH_SIZE", "") or "").strip()
+        batch_size = None
+        if batch_raw:
+            try:
+                batch_size = max(32, int(batch_raw))
+            except ValueError:
+                batch_size = None
+        ubatch_raw = (os.environ.get("JAVSTORY_LLAMACPP_UBATCH_SIZE", "") or "").strip()
+        ubatch_size = None
+        if ubatch_raw:
+            try:
+                ubatch_size = max(32, int(ubatch_raw))
+            except ValueError:
+                ubatch_size = None
         return cls(
             host=host,
             port=int(port),
@@ -811,6 +1150,14 @@ class LlamaCppServerConfig:
             fit_vram=fit_vram,
             prompt_cache_mib=prompt_cache_mib,
             extra_cli=extra,
+            multi_gpu=gpu_plan["multi_gpu"],
+            main_gpu=gpu_plan["main_gpu"],
+            tensor_split=gpu_plan["tensor_split"],
+            split_mode=gpu_plan["split_mode"],
+            cuda_visible_devices=gpu_plan["cuda_visible_devices"],
+            reasoning_format=reasoning_format,
+            batch_size=batch_size,
+            ubatch_size=ubatch_size,
         )
 
 
@@ -840,12 +1187,29 @@ def build_server_argv(
         "--cache-ram",
         str(max(0, cfg.prompt_cache_mib)),
     ]
+    if cfg.batch_size is not None:
+        # -b: 프롬프트 처리(prefill) 배치 크기. 크게 잡을수록 GPU 연산 병렬성을 더
+        # 활용해 prefill이 빨라지지만 VRAM을 더 씀 — 미지정 시 llama.cpp 기본값 사용.
+        argv.extend(["-b", str(cfg.batch_size)])
+    if cfg.ubatch_size is not None:
+        argv.extend(["-ub", str(cfg.ubatch_size)])
     if cfg.n_gpu_layers is not None:
         argv.extend(["-ngl", str(cfg.n_gpu_layers)])
     elif cfg.fit_vram:
         argv.extend(["-fit", "on"])
+    if cfg.multi_gpu:
+        argv.extend(["--main-gpu", str(cfg.main_gpu)])
+        if cfg.split_mode and cfg.split_mode != "none":
+            argv.extend(["--split-mode", cfg.split_mode])
+        if cfg.tensor_split:
+            argv.extend(["--tensor-split", cfg.tensor_split])
     if preset.serve_alias:
         argv.extend(["--alias", preset.serve_alias])
+    if cfg.reasoning_format and cfg.reasoning_format != "none":
+        # <think>...</think> 등 모델의 reasoning 블록을 content가 아니라
+        # delta.reasoning_content로 분리 — 안 하면 사고 과정이 그대로 content에
+        # 섞여 나와 max_tokens를 갉아먹고(응답이 일찍 잘림) 답변에도 그대로 노출된다.
+        argv.extend(["--reasoning-format", cfg.reasoning_format])
     threads_raw = (os.environ.get("JAVSTORY_LLAMACPP_THREADS", "") or "").strip()
     if threads_raw:
         try:
@@ -1125,7 +1489,8 @@ def _terminate_llamacpp_proc(
 
 def stop_llamacpp_server(*, logger_func: LoggerFunc | None = None) -> None:
     global _server_proc, _active_preset_id, _active_base_url, _active_requests, _idle_managed_port
-    global _active_server_config_key
+    global _active_server_config_key, _spawning
+    _wait_for_llamacpp_idle(logger_func=logger_func)
     _idle_stop_event.set()
     with _lock:
         proc = _server_proc
@@ -1136,6 +1501,7 @@ def stop_llamacpp_server(*, logger_func: LoggerFunc | None = None) -> None:
         _active_server_config_key = None
         _active_requests = 0
         _idle_managed_port = None
+        _spawning = False
     if proc is not None:
         _terminate_llamacpp_proc(proc, logger_func=logger_func)
         return
@@ -1190,9 +1556,23 @@ def _server_exit_hint(tail: str) -> str:
     return ""
 
 
+def _llamacpp_child_env(cfg: "LlamaCppServerConfig") -> Dict[str, str]:
+    """자식 프로세스 전용 env — 부모 프로세스(임베딩 등 in-process GPU 사용)에는 영향 없음.
+
+    ``CUDA_DEVICE_ORDER=PCI_BUS_ID`` 를 강제해, 신형 GPU가 더 빠르다고 드라이버가
+    임의로 앞 인덱스에 배치하는 것을 막고 ``JAVSTORY_LLAMACPP_GPU0/1_INDEX`` 가
+    항상 물리 슬롯 순서(nvidia-smi 순서)와 일치하게 한다.
+    """
+    env = dict(os.environ)
+    env["CUDA_VISIBLE_DEVICES"] = cfg.cuda_visible_devices
+    env["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
+    return env
+
+
 def _spawn_server(
     argv: List[str],
     *,
+    env: Dict[str, str] | None = None,
     logger_func: LoggerFunc | None = None,
 ) -> subprocess.Popen:
     global _log_path
@@ -1203,6 +1583,8 @@ def _spawn_server(
     log_f = open(_log_path, "a", encoding="utf-8")
     log_f.write(f"\n--- spawn {time.strftime('%Y-%m-%d %H:%M:%S')} ---\n")
     log_f.write(" ".join(argv) + "\n")
+    if env is not None:
+        log_f.write(f"CUDA_VISIBLE_DEVICES={env.get('CUDA_VISIBLE_DEVICES')}\n")
     log_f.flush()
     creationflags = 0
     if sys.platform == "win32":
@@ -1212,6 +1594,7 @@ def _spawn_server(
         stdout=log_f,
         stderr=subprocess.STDOUT,
         creationflags=creationflags,
+        env=env,
     )
     log(f"[llama.cpp] llama-server 시작 (pid={proc.pid}, log={_log_path})")
     return proc
@@ -1243,7 +1626,7 @@ def _ensure_llamacpp_server_ready_locked(
     logger_func: LoggerFunc | None = None,
     wait_sec: float = 120.0,
 ) -> str:
-    global _server_proc, _active_preset_id, _active_base_url, _last_activity_at, _active_server_config_key
+    global _server_proc, _active_preset_id, _active_base_url, _last_activity_at, _active_server_config_key, _spawning
     if not _env_bool("JAVSTORY_LLAMACPP_AUTO_START", True):
         base = llamacpp_base_url()
         if not _server_health_ok(base):
@@ -1266,11 +1649,17 @@ def _ensure_llamacpp_server_ready_locked(
     runtime = resolve_translation_llamacpp_runtime(model_cfg)
     preset = runtime.preset
     gguf = runtime.gguf
-    cfg = LlamaCppServerConfig.from_env(preset)
+    cfg = LlamaCppServerConfig.from_env(preset, gguf)
     base = llamacpp_base_url()
     expected_config_key = server_config_fingerprint(cfg, gguf)
 
     log = logger_func or print
+    if cfg.multi_gpu:
+        log(
+            f"[llama.cpp] GGUF {gguf.name} ({_gguf_size_gb(gguf):.1f}GB > "
+            f"{llamacpp_gpu_split_threshold_gb():.1f}GB) — 듀얼 GPU 분할 로딩 "
+            f"(CUDA_VISIBLE_DEVICES={cfg.cuda_visible_devices}, main-gpu={cfg.main_gpu})"
+        )
 
     proc_to_stop: subprocess.Popen | None = None
     check_proc: subprocess.Popen | None = None
@@ -1322,6 +1711,7 @@ def _ensure_llamacpp_server_ready_locked(
         proc_to_stop = check_proc
 
     if proc_to_stop is not None:
+        _wait_for_llamacpp_idle(logger_func=log)
         _terminate_llamacpp_proc(proc_to_stop, logger_func=log)
 
     initial_health_ok = _server_health_ok(base)
@@ -1340,6 +1730,7 @@ def _ensure_llamacpp_server_ready_locked(
                 "[llama.cpp] 실행 중 llama-server 설정 불일치 — 재기동 "
                 f"({expected_config_key})"
             )
+            _wait_for_llamacpp_idle(logger_func=log)
             if sys.platform == "win32":
                 _kill_port_owner_windows(cfg.port, logger_func=log)
             if not _wait_for_port_free(cfg.host, cfg.port, timeout=15.0):
@@ -1408,7 +1799,9 @@ def _ensure_llamacpp_server_ready_locked(
         log(f"[llama.cpp] 포트 {cfg.port} 해제 확인 — 서버 시작")
 
     argv = build_server_argv(gguf, cfg, preset)
-    proc = _spawn_server(argv, logger_func=log)
+    child_env = _llamacpp_child_env(cfg)
+    _spawning = True
+    proc = _spawn_server(argv, env=child_env, logger_func=log)
     with _lock:
         # Register immediately so app shutdown can stop the server even while it is still loading.
         _server_proc = proc
@@ -1447,7 +1840,7 @@ def _ensure_llamacpp_server_ready_locked(
                     _kill_port_owner_windows(cfg.port, logger_func=log)
                 if _wait_for_port_free(cfg.host, cfg.port, timeout=15.0):
                     log(f"[llama.cpp] 포트 {cfg.port} 해제 — spawn 재시도")
-                    proc2 = _spawn_server(argv, logger_func=log)
+                    proc2 = _spawn_server(argv, env=child_env, logger_func=log)
                     with _lock:
                         _server_proc = proc2
                         _active_preset_id = runtime.runtime_id
@@ -1473,6 +1866,7 @@ def _ensure_llamacpp_server_ready_locked(
                 msg += f"\n{hint}"
             if tail:
                 msg += f"\n--- log tail ---\n{tail}"
+            _spawning = False
             raise RuntimeError(msg)
         if _server_health_ok(base, timeout=2.0):
             with _lock:
@@ -1488,6 +1882,7 @@ def _ensure_llamacpp_server_ready_locked(
             return runtime.serve_alias
         time.sleep(0.5)
 
+    _spawning = False
     stop_llamacpp_server(logger_func=log)
     raise TimeoutError(
         f"llama-server 헬스체크 시간 초과 ({wait_sec}s). 로그: {_log_path}"

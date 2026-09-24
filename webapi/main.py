@@ -28,7 +28,19 @@ import asyncio
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from webapi.routes import actress, dashboard, folder_watch, harvest, insight, library, playback, processing, settings
+from webapi.routes import (
+    actress,
+    dashboard,
+    folder_watch,
+    harvest,
+    insight,
+    library,
+    llamacpp,
+    persona_chat,
+    playback,
+    processing,
+    settings,
+)
 from webapi.routes.harvest import bind_harvest_broadcast
 from webapi.routes.processing import bind_processing_broadcast
 
@@ -88,6 +100,19 @@ async def lifespan(app: FastAPI):
             pass
 
     threading.Thread(target=_embeddings_backfill_on_start, daemon=True, name="EmbeddingsBackfill").start()
+
+    def _warm_insight_recommend_cache() -> None:
+        try:
+            from javstory.library.embeddings.pipeline import embeddings_ollama_model_from_env
+            from javstory.library.embeddings.similarity import warm_vectors_cache
+
+            warm_vectors_cache(model=embeddings_ollama_model_from_env())
+        except Exception:
+            pass
+
+    threading.Thread(
+        target=_warm_insight_recommend_cache, daemon=True, name="InsightRecommendCacheWarm"
+    ).start()
 
     def _purge_translation_chunk_cache() -> None:
         if (os.environ.get("JAVSTORY_TRANSLATION_CHUNK_CACHE_PURGE_ON_START", "1") or "").strip().lower() in {
@@ -167,6 +192,8 @@ app.include_router(folder_watch.router, prefix="/api/folder-watch", tags=["folde
 app.include_router(insight.router, prefix="/api/insight", tags=["insight"])
 app.include_router(processing.router, prefix="/api/processing", tags=["processing"])
 app.include_router(settings.router, prefix="/api/settings", tags=["settings"])
+app.include_router(llamacpp.router, prefix="/api/llamacpp", tags=["llamacpp"])
+app.include_router(persona_chat.router, prefix="/api/persona-chat", tags=["persona-chat"])
 
 
 @app.get("/health")

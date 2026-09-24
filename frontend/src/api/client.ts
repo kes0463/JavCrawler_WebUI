@@ -77,3 +77,39 @@ export const patch = <T>(path: string, body?: unknown, timeoutMs = MUTATION_TIME
 export const WS_BASE = API_BASE
   ? API_BASE.replace(/^http/, "ws")
   : `${window.location.protocol === "https:" ? "wss:" : "ws:"}//${window.location.hostname}:18765`;
+
+/**
+ * POST a JSON body and stream back Server-Sent Events, yielding each event's
+ * ``data:`` payload as a raw string. No timeout (streaming duration is
+ * open-ended) — pass `signal` to let the caller cancel.
+ */
+export async function* postStream(
+  path: string,
+  body: unknown,
+  signal?: AbortSignal,
+): AsyncGenerator<string> {
+  const res = await fetch(`${API_BASE}${path}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+    signal,
+  });
+  if (!res.ok || !res.body) {
+    const text = await res.text().catch(() => res.statusText);
+    throw new Error(formatApiError(text) || `HTTP ${res.status}`);
+  }
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buf = "";
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buf += decoder.decode(value, { stream: true });
+    const frames = buf.split("\n\n");
+    buf = frames.pop() ?? "";
+    for (const frame of frames) {
+      const line = frame.split("\n").find((l) => l.startsWith("data: "));
+      if (line) yield line.slice(6);
+    }
+  }
+}

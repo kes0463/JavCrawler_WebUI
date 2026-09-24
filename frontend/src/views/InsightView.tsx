@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Award, RefreshCw, Tag, TrendingUp } from "lucide-react";
 import {
+  createInsightWS,
   fetchInsightCollection,
   fetchInsightOverview,
   fetchInsightRecommend,
   fetchInsightTrends,
-  refreshInsight,
+  startInsightRefresh,
   type InsightCollection,
   type InsightOverview,
   type InsightRecommend,
@@ -18,15 +19,19 @@ import { InsightRankingList } from "@/components/insight/InsightRankingList";
 import { InsightTabBar, type InsightTabId } from "@/components/insight/InsightTabBar";
 import { MonthlyAdditionsChart } from "@/components/insight/MonthlyAdditionsChart";
 import { MonthlyGenreTrendChart } from "@/components/insight/MonthlyGenreTrendChart";
+import { PersonaCardPanel } from "@/components/insight/PersonaCardPanel";
 import { PipelineReportCard } from "@/components/insight/PipelineReportCard";
 import { RecommendSection } from "@/components/insight/RecommendSection";
 import { WatchTasteSummary } from "@/components/insight/WatchTasteSummary";
 import { WeeklyDigestBanner } from "@/components/insight/WeeklyDigestBanner";
+import { ModelPickerDropdown } from "@/components/llamacpp/ModelPickerDropdown";
 import { GlassCard } from "@/components/ui/GlassCard";
+import { ProgressIndicator } from "@/components/ui/ProgressIndicator";
 import { Skeleton } from "@/components/ui/Skeleton";
 import { useNavigation } from "@/contexts/NavigationContext";
 import { usePlayer } from "@/contexts/PlayerContext";
 import { useToast } from "@/contexts/ToastContext";
+import { useLlamaCppModelPicker } from "@/hooks/useLlamaCppModelPicker";
 
 function mergeDistributionCounts(
   tasteItems: { name: string; score?: number }[],
@@ -64,17 +69,20 @@ export default function InsightView() {
   const [loadingOverview, setLoadingOverview] = useState(true);
   const [loadingTab, setLoadingTab] = useState<InsightTabId | null>(null);
   const [refreshing, setRefreshing] = useState(false);
+  const [refreshProgress, setRefreshProgress] = useState(0);
+  const [refreshEpoch, setRefreshEpoch] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const [loadedTabs, setLoadedTabs] = useState<Set<InsightTabId>>(() => new Set(["overview"]));
   const recommendFetchRef = useRef<Promise<InsightRecommend | null> | null>(null);
   const recommendReadyRef = useRef(false);
   const recommendPrefetchStartedRef = useRef(false);
+  const modelPicker = useLlamaCppModelPicker("insight");
 
   const loadOverview = useCallback(async (force = false) => {
     setLoadingOverview(true);
     setError(null);
     try {
-      const data = force ? await refreshInsight() : await fetchInsightOverview(force);
+      const data = await fetchInsightOverview(force);
       setOverview(data);
     } catch (e) {
       const msg = e instanceof Error ? e.message : "인사이트를 불러오지 못했습니다";
@@ -159,31 +167,64 @@ export default function InsightView() {
     }
   }, [tab, loadedTabs, loadTab, loadRecommend]);
 
-  const handleRefresh = async () => {
-    setRefreshing(true);
-    try {
-      const data = await refreshInsight();
-      setOverview(data);
-      setLoadedTabs(new Set(["overview"]));
-      setTrends(null);
-      setRecommend(null);
-      setCollection(null);
-      recommendFetchRef.current = null;
-      recommendReadyRef.current = false;
-      recommendPrefetchStartedRef.current = false;
-      setError(null);
-      if (tab !== "overview") {
-        await loadTab(tab, true);
-      } else {
-        recommendPrefetchStartedRef.current = true;
-        void loadRecommend(false, true);
-      }
-      showToast("인사이트 데이터를 갱신했습니다.", "success");
-    } catch (e) {
-      showToast(e instanceof Error ? e.message : "갱신 실패", "error");
-    } finally {
-      setRefreshing(false);
+  const reloadAfterRefresh = useCallback(async () => {
+    setLoadedTabs(new Set(["overview"]));
+    setTrends(null);
+    setRecommend(null);
+    setCollection(null);
+    recommendFetchRef.current = null;
+    recommendReadyRef.current = false;
+    recommendPrefetchStartedRef.current = false;
+    setError(null);
+    await loadOverview();
+    if (tab !== "overview") {
+      await loadTab(tab, true);
+    } else {
+      recommendPrefetchStartedRef.current = true;
+      void loadRecommend(false, true);
     }
+    setRefreshEpoch(e => e + 1);
+  }, [tab, loadOverview, loadTab, loadRecommend]);
+
+  const handleRefresh = () => {
+    if (refreshing) return;
+    setRefreshing(true);
+    setRefreshProgress(0);
+
+    const ws = createInsightWS(async (event) => {
+      if (event.type === "progress") {
+        setRefreshProgress(event.progress);
+      } else if (event.type === "refresh_complete") {
+        setRefreshProgress(100);
+        ws.close();
+        try {
+          await reloadAfterRefresh();
+          showToast("인사이트 데이터를 갱신했습니다.", "success");
+        } catch (e) {
+          showToast(e instanceof Error ? e.message : "갱신 결과 로드 실패", "error");
+        } finally {
+          setRefreshing(false);
+        }
+      } else if (event.type === "refresh_error") {
+        ws.close();
+        showToast(event.message || "갱신 실패", "error");
+        setRefreshing(false);
+      }
+    });
+
+    startInsightRefresh()
+      .then((res) => {
+        if (!res.started) {
+          ws.close();
+          setRefreshing(false);
+          if (res.already_running) showToast("이미 새로고침이 진행 중입니다.", "info");
+        }
+      })
+      .catch((e) => {
+        ws.close();
+        setRefreshing(false);
+        showToast(e instanceof Error ? e.message : "갱신 시작 실패", "error");
+      });
   };
 
   const handleOpen = (code: string) => openLibraryDetail(code.trim().toUpperCase());
@@ -206,18 +247,27 @@ export default function InsightView() {
           <h1 className="text-2xl font-bold text-white">인사이트</h1>
           <p className="text-base text-muted-foreground mt-0.5">라이브러리 분석 · 취향 · 추천</p>
         </div>
-        <button
-          type="button"
-          disabled={refreshing || loadingOverview}
-          onClick={() => void handleRefresh()}
-          className="inline-flex items-center gap-2 px-3 py-2 rounded-xl border border-white/10 text-sm text-slate-300 hover:bg-white/[0.04] disabled:opacity-50"
-        >
-          <RefreshCw className={`w-4 h-4 ${refreshing ? "animate-spin" : ""}`} />
-          새로고침
-        </button>
+        <div className="flex items-center gap-3">
+          <ModelPickerDropdown picker={modelPicker} />
+          <button
+            type="button"
+            disabled={refreshing || loadingOverview}
+            onClick={handleRefresh}
+            className="inline-flex items-center gap-2 px-3 py-2 rounded-xl border border-white/10 text-sm text-slate-300 hover:bg-white/[0.04] disabled:opacity-50"
+          >
+            <RefreshCw className={`w-4 h-4 ${refreshing ? "animate-spin" : ""}`} />
+            새로고침
+          </button>
+        </div>
       </div>
 
-      <InsightTabBar active={tab} onChange={setTab} />
+      {refreshing && (
+        <ProgressIndicator value={refreshProgress} total={100} showLabel size="sm" variant="accent" />
+      )}
+
+      <div className="flex items-center justify-between gap-4 flex-wrap">
+        <InsightTabBar active={tab} onChange={setTab} />
+      </div>
 
       {error && (
         <GlassCard className="border-rose-500/30 space-y-3">
@@ -239,6 +289,7 @@ export default function InsightView() {
           </div>
         ) : overview ? (
           <div className="space-y-4">
+            <PersonaCardPanel refreshEpoch={refreshEpoch} />
             <WeeklyDigestBanner digest={overview.weekly_digest ?? {}} />
             <InsightKpiGrid stats={overview.stats ?? { total: 0 }} distribution={overview.distribution} />
             {overview.recent_trend && (

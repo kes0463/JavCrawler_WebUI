@@ -24,10 +24,14 @@ _RECOMMEND_TTL_SEC = 300.0
 _OVERVIEW_TTL_SEC = 120.0
 
 
-def _safe_call(fn: Callable[[], Any], default: Any) -> Any:
+def _safe_call(fn: Callable[[], Any], default: Any, *, label: str = "") -> Any:
     try:
         return fn()
     except Exception:
+        import traceback
+
+        tag = f"[{label}] " if label else ""
+        print(f"[Insight] {tag}데이터 조회 실패: {traceback.format_exc()}", flush=True)
         return default
 
 
@@ -104,24 +108,33 @@ class InsightService:
         }
 
         tasks = {
-            "stats": lambda: _safe_call(get_library_stats, {}),
-            "top_actors": lambda: _safe_call(lambda: get_top_actors(5), []),
-            "top_genres": lambda: _safe_call(lambda: get_top_genres(8, excluded=excluded), []),
-            "top_makers": lambda: _safe_call(lambda: get_top_makers(5), []),
+            "stats": lambda: _safe_call(get_library_stats, {}, label="stats"),
+            "top_actors": lambda: _safe_call(lambda: get_top_actors(5), [], label="top_actors"),
+            "top_genres": lambda: _safe_call(
+                lambda: get_top_genres(8, excluded=excluded), [], label="top_genres"
+            ),
+            "top_makers": lambda: _safe_call(lambda: get_top_makers(5), [], label="top_makers"),
             "recent_trend": lambda: _safe_call(
                 lambda: compute_recent_trend(excluded_genres=excluded),
                 {},
+                label="recent_trend",
             ),
-            "pipeline": lambda: _safe_call(lambda: get_pipeline_report(30), {}),
-            "monthly_genre_trend": lambda: _safe_call(lambda: get_monthly_genre_trend(3), []),
-            "monthly_additions": lambda: _safe_call(lambda: get_monthly_library_additions(6), []),
+            "pipeline": lambda: _safe_call(lambda: get_pipeline_report(30), {}, label="pipeline"),
+            "monthly_genre_trend": lambda: _safe_call(
+                lambda: get_monthly_genre_trend(3), [], label="monthly_genre_trend"
+            ),
+            "monthly_additions": lambda: _safe_call(
+                lambda: get_monthly_library_additions(6), [], label="monthly_additions"
+            ),
             "weekly_digest": lambda: _safe_call(
                 lambda: get_weekly_digest(force_refresh=force_refresh, excluded=excluded),
                 empty_digest,
+                label="weekly_digest",
             ),
             "distribution": lambda: _safe_call(
                 lambda: get_library_distribution(force_refresh=force_refresh),
                 empty_distribution,
+                label="distribution",
             ),
         }
 
@@ -137,7 +150,7 @@ class InsightService:
         from javstory.analytics.library_stats import compute_taste_profile, get_monthly_genre_trend
         from javstory.analytics.preference_engine import compute_recent_trend
 
-        profile = _safe_call(compute_taste_profile, {})
+        profile = _safe_call(compute_taste_profile, {}, label="taste_profile")
         return {
             "watch_summary": {
                 "watched_count": int(profile.get("watched_count") or 0),
@@ -148,10 +161,13 @@ class InsightService:
                 "empty_message": profile.get("empty_message")
                 or "아직 시청 이력이 없습니다. 재생·별점 후 다시 확인하세요.",
             },
-            "monthly_genre_trend": _safe_call(lambda: get_monthly_genre_trend(6), []),
+            "monthly_genre_trend": _safe_call(
+                lambda: get_monthly_genre_trend(6), [], label="monthly_genre_trend"
+            ),
             "recent_trend": _safe_call(
                 lambda: compute_recent_trend(excluded_genres=excluded),
                 {},
+                label="recent_trend",
             ),
         }
 
@@ -162,15 +178,21 @@ class InsightService:
         from javstory.analytics.preference_engine import get_recommendations
 
         tasks = {
-            "today_recs": lambda: _safe_call(lambda: get_today_recommendation(12), []),
+            "today_recs": lambda: _safe_call(
+                lambda: get_today_recommendation(12), [], label="today_recs"
+            ),
             "next_watch": lambda: _safe_call(
                 lambda: get_recommendations(12, use_embeddings=False),
                 [],
+                label="next_watch",
             ),
-            "hidden_gems": lambda: _safe_call(lambda: get_unwatched_gems(12), []),
+            "hidden_gems": lambda: _safe_call(
+                lambda: get_unwatched_gems(12), [], label="hidden_gems"
+            ),
             "favorite_actor_picks": lambda: _safe_call(
                 lambda: recommend_favorite_actor_content(12),
                 [],
+                label="favorite_actor_picks",
             ),
         }
         result: dict[str, Any] = {key: [] for key in tasks}
@@ -191,9 +213,12 @@ class InsightService:
             "distribution": lambda: _safe_call(
                 lambda: get_library_distribution(force_refresh=force_refresh),
                 empty_distribution,
+                label="distribution",
             ),
-            "actor_collections": lambda: _safe_call(lambda: get_actor_collection_stats(12), {}),
-            "pipeline": lambda: _safe_call(lambda: get_pipeline_report(30), {}),
+            "actor_collections": lambda: _safe_call(
+                lambda: get_actor_collection_stats(12), {}, label="actor_collections"
+            ),
+            "pipeline": lambda: _safe_call(lambda: get_pipeline_report(30), {}, label="pipeline"),
         }
         result: dict[str, Any] = {}
         with ThreadPoolExecutor(max_workers=len(tasks)) as pool:

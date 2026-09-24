@@ -8,6 +8,7 @@ export type View =
   | "library"
   | "actress"
   | "insight"
+  | "personaChat"
   | "settings";
 
 interface NavCtx {

@@ -11,6 +11,8 @@ llama-server 임베딩 백엔드.
   JAVSTORY_EMBEDDINGS_MODEL            API model/alias (기본 nomic-embed-text)
   JAVSTORY_EMBEDDINGS_LLAMACPP_N_GPU_LAYERS  (-ngl, 미설정 시 -fit on)
   JAVSTORY_EMBEDDINGS_LLAMACPP_CTX     (-c, 기본 2048)
+  JAVSTORY_EMBEDDINGS_LLAMACPP_UBATCH_SIZE  (-ub, physical batch. 미설정 시 ctx와 동일하게
+                                           맞춰 "increase the physical batch size" 500 방지)
   JAVSTORY_EMBEDDINGS_LLAMACPP_MAX_CONCURRENT  동시 /v1/embeddings 요청 (기본 1)
   JAVSTORY_EMBEDDINGS_LLAMACPP_BATCH_SIZE  텍스트 여러 개를 한 요청에 묶어 보내는 배치 크기
                                            (기본 10) — 캐시 안 된 텍스트만 대상, 실패 시
@@ -447,6 +449,22 @@ def _ctx_size() -> int:
         return 2048
 
 
+def _ubatch_size(ctx: int) -> int:
+    """
+    llama-server의 physical batch size(-ub, 기본 512)는 -c(컨텍스트)와 별개다.
+    mean-pooling 임베딩은 한 시퀀스가 통째로 하나의 physical batch에 들어가야 하므로,
+    기본 512보다 긴 입력(예: 626 토큰)은 "increase the physical batch size" 500 에러가 난다.
+    ctx 크기만큼 올려 truncate 상한(ctx-128) 이내 입력이 항상 한 번에 처리되게 한다.
+    """
+    raw = (os.environ.get("JAVSTORY_EMBEDDINGS_LLAMACPP_UBATCH_SIZE", "") or "").strip()
+    if raw:
+        try:
+            return max(512, int(raw))
+        except ValueError:
+            pass
+    return max(512, ctx)
+
+
 def embedding_max_input_chars(*, ctx: int | None = None) -> int:
     """
     llama-server /v1/embeddings 입력 글자 상한.
@@ -520,6 +538,8 @@ def _resolve_pooling(gguf: Path) -> str:
 
 def _build_embed_argv(gguf: Path, host: str, port: int, alias: str) -> List[str]:
     bin_p = llamacpp_bin_path()
+    ctx = _ctx_size()
+    ubatch = _ubatch_size(ctx)
     argv: List[str] = [
         str(bin_p),
         "-m",
@@ -529,7 +549,11 @@ def _build_embed_argv(gguf: Path, host: str, port: int, alias: str) -> List[str]
         "--port",
         str(port),
         "-c",
-        str(_ctx_size()),
+        str(ctx),
+        "-b",
+        str(max(ctx, ubatch)),
+        "-ub",
+        str(ubatch),
         "--embedding",
         "--alias",
         alias,
@@ -927,6 +951,11 @@ def _is_context_exceed_error(exc: BaseException) -> bool:
     )
 
 
+def _is_physical_batch_error(exc: BaseException) -> bool:
+    text = f"{exc} {_response_body_text(exc)}".lower()
+    return "physical batch size" in text
+
+
 def _is_server_overload_error(exc: BaseException) -> bool:
     resp = getattr(exc, "response", None)
     if resp is not None and resp.status_code == 500 and _is_context_exceed_error(exc):
@@ -950,6 +979,12 @@ def _raise_embed_http_error(exc: BaseException) -> None:
                 " (llama-server embedding 슬롯 부족 — 동시 요청 과다일 수 있습니다. "
                 "JAVSTORY_EMBEDDINGS_LLAMACPP_MAX_CONCURRENT=1 유지, "
                 "JAVSTORY_EMBEDDING_QUEUE_CONCURRENCY=1 권장)"
+            )
+        elif _is_physical_batch_error(exc):
+            hint = (
+                f" (llama-server physical batch size가 입력 토큰 수보다 작습니다. "
+                f"실행 중인 임베딩 llama-server를 재시작하면 -ub={_ubatch_size(_ctx_size())} 로 "
+                "자동 재기동됩니다 — 재시작 안 됐다면 프로세스를 종료 후 다시 시도하세요.)"
             )
         msg = f"llamacpp /v1/embeddings HTTP {resp.status_code}"
         if body:

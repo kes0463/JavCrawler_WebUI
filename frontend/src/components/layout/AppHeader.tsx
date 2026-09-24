@@ -11,6 +11,7 @@ const VIEW_TITLES: Record<View, string> = {
   library: "Library",
   actress: "배우",
   insight: "Insight",
+  personaChat: "Persona Chat",
   settings: "Settings",
 };
 

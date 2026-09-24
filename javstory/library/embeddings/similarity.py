@@ -451,6 +451,17 @@ def vector_for_product_code(product_code: str, *, model: str) -> Optional[List[f
     return _vector_for_product_code(product_code, model=model)
 
 
+def warm_vectors_cache(*, model: str) -> int:
+    """Build (and cache) the product_code -> vector index for `model` ahead of time.
+
+    `recommend_favorite_actor_content` builds this index lazily on its first call
+    by scanning every embedding file on disk, which can take tens of seconds on a
+    large library — long enough to make the recommend tab look empty/broken. Call
+    this once from app startup so that first real request hits the warm cache.
+    """
+    return len(_vectors_by_product_code(model=model))
+
+
 def cosine_similarity(a: List[float], b: List[float]) -> float:
     """Public cosine similarity helper."""
     return _cosine(a, b)
@@ -474,19 +485,29 @@ def rank_unwatched_by_vector(
     top_k: int = 10,
     min_score: float = 0.35,
 ) -> List[SimilarResult]:
+    """추천 채팅 한 턴마다 호출되는 hot path — 예전엔 `_iter_embedding_payloads`로
+    모델 전체 임베딩 JSON 파일을(라이브러리 규모에 따라 8만 개 이상) 매번 다시
+    읽고 파싱해서, 이 한 함수가 요청당 70초 넘게 걸렸다(실측: json.loads만
+    71.7초). `_vectors_by_product_code`의 프로세스 내 캐시(최초 1회만 디스크
+    스캔, 이후 재사용)를 대신 쓴다."""
     if not profile_vec:
         return []
+    from javstory.library.embeddings.store import embeddings_cache_path
+
     out: List[SimilarResult] = []
-    for p, payload in _iter_embedding_payloads(model=model):
-        other_pc = str(payload.get("product_code") or "").strip().upper()
+    for other_pc, other_vec in _vectors_by_product_code(model=model).items():
         if not other_pc or other_pc in exclude_codes:
-            continue
-        other_vec = _pick_representative_vector(payload)
-        if not other_vec:
             continue
         score = _cosine(profile_vec, other_vec)
         if math.isfinite(score) and score >= min_score:
-            out.append(SimilarResult(product_code=other_pc, score=float(score), path=p, match_reasons=["취향 프로필 유사"]))
+            out.append(
+                SimilarResult(
+                    product_code=other_pc,
+                    score=float(score),
+                    path=embeddings_cache_path(other_pc, model=model),
+                    match_reasons=["취향 프로필 유사"],
+                )
+            )
     out.sort(key=lambda r: r.score, reverse=True)
     return out[:top_k]
 

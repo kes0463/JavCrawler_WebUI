@@ -109,6 +109,10 @@ def persona_card_model_from_env() -> str:
     ).lower()
     if raw.startswith("llamacpp:"):
         raw = raw.split(":", 1)[1].strip()
+    from javstory.llm.llamacpp_backend import LLAMACPP_MODEL_PRESETS
+
+    if raw in LLAMACPP_MODEL_PRESETS:
+        return raw
     if "qwen3-14" in raw or "qwen3_14" in raw or ("qwen" in raw and "14" in raw):
         return "qwen3-14b"
     if "qwen3.5" in raw or "35b" in raw or "a3b" in raw:
@@ -188,6 +192,10 @@ def persona_card_model_from_env_value(value: str | None) -> str:
     raw = (value or "").strip().lower()
     if raw.startswith("llamacpp:"):
         raw = raw.split(":", 1)[1].strip()
+    from javstory.llm.llamacpp_backend import LLAMACPP_MODEL_PRESETS
+
+    if raw in LLAMACPP_MODEL_PRESETS:
+        return raw
     if "qwen3-14" in raw or "qwen3_14" in raw or ("qwen" in raw and "14" in raw):
         return "qwen3-14b"
     if "qwen3.5" in raw or "35b" in raw or "a3b" in raw:
@@ -522,9 +530,10 @@ def _context_for_prompt(ctx: Dict[str, Any]) -> str:
 def synthesize_persona_v3(ctx: Dict[str, Any]) -> Dict[str, Any]:
     """llama.cpp JSON 합성 → v3 payload (GBNF grammar로 JSON 출력 보장)."""
     from javstory.llm.llamacpp_backend import (
-        cleanup_llamacpp_after_job,
+        cleanup_managed_llamacpp_after_job,
         ensure_llamacpp_server_ready,
         llamacpp_openai_base_url,
+        llamacpp_request_scope,
     )
 
     model = persona_card_model_from_env()
@@ -559,19 +568,25 @@ def synthesize_persona_v3(ctx: Dict[str, Any]) -> Dict[str, Any]:
         ensure_llamacpp_server_ready({"model": model})
         base_url = llamacpp_openai_base_url()
 
-        r = httpx.post(
-            f"{base_url.rstrip('/')}/chat/completions",
-            json={
-                "model": model,
-                "messages": [
-                    {"role": "system", "content": system_msg},
-                    {"role": "user", "content": user_msg},
-                ],
-                "grammar": _JSON_OBJECT_GRAMMAR,
-                "stream": False,
-            },
-            timeout=120.0,
-        )
+        with llamacpp_request_scope():
+            r = httpx.post(
+                f"{base_url.rstrip('/')}/chat/completions",
+                json={
+                    "model": model,
+                    "messages": [
+                        {"role": "system", "content": system_msg},
+                        {"role": "user", "content": user_msg},
+                    ],
+                    "grammar": _JSON_OBJECT_GRAMMAR,
+                    "stream": False,
+                    "max_tokens": 1536,
+                    # 로컬 모델(특히 Qwen 계열)이 반복 루프에 빠지면 max_tokens 상한이 없을 때
+                    # 끝없이 길게 생성돼 새로고침이 느려진다 — engine.py의 llamacpp 경로와
+                    # 동일하게 frequency_penalty로 반복을 억제.
+                    "frequency_penalty": 0.3,
+                },
+                timeout=120.0,
+            )
         r.raise_for_status()
         raw_text = ((r.json().get("choices") or [{}])[0].get("message", {}).get("content") or "").strip()
 
@@ -598,7 +613,10 @@ def synthesize_persona_v3(ctx: Dict[str, Any]) -> Dict[str, Any]:
     except Exception:
         pass
     finally:
-        cleanup_llamacpp_after_job(cancelled=False)
+        # 번역/교정 배치용 JAVSTORY_LLAMACPP_STOP_AFTER_JOB 플래그는 무시 — 그 플래그를
+        # 그대로 따르면 새로고침마다(연속 새로고침이든, 직후 Persona Chat 사용이든)
+        # 매번 모델을 처음부터 재로딩하게 된다. 유휴 타임아웃이 알아서 정리한다.
+        cleanup_managed_llamacpp_after_job(cancelled=False)
 
     return _fallback_v2(ctx)
 
@@ -607,9 +625,10 @@ def _synthesize_v1_light() -> Dict[str, Any]:
     """deep 분석 비활성 시 경량 v1."""
     from javstory.config.app_config import similarity_excluded_genres_from_env
     from javstory.llm.llamacpp_backend import (
-        cleanup_llamacpp_after_job,
+        cleanup_managed_llamacpp_after_job,
         ensure_llamacpp_server_ready,
         llamacpp_openai_base_url,
+        llamacpp_request_scope,
     )
 
     excluded = similarity_excluded_genres_from_env()
@@ -637,15 +656,18 @@ def _synthesize_v1_light() -> Dict[str, Any]:
         )
         ensure_llamacpp_server_ready({"model": model})
         base_url = llamacpp_openai_base_url()
-        r = httpx.post(
-            f"{base_url.rstrip('/')}/chat/completions",
-            json={
-                "model": model,
-                "messages": [{"role": "user", "content": prompt}],
-                "stream": False,
-            },
-            timeout=90.0,
-        )
+        with llamacpp_request_scope():
+            r = httpx.post(
+                f"{base_url.rstrip('/')}/chat/completions",
+                json={
+                    "model": model,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "stream": False,
+                    "max_tokens": 512,
+                    "frequency_penalty": 0.3,
+                },
+                timeout=90.0,
+            )
         r.raise_for_status()
         body = (((r.json().get("choices") or [{}])[0].get("message", {}).get("content")) or "").strip()
         if body:
@@ -653,7 +675,7 @@ def _synthesize_v1_light() -> Dict[str, Any]:
     except Exception:
         body = ""
     finally:
-        cleanup_llamacpp_after_job(cancelled=False)
+        cleanup_managed_llamacpp_after_job(cancelled=False)
 
     if not body:
         fb = _fallback_v2()

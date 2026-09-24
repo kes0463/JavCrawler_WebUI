@@ -1,7 +1,7 @@
 import { useState } from "react";
 import {
   LayoutDashboard, Search, Mic2,
-  BookOpen, BarChart2, Settings, Bell, Users,
+  BookOpen, BarChart2, Settings, Bell, Users, MessageCircleHeart,
   PanelLeftClose, PanelLeftOpen,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
@@ -15,6 +15,7 @@ const NAV_ITEMS: { view: View; icon: React.ElementType; label: string; badge?: s
   { view: "harvest",    icon: Search,          label: "Harvest" },
   { view: "processing", icon: Mic2,            label: "STT · Translation" },
   { view: "insight",    icon: BarChart2,       label: "Insight" },
+  { view: "personaChat", icon: MessageCircleHeart, label: "Persona Chat" },
 ];
 
 interface NavItemButtonProps {
