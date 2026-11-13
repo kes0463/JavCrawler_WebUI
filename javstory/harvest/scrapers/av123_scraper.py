@@ -543,20 +543,21 @@ def fetch_video_info(
     for slug in candidates:
         info_ja: Optional[VideoInfo] = None
         info_ko: Optional[VideoInfo] = None
+        slug_failed: Optional[BaseException] = None
         for locale in _SUPPORTED_LOCALES:
             path = LOCALE_PATH_TEMPLATE.format(locale=locale, product_id=slug)
             url = base_url.rstrip("/") + path
             try:
                 r = http_get(url, headers=headers, timeout=timeout, session=session)
             except Exception as e:
-                last_exc = e
+                last_exc = slug_failed = e
                 continue
             if r is None or r.status_code == 404:
                 continue
             try:
                 r.raise_for_status()
             except Exception as e:
-                last_exc = e
+                last_exc = slug_failed = e
                 continue
             try:
                 parsed = parse_video_html(r.text, base_url=base_url, locale=locale)
@@ -578,6 +579,10 @@ def fetch_video_info(
 
         if merged and _detail_has_content(merged):
             return merged
+        # 이 슬러그가 "없어서"(404)가 아니라 전송 오류·5xx 로 실패했다면 다음 슬러그
+        # (-uncensored-leaked 등 다른 판본)로 넘어가지 않는다 — 원본 대신 다른 판본이 수집됨.
+        if slug_failed is not None:
+            raise slug_failed
 
     if last_exc is not None:
         raise last_exc

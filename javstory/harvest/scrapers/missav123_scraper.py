@@ -50,6 +50,7 @@ class MissavVideoInfo:
     release_date: str = ""
     maker: str = ""
     favourite_count: int = 0
+    source_url: str = ""
 
     def to_text(self) -> str:
         blocks: List[str] = []
@@ -170,26 +171,20 @@ def fetch_video_info(
 
     for slug in candidates:
         url = base_url.rstrip("/") + path_template.format(product_id=slug)
-        # 재시도·연결 리셋 폴백은 fetching.http_get 이 담당. 404/빈 페이지는 다음 슬러그로.
-        try:
-            r = http_get(url, headers=headers, timeout=timeout, session=session)
-        except Exception as e:
-            last_exc = e
-            continue
-
+        # 재시도·연결 리셋 폴백은 fetching.http_get 이 담당.
+        # 다음 슬러그(-uncensored-leaked 등 다른 판본)로 넘어가는 건 "페이지가 없을 때"(404/빈
+        # 페이지)뿐이다. 전송 오류·5xx 에서 넘어가면 원본이 있는데도 다른 판본이 수집된다.
+        r = http_get(url, headers=headers, timeout=timeout, session=session)
         if r.status_code == 404:
             continue
-        try:
-            r.raise_for_status()
-        except Exception as e:
-            last_exc = e
-            continue
+        r.raise_for_status()
         try:
             info = parse_video_html(r.text, base_url=base_url)
         except Exception as e:
             last_exc = e
             continue
         if _missav_detail_has_content(info):
+            info.source_url = str(r.url or url)
             return info
 
     if last_exc is not None:

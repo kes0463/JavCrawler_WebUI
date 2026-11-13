@@ -241,3 +241,52 @@ def test_fetch_metadata_smart_normalizes_width(monkeypatch):
     assert out["actors"] == ["佐野ナツ"]
     assert out["genres"] == ["中出シ"]
     assert out["maker"] == "ダスッ!"
+
+
+# ---------------------------------------------------------------- 다른 판본으로 넘어가지 않기
+
+
+def _flaky_get(errors_for, pages):
+    calls: list[str] = []
+
+    def _get(url, **kw):
+        calls.append(url)
+        if url in errors_for:
+            raise ConnectionResetError(10054, "reset")
+        status, text = pages.get(url, (404, ""))
+        return fetching.FetchResult(url=url, status_code=status, text=text, via="scrapling")
+
+    return _get, calls
+
+
+def test_missav_transport_error_does_not_fall_through_to_leaked_variant(monkeypatch):
+    import pytest
+
+    leaked = "https://missav123.com/ja/abc-123-uncensored-leaked"
+    get, calls = _flaky_get({"https://missav123.com/ja/abc-123"}, {leaked: (200, MISSAV_HTML)})
+    monkeypatch.setattr(mv, "http_get", get)
+    with pytest.raises(ConnectionResetError):
+        mv.fetch_video_info("ABC-123")
+    assert leaked not in calls
+
+
+def test_missav_404_does_try_next_variant_and_records_url(monkeypatch):
+    leaked = "https://missav123.com/ja/abc-123-uncensored-leaked"
+    get, calls = _flaky_get(set(), {leaked: (200, MISSAV_HTML)})
+    monkeypatch.setattr(mv, "http_get", get)
+    i = mv.fetch_video_info("ABC-123")
+    assert calls[:2] == ["https://missav123.com/ja/abc-123", leaked]
+    assert i.source_url == leaked
+
+
+def test_123av_transport_error_does_not_fall_through(monkeypatch):
+    import pytest
+    from javstory.harvest.scrapers import av123_scraper as a
+
+    base = "https://123av.com"
+    errs = {f"{base}/ja/v/abc-123", f"{base}/ko/v/abc-123"}
+    get, calls = _flaky_get(errs, {})
+    monkeypatch.setattr(a, "http_get", get)
+    with pytest.raises(ConnectionResetError):
+        a.fetch_video_info("ABC-123")
+    assert not any("uncensored" in c for c in calls)
