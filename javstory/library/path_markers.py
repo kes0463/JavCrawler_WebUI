@@ -9,7 +9,7 @@ SELF_SUBTITLE_MARKER = "자체자막"
 
 _SELF_SUBTITLE_NAME_RE = re.compile(r"자체\s*자막")
 _MOPA_NAME_RE = re.compile(
-    r"(모자이크\s*(삭제|제거|파괴)|uncen|uncensored|reducing\s*mosaic)",
+    r"(모자이크\s*(삭제|제거|파괴)|uncen|uncensored|reducing\s*mosaic|ltx)",
     re.IGNORECASE,
 )
 

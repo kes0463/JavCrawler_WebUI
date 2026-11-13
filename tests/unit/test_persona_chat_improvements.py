@@ -187,6 +187,52 @@ def test_deterministic_recommendation_response_includes_detail_fields():
     assert "ABC-456" not in text
 
 
+def test_structured_recommendation_items_only_includes_mentioned_codes():
+    from javstory.persona.persona_chat import _structured_recommendation_items
+
+    candidates = [
+        {
+            "product_code": "START-498",
+            "title_ko": "테스트 작품",
+            "actors": "배우A, 배우B",
+            "genres": "드라마, 유부녀",
+            "persona_match_score": "82.5",
+            "ranking_reasons": "sensual_summary/turn_ons 키워드 매칭, 임베딩 유사도 근거",
+            "matched_persona_terms": "긴장감",
+            "matched_genre_terms": "유부녀",
+            "matched_query_terms": "",
+            "matched_seed_title": "이전에 좋아했던 작품",
+        },
+        {
+            "product_code": "ABC-123",
+            "title_ko": "언급 안 된 후보",
+            "actors": "배우C",
+            "genres": "코미디",
+        },
+    ]
+    text = "오늘은 START-498을 추천드려요. 긴장감 있는 전개가 취향에 맞을 거예요."
+
+    items = _structured_recommendation_items(candidates, text)
+
+    assert len(items) == 1
+    item = items[0]
+    assert item["product_code"] == "START-498"
+    assert item["title"] == "테스트 작품"
+    assert item["actors"] == ["배우A", "배우B"]
+    assert item["genres"] == ["드라마", "유부녀"]
+    assert item["persona_match_score"] == 82.5
+    assert item["ranking_reasons"] == ["sensual_summary/turn_ons 키워드 매칭", "임베딩 유사도 근거"]
+    assert item["matched_seed_title"] == "이전에 좋아했던 작품"
+
+
+def test_structured_recommendation_items_empty_without_candidates_or_mentions():
+    from javstory.persona.persona_chat import _structured_recommendation_items
+
+    assert _structured_recommendation_items([], "START-498 추천드려요") == []
+    candidates = [{"product_code": "START-498", "title_ko": "테스트"}]
+    assert _structured_recommendation_items(candidates, "지금은 추천할 게 없어요") == []
+
+
 def test_is_actor_recommendation_intent_matches_named_work_request(monkeypatch):
     from javstory.persona.recommendation_pool import _is_actor_recommendation_intent
 

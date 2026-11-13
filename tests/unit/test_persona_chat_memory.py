@@ -172,6 +172,22 @@ def test_enhanced_memory_record_turn_negative_feedback(monkeypatch):
     assert ctx["negative_feedback_notes"]
 
 
+def test_memory_snapshot_for_ui_exposes_pending_recommendation_outcomes():
+    """memory_snapshot_for_ui()가 아직 시청/평점 반응을 못 받은 추천 품번도 노출한다."""
+    from javstory.persona.persona_memory import EnhancedPersonaMemory
+
+    memory = EnhancedPersonaMemory()
+    memory.pending_recommendation_outcomes = [
+        {"product_code": "START-498", "recommended_at": "2026-09-26T00:00:00+00:00"}
+    ]
+
+    snapshot = memory.memory_snapshot_for_ui()
+
+    assert snapshot["pending_recommendation_outcomes"] == [
+        {"product_code": "START-498", "recommended_at": "2026-09-26T00:00:00+00:00"}
+    ]
+
+
 def test_enhanced_memory_save_load_roundtrip_with_notes(tmp_path, monkeypatch):
     """save_to_json/load_from_json 왕복이 note 필드를 보존한다."""
     from javstory.persona.persona_memory import EnhancedPersonaMemory

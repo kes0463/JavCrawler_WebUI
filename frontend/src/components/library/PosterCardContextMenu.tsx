@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
-import { Bookmark, Download, FileAudio, FolderOpen, Heart, Languages, Play, RefreshCw, ScanEye, Sparkles } from "lucide-react";
+import { Bookmark, Download, FileAudio, FolderOpen, Heart, Languages, MessageCircle, Play, RefreshCw, ScanEye, Sparkles } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 export interface PosterCardContextMenuProps {
@@ -23,6 +23,7 @@ export interface PosterCardContextMenuProps {
   onPlay?: () => void;
   onOpenFolder?: () => void;
   onOpenDetail?: () => void;
+  onAskPersonaChat?: () => void;
 }
 
 function MenuItem({
@@ -78,6 +79,7 @@ export function PosterCardContextMenu({
   onPlay,
   onOpenFolder,
   onOpenDetail,
+  onAskPersonaChat,
 }: PosterCardContextMenuProps) {
   const menuRef = useRef<HTMLDivElement>(null);
   const codes = productCodes.map(c => c.trim().toUpperCase()).filter(Boolean);
@@ -226,17 +228,29 @@ export function PosterCardContextMenu({
           )}
         </>
       )}
-      {!multi && onOpenDetail && (
+      {!multi && (onOpenDetail || onAskPersonaChat) && (
         <>
           <MenuDivider />
-          <MenuItem
-            icon={<ScanEye className="w-4 h-4 text-muted-foreground shrink-0" />}
-            label="상세 보기"
-            onClick={() => {
-              onClose();
-              onOpenDetail();
-            }}
-          />
+          {onAskPersonaChat && (
+            <MenuItem
+              icon={<MessageCircle className="w-4 h-4 text-fuchsia-300 shrink-0" />}
+              label="페르소나챗에서 물어보기"
+              onClick={() => {
+                onClose();
+                onAskPersonaChat();
+              }}
+            />
+          )}
+          {onOpenDetail && (
+            <MenuItem
+              icon={<ScanEye className="w-4 h-4 text-muted-foreground shrink-0" />}
+              label="상세 보기"
+              onClick={() => {
+                onClose();
+                onOpenDetail();
+              }}
+            />
+          )}
         </>
       )}
     </div>,

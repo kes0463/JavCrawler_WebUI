@@ -1,11 +1,23 @@
 import { useEffect, useState } from "react";
-import { Sparkles } from "lucide-react";
+import { MessageCircle, Sparkles } from "lucide-react";
 import { fetchPersonaCard, type InsightPersonaCard } from "@/api/insight";
 import { GlassCard } from "@/components/ui/GlassCard";
 import { Skeleton } from "@/components/ui/Skeleton";
+import { useNavigation } from "@/contexts/NavigationContext";
+
+/** 페르소나 카드 요약을 Persona Chat 프리필 메시지로 — turn_ons를 우선하고 부족하면 affinities로 채운다. */
+function personaChatPrefill(card: InsightPersonaCard): string {
+  const traits = [...card.turn_ons, ...card.affinities].filter(Boolean).slice(0, 3);
+  const personaType = card.persona_type ? `"${card.persona_type}"` : "지금 내 취향";
+  if (traits.length === 0) {
+    return `내 페르소나 카드 요약이 ${personaType}인데, 이 성향 더 파고들어서 작품 추천해줘.`;
+  }
+  return `내 페르소나 카드에 ${personaType} 성향이고 ${traits.join(", ")} 쪽에 끌린다고 나와 있어. 이 성향 더 파고들어서 작품 추천해줘.`;
+}
 
 /** 데스크톱 앱의 AI 페르소나 카드를 웹 Insight 개요 탭에 이식한 패널. */
 export function PersonaCardPanel({ refreshEpoch }: { refreshEpoch: number }) {
+  const { openPersonaChat } = useNavigation();
   const [card, setCard] = useState<InsightPersonaCard | null>(null);
   const [loading, setLoading] = useState(true);
 
@@ -66,6 +78,14 @@ export function PersonaCardPanel({ refreshEpoch }: { refreshEpoch: number }) {
           ))}
         </div>
       )}
+      <button
+        type="button"
+        onClick={() => openPersonaChat({ prefillMessage: personaChatPrefill(card) })}
+        className="inline-flex items-center gap-1.5 text-sm text-accent-light hover:text-white pt-1"
+      >
+        <MessageCircle className="w-3.5 h-3.5" />
+        이 성향 더 파고들기
+      </button>
     </GlassCard>
   );
 }

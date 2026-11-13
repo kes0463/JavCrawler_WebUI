@@ -124,6 +124,7 @@ def _path_mosaic_sql(column):
         column.ilike("%uncen%"),
         column.ilike("%uncensored%"),
         column.ilike("%reducing%mosaic%"),
+        column.ilike("%ltx%"),
     )
 
 

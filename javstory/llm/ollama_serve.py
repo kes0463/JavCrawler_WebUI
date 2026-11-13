@@ -10,6 +10,9 @@ import sys
 import threading
 import time
 from pathlib import Path
+from typing import Callable
+
+LoggerFunc = Callable[[str], object]
 
 _OLLAMA_SERVE_PROC: subprocess.Popen | None = None
 _OLLAMA_SERVE_LOG_PATH: Path | None = None
@@ -107,6 +110,19 @@ def _cleanup_ollama_child() -> None:
                     pass
     except Exception:
         pass
+
+
+def stop_ollama_serve(*, logger_func: LoggerFunc | None = None) -> None:
+    """이 앱이 직접 띄운 `ollama serve` 프로세스를 명시적으로 종료한다.
+
+    앱이 시작한 게 아니면(=이미 떠 있던 걸 감지만 한 경우) 아무 것도 하지 않는다 —
+    다른 곳에서 쓰는 ollama를 실수로 죽이지 않기 위함.
+    """
+    log = logger_func or print
+    if _OLLAMA_SERVE_PROC is None:
+        return
+    _cleanup_ollama_child()
+    log("[Ollama] ollama serve 종료")
 
 
 def ensure_ollama_serve(

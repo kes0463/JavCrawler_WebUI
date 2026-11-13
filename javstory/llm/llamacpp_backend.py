@@ -1242,7 +1242,18 @@ def build_server_argv(
 
 def _server_health_ok(base_url: str, timeout: float = 2.0) -> bool:
     root = base_url.rstrip("/")
-    for path in ("/health", "/v1/models", "/"):
+    try:
+        r = httpx.get(f"{root}/health", timeout=timeout)
+        if r.status_code == 503:
+            # 모델 로딩 중 — 명확한 "아직 준비 안 됨" 신호이므로 /v1/models 등
+            # 더 느슨한 엔드포인트로 대체 판단하면 안 된다(로딩 중에도 200을 줄 수
+            # 있어, 준비 완료로 오판 후 /v1/chat/completions 503 "Loading model"로 이어짐).
+            return False
+        if r.status_code < 500:
+            return True
+    except Exception:
+        pass
+    for path in ("/v1/models", "/"):
         try:
             r = httpx.get(f"{root}{path}", timeout=timeout)
             if r.status_code < 500:

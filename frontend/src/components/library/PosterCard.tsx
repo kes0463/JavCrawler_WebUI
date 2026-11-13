@@ -3,6 +3,7 @@ import { Bookmark, Check, FolderOpen, Heart, MoreVertical, Play } from "lucide-r
 import { cn } from "@/lib/utils";
 import { PosterHoverPreview } from "@/components/library/PosterHoverPreview";
 import { PosterCardContextMenu } from "@/components/library/PosterCardContextMenu";
+import { useNavigation } from "@/contexts/NavigationContext";
 import type { ProcessingKind } from "@/api/processing";
 
 /** 길게 눌러 선택 모드 진입 (ms). 12px 이동 시 취소되므로 스크롤 오인 위험 낮음. */
@@ -89,6 +90,7 @@ export const PosterCard = memo(function PosterCard({
   onToggleLike,
   onToggleWatchLater,
 }: PosterCardProps) {
+  const { openPersonaChat } = useNavigation();
   const [imgError, setImgError] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
   const [menuPos, setMenuPos] = useState({ x: 0, y: 0 });
@@ -337,6 +339,15 @@ export const PosterCard = memo(function PosterCard({
           onPlay={menuCodes.length === 1 ? onPlay : undefined}
           onOpenFolder={menuCodes.length === 1 ? onOpenFolder : undefined}
           onOpenDetail={menuCodes.length === 1 ? () => onClick?.() : undefined}
+          onAskPersonaChat={
+            menuCodes.length === 1
+              ? () =>
+                  openPersonaChat({
+                    productCode,
+                    prefillMessage: `${productCode} 이 작품, 어떤 점 때문에 끌리는지 짚어줘.`,
+                  })
+              : undefined
+          }
         />
       )}
 

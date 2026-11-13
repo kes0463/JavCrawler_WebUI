@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Heart, Pencil, Save, X, Merge } from "lucide-react";
+import { Heart, MessageCircle, Pencil, Save, X, Merge } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { useNavigation } from "@/contexts/NavigationContext";
 import { Skeleton } from "@/components/ui/Skeleton";
 import { updateActress, type ActressProfile, type ActressWork } from "@/api/actress";
 import { ActressGallery } from "./ActressGallery";
@@ -90,6 +91,7 @@ export function ActressDetailPanel({
   onError,
   onSuccess,
 }: ActressDetailPanelProps) {
+  const { openPersonaChat } = useNavigation();
   const [editMode, setEditMode] = useState(false);
   const [editDraft, setEditDraft] = useState<Partial<ActressProfile>>({});
   const [profileText, setProfileText] = useState("");
@@ -215,6 +217,13 @@ export function ActressDetailPanel({
 
   const ageLabel = formatAgeLabel(profile.birth_date);
   const genreTags = parseGenreTags(profile.genres, 5);
+  const actressName = displayActressName(profile);
+
+  const handleAskPersonaChat = () => {
+    openPersonaChat({
+      prefillMessage: `${actressName} 배우 취향으로 어떤 작품이 잘 맞을지 추천해줘.`,
+    });
+  };
 
   return (
     <div className="flex flex-col h-full min-h-0">
@@ -222,9 +231,17 @@ export function ActressDetailPanel({
         <button type="button" onClick={onBack} className="lg:hidden p-2 rounded-lg hover:bg-white/5">
           <span className="text-lg">←</span>
         </button>
-        <h1 className="text-2xl font-bold flex-1 truncate">{displayActressName(profile)}</h1>
+        <h1 className="text-2xl font-bold flex-1 truncate">{actressName}</h1>
         {!editMode && (
           <>
+            <button
+              type="button"
+              onClick={handleAskPersonaChat}
+              className="p-2 rounded-lg text-fuchsia-300 hover:bg-white/5"
+              title="페르소나챗에서 이 배우 취향 물어보기"
+            >
+              <MessageCircle className="w-5 h-5" />
+            </button>
             <button type="button" onClick={toggleFavorite} title="즐겨찾기">
               <Heart className={cn("w-6 h-6", profile.is_favorite && "fill-rose-400 text-rose-400")} />
             </button>

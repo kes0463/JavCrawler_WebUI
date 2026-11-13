@@ -135,6 +135,21 @@ def rename_session(session_id: str, title: str) -> Dict[str, Any] | None:
     return asdict(session)
 
 
+def truncate_messages(session_id: str, keep_count: int) -> Dict[str, Any] | None:
+    """앞에서부터 ``keep_count``개 메시지만 남기고 나머지를 버린다.
+
+    웹 UI의 "마지막 사용자 메시지 수정 후 재전송"에서, 수정 대상 턴과 그 이후에
+    저장된 턴을 지우고 새 턴을 이어 붙이기 전에 호출한다.
+    """
+    session = _read(session_id)
+    if session is None:
+        return None
+    session.messages = session.messages[: max(0, int(keep_count))]
+    session.updated_at = _now_iso()
+    _write(session)
+    return asdict(session)
+
+
 def _auto_title_from(text: str) -> str:
     collapsed = " ".join((text or "").split())
     if len(collapsed) <= _TITLE_MAX_LEN:

@@ -54,7 +54,10 @@ if errorlevel 1 (
     exit /b 1
 )
 
-pip install -r "%~dp0requirements-torch.txt"
+REM --index-url 필수: 지정 안 하면 pip가 CPU 전용 torch를 조용히 설치할 수 있음
+REM (torch.cuda.is_available()==False, 에러 없이 STT가 CPU로만 돎). RTX 50시리즈
+REM (Blackwell)는 cu124 이하로는 동작 안 함 — 반드시 cu128 이상 인덱스 사용.
+pip install -r "%~dp0requirements-torch.txt" --index-url https://download.pytorch.org/whl/cu128
 if errorlevel 1 (
     echo [ERROR] pip install -r requirements-torch.txt failed.
     echo See INSTALL.md for CPU-only PyTorch install.

@@ -88,6 +88,25 @@ def _is_proper_korean(text: str, *, min_hangul: int = 2) -> bool:
     return True
 
 
+def _parse_favorite_sources(raw: str | None) -> dict[str, int]:
+    """"123av:613,missav123:102" 형식 파싱. 이번 라운드에 안 온 사이트의 이전
+    점수를 보존해 재수집 시 favorite_score가 0으로 리셋되는 것을 막는 데 쓴다."""
+    out: dict[str, int] = {}
+    for part in (raw or "").split(","):
+        part = part.strip()
+        if not part or ":" not in part:
+            continue
+        site, _, score_s = part.partition(":")
+        site = site.strip()
+        try:
+            score = int(score_s.strip())
+        except ValueError:
+            continue
+        if site:
+            out[site] = score
+    return out
+
+
 def _harvest_should_run_story_context(explicit: bool | None) -> bool:
     """None이면 `JAVSTORY_STORY_ANALYSIS_ENABLED`와 동일(자막 오케스트레이터 기본과 맞춤)."""
     if explicit is False:
@@ -167,6 +186,8 @@ async def run_crawler_for_video_path(
     db_favorite_score = 0
     db_favorite_sources = None
     db_crawl_sources = None
+    # 재수집 시 이번 라운드에 안 걸린 사이트의 이전 favorite 점수를 보존하기 위한 기존값
+    existing_favorite_sources_map: dict[str, int] = {}
     original_title = ""
     db_folder_path: str | None = None
     trans_res = {}
@@ -181,6 +202,12 @@ async def run_crawler_for_video_path(
                 row = session.query(JAVMetadata).filter_by(product_code=code).first()
                 if row:
                     db_folder_path = getattr(row, "folder_path", None)
+                    # 크롤링을 이번에 다시 하는 경우(강제 재수집 등)에도, 이번 라운드에
+                    # 시도 안 했거나 실패한 사이트의 이전 favorite 점수는 지켜야 하므로
+                    # has_ja_full 분기와 무관하게 항상 미리 캡처해둔다.
+                    existing_favorite_sources_map = _parse_favorite_sources(
+                        getattr(row, "favorite_sources", None)
+                    )
                     # 1. 원본(JA) 데이터 확인
                     # - 크롤링(웹 수집) 스킵은 커버 URL까지 포함한 "완전한 원본"을 요구한다.
                     # - 번역 스킵은 제목/시놉시스 JA 텍스트만 있으면 충분하다(커버 URL 부재로 번역을 매번 다시 돌지 않게).
@@ -331,13 +358,21 @@ async def run_crawler_for_video_path(
                 raw_title = original_title if not _is_boilerplate_title(original_title) else ""
             if _is_boilerplate_title(original_title):
                 original_title = raw_title if not _is_boilerplate_title(raw_title) else ""
-            db_favorite_score = int(res.get("favorite_score") or 0)
             _fav_parts = {
                 k.removeprefix("_fav_src_"): v
                 for k, v in res.items() if k.startswith("_fav_src_")
             }
+            # 이번 라운드에 사이트별로 새로 얻은(0보다 큰) 점수만 반영하고, 이번에
+            # 그 사이트를 안 갔거나 실패해 값이 없는 사이트는 기존 DB 점수를 유지한다.
+            # (그렇지 않으면 강제 재수집 중 123av 등이 일시적으로 실패했을 뿐인데도
+            # favorite_score가 0으로 리셋되는 문제가 있었다.)
+            _fav_merged = dict(existing_favorite_sources_map)
+            for site, score in _fav_parts.items():
+                if score:
+                    _fav_merged[site] = score
+            db_favorite_score = sum(_fav_merged.values())
             db_favorite_sources = ",".join(
-                f"{site}:{score}" for site, score in _fav_parts.items() if score
+                f"{site}:{score}" for site, score in _fav_merged.items() if score
             ) or None
             import json as _json
 

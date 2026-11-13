@@ -9,11 +9,13 @@ from fastapi.responses import StreamingResponse
 from javstory.persona import chat_sessions
 from javstory.persona.persona_chat import ENHANCED_PERSONA_MEMORY_PATH, PersonaChatService
 from webapi.schemas import (
+    PersonaChatMemorySnapshot,
     PersonaChatMessageRequest,
     PersonaChatSessionDetail,
     PersonaChatSessionRenameRequest,
     PersonaChatSessionSummary,
     PersonaChatSessionsResponse,
+    PersonaChatSessionTruncateRequest,
 )
 
 router = APIRouter()
@@ -99,3 +101,34 @@ def persona_chat_delete_session(session_id: str):
     if not chat_sessions.delete_session(session_id):
         raise HTTPException(404, "대화를 찾을 수 없습니다")
     return {"deleted": True}
+
+
+@router.post("/sessions/{session_id}/truncate", response_model=PersonaChatSessionDetail)
+def persona_chat_truncate_session(session_id: str, body: PersonaChatSessionTruncateRequest):
+    session = chat_sessions.truncate_messages(session_id, body.keep_count)
+    if session is None:
+        raise HTTPException(404, "대화를 찾을 수 없습니다")
+    return PersonaChatSessionDetail(**session)
+
+
+@router.get("/memory", response_model=PersonaChatMemorySnapshot)
+def persona_chat_get_memory():
+    # 패널을 열 때마다 최신 시청/평점을 반영 — 다음 챗 턴까지 기다리지 않고 바로 확인 가능.
+    try:
+        from javstory.persona.recommendation_feedback import sync_recommendation_watch_feedback
+
+        sync_recommendation_watch_feedback(_service.enhanced_memory_store)
+        _service.enhanced_memory_store.save_to_json(str(ENHANCED_PERSONA_MEMORY_PATH))
+    except Exception:
+        logger.exception("추천 피드백 동기화 실패")
+    return PersonaChatMemorySnapshot(**_service.enhanced_memory_store.memory_snapshot_for_ui())
+
+
+@router.delete("/memory/{category}/{index}", response_model=PersonaChatMemorySnapshot)
+def persona_chat_remove_memory_note(category: str, index: int):
+    if _service.enhanced_memory_store.remove_note(category, index):
+        try:
+            _service.enhanced_memory_store.save_to_json(str(ENHANCED_PERSONA_MEMORY_PATH))
+        except Exception:
+            logger.exception("페르소나챗 메모리 저장 실패")
+    return PersonaChatMemorySnapshot(**_service.enhanced_memory_store.memory_snapshot_for_ui())

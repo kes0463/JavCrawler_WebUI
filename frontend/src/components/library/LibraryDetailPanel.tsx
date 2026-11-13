@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { Bell, BookOpen, Bookmark, FileAudio, FolderOpen, FolderX, Heart, ImagePlus, Languages, Link2, Loader2, Pause, Pencil, Play, RefreshCw, Save, Sparkles, StickyNote, Upload, X } from "lucide-react";
+import { Bell, BookOpen, Bookmark, FileAudio, FolderOpen, FolderX, Heart, ImagePlus, Languages, Link2, Loader2, MessageCircle, Pause, Pencil, Play, RefreshCw, Save, Sparkles, StickyNote, Upload, X } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { GlassCard } from "@/components/ui/GlassCard";
 import { Skeleton } from "@/components/ui/Skeleton";
@@ -310,7 +310,7 @@ export function LibraryDetailPanel({
   onSaved,
 }: LibraryDetailPanelProps) {
   const { showToast } = useToast();
-  const { openActressByName } = useNavigation();
+  const { openActressByName, openPersonaChat } = useNavigation();
   const { enqueueLibraryProducts } = useLibraryProcessingActions();
   const { refreshInbox, openReviewForCode, isBindingPending } = useFolderWatch();
   const [detail, setDetail] = useState<LibraryItemDetail | null>(null);
@@ -352,6 +352,14 @@ export function LibraryDetailPanel({
       showToast(e instanceof Error ? e.message : "배우 정보를 불러오지 못했습니다.", "error");
     }
   }, [onActorClick, onClose, openActressByName, showToast]);
+
+  const handleAskPersonaChat = useCallback(() => {
+    onClose();
+    openPersonaChat({
+      productCode: code,
+      prefillMessage: `${code} 이 작품, 어떤 점 때문에 끌리는지 짚어줘.`,
+    });
+  }, [code, onClose, openPersonaChat]);
 
   useEffect(() => {
     backdropCloseReadyRef.current = false;
@@ -1006,6 +1014,14 @@ export function LibraryDetailPanel({
                   >
                     <Play className="w-6 h-6" />
                     재생
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleAskPersonaChat}
+                    className="inline-flex items-center gap-2 px-5 py-3 rounded-xl bg-fuchsia-500/15 border border-fuchsia-500/35 text-fuchsia-200 hover:bg-fuchsia-500/25 transition-colors text-xl font-semibold"
+                  >
+                    <MessageCircle className="w-6 h-6" />
+                    페르소나챗에서 물어보기
                   </button>
                   <button
                     type="button"

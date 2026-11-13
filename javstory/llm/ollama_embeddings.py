@@ -19,9 +19,19 @@ from javstory.utils.cache_manager import cache_manager
 
 def _is_connect_error(exc: BaseException) -> bool:
     name = type(exc).__name__
-    if name in {"ConnectError", "ConnectTimeout"}:
+    if name in {
+        "ConnectError",
+        "ConnectTimeout",
+        "ReadError",
+        "ReadTimeout",
+        "WriteError",
+        "RemoteProtocolError",
+    }:
         return True
-    return "connection" in str(exc).lower()
+    text = str(exc).lower()
+    if "connection" in text:
+        return True
+    return "10053" in text or "10054" in text
 
 
 async def ollama_embed_text(

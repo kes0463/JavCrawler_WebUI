@@ -396,13 +396,15 @@ def _merge_empty_only(base: dict[str, Any], extra: dict[str, Any], *, source: st
 def _browser_chases_synopsis() -> bool:
     """njavtv 브라우저 단계(건당 수십 초~수 분)를 synopsis만 누락일 때도 돌릴지.
 
-    기본 꺼짐 — title/cover 가 있으면 synopsis 없는 행도 정상 수집으로 저장한다.
-    빈 synopsis 는 이후 값싼 배치로 백필할 수 있다.
-    `JAVSTORY_HARVEST_BROWSER_FOR_SYNOPSIS=1` 로 예전(항상 njavtv 시도) 동작 복원.
+    기본 켜짐 — 값싼 소스(123av/missav123/avwiki) 3곳이 다 synopsis를 못 주면
+    njavtv까지 가서 채운다(단계별 재시도는 추가하지 않음 — 각 단계는 여전히 1회만
+    시도). `JAVSTORY_HARVEST_BROWSER_FOR_SYNOPSIS=0` 으로 예전(title/cover만 있으면
+    synopsis 없어도 그냥 저장하는, 더 빠른) 동작으로 되돌릴 수 있다.
     """
-    return (os.environ.get("JAVSTORY_HARVEST_BROWSER_FOR_SYNOPSIS", "") or "").strip().lower() in (
-        "1", "true", "yes", "on",
-    )
+    raw = (os.environ.get("JAVSTORY_HARVEST_BROWSER_FOR_SYNOPSIS", "") or "").strip().lower()
+    if raw in ("0", "false", "no", "off"):
+        return False
+    return True
 
 
 def _needs_fallback(d: dict[str, Any], *, require_synopsis: bool = False) -> bool:

@@ -2664,6 +2664,57 @@ def _recommendation_candidates_from_payload(payload: Mapping[str, Any]) -> tuple
     return [item for item in candidates if item.get("product_code")], recent_codes
 
 
+def _split_candidate_field(value: str) -> List[str]:
+    return [part.strip() for part in str(value or "").split(",") if part.strip()]
+
+
+def _safe_float(value: Any) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _structured_recommendation_items(
+    candidates: Sequence[Mapping[str, str]], text: str
+) -> List[Dict[str, Any]]:
+    """최종 답변에 실제로 언급된 후보만, 언급 순서대로 웹 UI용 카드 데이터로 구조화한다.
+
+    ``_recommendation_candidates_from_payload``가 프롬프트에 주입했던 그라운딩 후보를
+    문자열 필드 그대로 파싱해 두므로, 여기서는 실제 답변에 등장한 품번만 골라 리스트/숫자
+    형태로 다시 풀어준다. 후보 중 모델이 언급하지 않은 나머지는 카드로 노출하지 않는다 —
+    프롬프트에는 보였지만 실제 추천에서 빠진 근거를 UI가 추천인 것처럼 보여주면 안 되므로.
+    """
+    if not candidates:
+        return []
+    mentioned = [code.strip().upper() for code in extract_product_codes(text)]
+    if not mentioned:
+        return []
+    by_code = {str(item.get("product_code") or "").strip().upper(): item for item in candidates}
+    seen: set[str] = set()
+    out: List[Dict[str, Any]] = []
+    for code in mentioned:
+        if code in seen or code not in by_code:
+            continue
+        seen.add(code)
+        item = by_code[code]
+        out.append(
+            {
+                "product_code": code,
+                "title": str(item.get("title_ko") or item.get("title_ja") or "").strip(),
+                "actors": _split_candidate_field(item.get("actors") or ""),
+                "genres": _split_candidate_field(item.get("genres") or ""),
+                "persona_match_score": _safe_float(item.get("persona_match_score")),
+                "ranking_reasons": _split_candidate_field(item.get("ranking_reasons") or ""),
+                "matched_persona_terms": _split_candidate_field(item.get("matched_persona_terms") or ""),
+                "matched_genre_terms": _split_candidate_field(item.get("matched_genre_terms") or ""),
+                "matched_query_terms": _split_candidate_field(item.get("matched_query_terms") or ""),
+                "matched_seed_title": str(item.get("matched_seed_title") or "").strip(),
+            }
+        )
+    return out
+
+
 def _actress_filter_from_payload(payload: Mapping[str, Any]) -> Dict[str, str]:
     messages = payload.get("messages") or []
     system_text = "\n".join(
@@ -4096,6 +4147,9 @@ class PersonaChatService:
                     full_text = retry_text
             if full_text and not retried_non_streaming:
                 _record_memory(full_text)
+            recommendation_items = _structured_recommendation_items(candidates, full_text)
+            if recommendation_items:
+                yield {"type": "recommendations", "items": recommendation_items}
             completion_tokens = (
                 int(usage_info.get("completion_tokens") or 0) if usage_info else 0
             )

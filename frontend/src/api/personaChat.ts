@@ -11,9 +11,24 @@ export interface PersonaChatUsage {
   total_tokens?: number;
 }
 
+/** javstory/persona/persona_chat.py의 _structured_recommendation_items()와 동일한 형태. */
+export interface PersonaChatRecommendationItem {
+  product_code: string;
+  title: string;
+  actors: string[];
+  genres: string[];
+  persona_match_score: number;
+  ranking_reasons: string[];
+  matched_persona_terms: string[];
+  matched_genre_terms: string[];
+  matched_query_terms: string[];
+  matched_seed_title: string;
+}
+
 export type PersonaChatStreamEvent =
   | { type: "token"; text: string }
   | { type: "reasoning"; text: string }
+  | { type: "recommendations"; items: PersonaChatRecommendationItem[] }
   | {
       type: "done";
       text: string;

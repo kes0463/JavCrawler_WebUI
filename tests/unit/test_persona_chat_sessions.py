@@ -66,6 +66,31 @@ def test_rename_unknown_session_returns_none(monkeypatch, tmp_path):
     assert chat_sessions.rename_session("nonexistent", "x") is None
 
 
+def test_truncate_messages_drops_tail_turns(monkeypatch, tmp_path):
+    monkeypatch.setattr(chat_sessions, "SESSIONS_DIR", tmp_path)
+    session = chat_sessions.create_session()
+    chat_sessions.append_turn(session["id"], "첫 메시지", "답1")
+    chat_sessions.append_turn(session["id"], "두번째 메시지", "답2")
+
+    truncated = chat_sessions.truncate_messages(session["id"], 2)
+
+    assert len(truncated["messages"]) == 2
+    assert truncated["messages"][0]["content"] == "첫 메시지"
+    persisted = chat_sessions.get_session(session["id"])
+    assert len(persisted["messages"]) == 2
+
+
+def test_truncate_messages_clamps_negative_and_unknown_session(monkeypatch, tmp_path):
+    monkeypatch.setattr(chat_sessions, "SESSIONS_DIR", tmp_path)
+    session = chat_sessions.create_session()
+    chat_sessions.append_turn(session["id"], "메시지", "답")
+
+    truncated = chat_sessions.truncate_messages(session["id"], -5)
+
+    assert truncated["messages"] == []
+    assert chat_sessions.truncate_messages("nonexistent", 0) is None
+
+
 def test_list_sessions_ignores_non_uuid_files(monkeypatch, tmp_path):
     monkeypatch.setattr(chat_sessions, "SESSIONS_DIR", tmp_path)
     (tmp_path / "not-a-session-id.json").write_text("{}", encoding="utf-8")

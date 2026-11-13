@@ -154,6 +154,23 @@ async def lifespan(app: FastAPI):
 
     yield
 
+    # 웹서버(uvicorn) 종료 시 이 프로세스가 직접 띄운 llama-server / ollama serve를
+    # 확실히 정리한다. atexit만으로는 강제 종료가 아닌 정상 종료(Ctrl+C 등) 경로에서도
+    # 타이밍이 보장되지 않으므로, FastAPI shutdown 단계에서 명시적으로 호출한다.
+    try:
+        from javstory.llm.llamacpp_backend import stop_llamacpp_server
+
+        stop_llamacpp_server()
+    except Exception:
+        pass
+
+    try:
+        from javstory.llm.ollama_serve import stop_ollama_serve
+
+        stop_ollama_serve()
+    except Exception:
+        pass
+
 
 app = FastAPI(
     title="JAVSTORY WebAPI",

@@ -35,3 +35,10 @@ export const renamePersonaChatSession = (
 
 export const deletePersonaChatSession = (id: string): Promise<{ deleted: boolean }> =>
   del(`/api/persona-chat/sessions/${encodeURIComponent(id)}`);
+
+/** 저장된 메시지를 앞에서부터 keepCount개만 남기고 자른다 — 마지막 메시지 수정 후 재전송 전에 호출. */
+export const truncatePersonaChatSession = (
+  id: string,
+  keepCount: number,
+): Promise<PersonaChatSessionDetail> =>
+  post(`/api/persona-chat/sessions/${encodeURIComponent(id)}/truncate`, { keep_count: keepCount });

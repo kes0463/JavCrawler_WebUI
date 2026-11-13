@@ -1245,3 +1245,18 @@ class PersonaChatSessionDetail(BaseModel):
 
 class PersonaChatSessionRenameRequest(BaseModel):
     title: str
+
+
+class PersonaChatSessionTruncateRequest(BaseModel):
+    keep_count: int
+
+
+class PersonaChatMemorySnapshot(BaseModel):
+    turn_count: int = 0
+    preference_notes: list[dict] = []
+    strong_reaction_notes: list[dict] = []
+    negative_feedback_notes: list[dict] = []
+    correction_notes: list[dict] = []
+    style_notes: list[dict] = []
+    recent_recommended_product_codes: list[str] = []
+    pending_recommendation_outcomes: list[dict] = []

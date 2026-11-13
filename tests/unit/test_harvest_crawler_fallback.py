@@ -22,7 +22,10 @@ def test_needs_fallback_synopsis_missing_when_required():
 
 
 def test_browser_chases_synopsis_env(monkeypatch):
+    # 기본 켜짐 — 값싼 소스가 synopsis를 못 채우면 njavtv까지 시도한다.
     monkeypatch.delenv("JAVSTORY_HARVEST_BROWSER_FOR_SYNOPSIS", raising=False)
+    assert _browser_chases_synopsis() is True
+    monkeypatch.setenv("JAVSTORY_HARVEST_BROWSER_FOR_SYNOPSIS", "0")
     assert _browser_chases_synopsis() is False
     monkeypatch.setenv("JAVSTORY_HARVEST_BROWSER_FOR_SYNOPSIS", "1")
     assert _browser_chases_synopsis() is True

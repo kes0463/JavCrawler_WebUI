@@ -657,6 +657,9 @@ class EnhancedPersonaMemory:
             "correction_notes": list(self.correction_notes),
             "style_notes": list(self.style_notes),
             "recent_recommended_product_codes": list(self.recent_recommended_product_codes),
+            # 추천 후 시청/평점 반응을 아직 못 받은 품번 — recommendation_feedback.py가
+            # sync_recommendation_watch_feedback()으로 채우고 비운다.
+            "pending_recommendation_outcomes": list(self.pending_recommendation_outcomes),
         }
 
     def remove_note(self, category: str, index: int) -> bool:

@@ -576,7 +576,18 @@ def _parse_host_port(base_url: str) -> tuple[str, int]:
 
 def _server_health_ok(base_url: str, timeout: float = 2.0) -> bool:
     root = base_url.rstrip("/")
-    for path in ("/health", "/v1/models", "/"):
+    try:
+        r = httpx.get(f"{root}/health", timeout=timeout)
+        if r.status_code == 503:
+            # 모델 로딩 중 — 명확한 "아직 준비 안 됨" 신호이므로 /v1/models 등
+            # 더 느슨한 엔드포인트로 대체 판단하면 안 된다(로딩 중에도 200을
+            # 줄 수 있어 /v1/embeddings 503 "Loading model"로 이어짐).
+            return False
+        if r.status_code < 500:
+            return True
+    except Exception:
+        pass
+    for path in ("/v1/models", "/"):
         try:
             r = httpx.get(f"{root}{path}", timeout=timeout)
             if r.status_code < 500:
@@ -584,6 +595,23 @@ def _server_health_ok(base_url: str, timeout: float = 2.0) -> bool:
         except Exception:
             continue
     return False
+
+
+def _is_model_loading_error(exc: BaseException) -> bool:
+    resp = getattr(exc, "response", None)
+    if resp is not None and resp.status_code == 503:
+        return True
+    body = _response_body_text(exc).lower()
+    return "loading model" in body
+
+
+def _wait_for_embeddings_ready(base_url: str, *, timeout: float = 90.0) -> None:
+    """모델 로딩 완료(=/health 200) 까지 대기. 새 프로세스를 띄우진 않는다."""
+    deadline = time.time() + max(1.0, timeout)
+    while time.time() < deadline:
+        if _server_health_ok(base_url, timeout=1.5):
+            return
+        time.sleep(0.4)
 
 
 def _probe_embeddings_ok(base_url: str, model: str, timeout: float = 30.0) -> bool:
@@ -796,7 +824,13 @@ def _ensure_embeddings_llamacpp_ready_locked(
 
     # 이미 외부에서 떠 있는 경우: pooling이 맞는지 프로브 후 재사용
     if _server_health_ok(base):
-        if _probe_embeddings_ok(base, alias):
+        probe_ok = _probe_embeddings_ok(base, alias)
+        if not probe_ok:
+            # 방금 뜬 외부 서버가 아직 모델 로딩 중일 수 있음 — pooling 오류로
+            # 단정해 죽이기 전에 잠깐 대기 후 한 번 더 확인한다.
+            _wait_for_embeddings_ready(base, timeout=30.0)
+            probe_ok = _probe_embeddings_ok(base, alias)
+        if probe_ok:
             with _lock:
                 _active_gguf = gguf_key
                 _active_base_url = base
@@ -889,10 +923,27 @@ atexit.register(lambda: stop_embeddings_llamacpp_server(logger_func=lambda *_: N
 
 
 def _is_connect_error(exc: BaseException) -> bool:
+    """서버가 죽어서(크래시/강제종료) 연결이 끊긴 경우까지 포함해 재기동 대상으로 본다.
+
+    ReadError/RemoteProtocolError 등은 요청 중간에 서버 프로세스가 사라졌을 때
+    발생하며, Windows 에러 메시지가 로컬라이즈되어 있으면(예: 한국어 "연결이
+    강제로 끊겼습니다") 영어 단어 "connection"이 안 보여 놓치는 경우가 있었다.
+    """
     name = type(exc).__name__
-    if name in {"ConnectError", "ConnectTimeout"}:
+    if name in {
+        "ConnectError",
+        "ConnectTimeout",
+        "ReadError",
+        "ReadTimeout",
+        "WriteError",
+        "RemoteProtocolError",
+    }:
         return True
-    return "connection" in str(exc).lower()
+    text = str(exc).lower()
+    if "connection" in text:
+        return True
+    # WinError 10053/10054 = 강제 종료/재설정된 연결 (서버 크래시 시 전형적으로 발생)
+    return "10053" in text or "10054" in text
 
 
 def _parse_embedding_response(data: Any, *, expected: int) -> List[List[float]]:
@@ -1048,9 +1099,13 @@ async def llamacpp_embed_texts(
         retry_limits: List[int | None] = [None, limit // 2, max(256, limit // 4)]
         last_exc: BaseException | None = None
 
-        for attempt, char_limit in enumerate(retry_limits):
-            if attempt > 0:
-                await asyncio.sleep(0.25 * attempt)
+        idx = 0
+        stall_retries = 0
+        max_stall_retries = 5  # 서버 재기동/모델 로딩 대기 — 텍스트 truncate와 무관한 재시도
+        while idx < len(retry_limits):
+            char_limit = retry_limits[idx]
+            if idx > 0:
+                await asyncio.sleep(0.25 * idx)
             try:
                 payload_text = truncate_embedding_input(text, max_chars=char_limit)
                 data = await _post([payload_text])
@@ -1061,9 +1116,19 @@ async def llamacpp_embed_texts(
             except Exception as e:
                 last_exc = e
                 if _is_connect_error(e) or _is_pooling_incompatible_error(e):
+                    stall_retries += 1
+                    if stall_retries > max_stall_retries:
+                        break
                     await asyncio.to_thread(ensure_embeddings_llamacpp_ready, wait_sec=90.0)
-                    continue
-                if _is_context_exceed_error(e) and attempt + 1 < len(retry_limits):
+                    continue  # char_limit 유지 — truncate 단계 소모 안 함
+                if _is_model_loading_error(e):
+                    stall_retries += 1
+                    if stall_retries > max_stall_retries:
+                        break
+                    await asyncio.to_thread(_wait_for_embeddings_ready, base, timeout=90.0)
+                    continue  # char_limit 유지
+                if _is_context_exceed_error(e) and idx + 1 < len(retry_limits):
+                    idx += 1
                     continue
                 if getattr(e, "response", None) is not None:
                     _raise_embed_http_error(e)
@@ -1097,6 +1162,8 @@ async def llamacpp_embed_texts(
         except Exception as e:
             if _is_connect_error(e) or _is_pooling_incompatible_error(e):
                 await asyncio.to_thread(ensure_embeddings_llamacpp_ready, wait_sec=90.0)
+            elif _is_model_loading_error(e):
+                await asyncio.to_thread(_wait_for_embeddings_ready, base, timeout=90.0)
             # 배치 실패 — 원인(컨텍스트 초과 등)을 개별 텍스트 단위로 격리하기 위해
             # 이 배치만 항목별 순차 요청+재시도로 폴백한다.
             for i in chunk_idx:

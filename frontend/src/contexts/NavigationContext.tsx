@@ -11,6 +11,14 @@ export type View =
   | "personaChat"
   | "settings";
 
+/** 다른 화면에서 Persona Chat으로 딥링크할 때 넘기는 진입 컨텍스트 — 소비 후 즉시 비운다. */
+export interface PersonaChatEntryContext {
+  /** 채팅 상세 패널을 이 작품으로 열고, 다음 메시지의 product_code 컨텍스트로 붙인다. */
+  productCode?: string;
+  /** 입력창에 미리 채워 둘 메시지 — 사용자가 확인 후 전송한다. */
+  prefillMessage?: string;
+}
+
 interface NavCtx {
   currentView: View;
   navigateTo: (view: View) => void;
@@ -24,6 +32,9 @@ interface NavCtx {
   closeActressDetail: () => void;
   pendingActressCreateName: string | null;
   clearPendingActressCreate: () => void;
+  personaChatEntry: PersonaChatEntryContext | null;
+  openPersonaChat: (ctx?: PersonaChatEntryContext) => void;
+  clearPersonaChatEntry: () => void;
 }
 
 const NavigationContext = createContext<NavCtx | null>(null);
@@ -34,6 +45,7 @@ export function NavigationProvider({ children }: { children: React.ReactNode }) 
   const [actressDetailId, setActressDetailId] = useState<number | null>(null);
   const [actressListEpoch, setActressListEpoch] = useState(0);
   const [pendingActressCreateName, setPendingActressCreateName] = useState<string | null>(null);
+  const [personaChatEntry, setPersonaChatEntry] = useState<PersonaChatEntryContext | null>(null);
 
   /** 라이브러리 상세를 유지할 탭 — STT/번역 후 복귀 시 패널 복원 */
   const PRESERVE_LIBRARY_DETAIL: View[] = ["processing"];
@@ -60,6 +72,14 @@ export function NavigationProvider({ children }: { children: React.ReactNode }) 
     setCurrentView("actress");
     setActressDetailId(id);
     setLibraryDetailSku(null);
+  };
+
+  /** 라이브러리/배우 상세 등에서 특정 작품·배우를 문맥으로 Persona Chat 탭을 연다. */
+  const openPersonaChat = (ctx?: PersonaChatEntryContext) => {
+    setCurrentView("personaChat");
+    setLibraryDetailSku(null);
+    setActressDetailId(null);
+    setPersonaChatEntry(ctx ?? {});
   };
 
   const openActressByName = async (name: string): Promise<boolean> => {
@@ -98,6 +118,9 @@ export function NavigationProvider({ children }: { children: React.ReactNode }) 
         closeActressDetail: () => setActressDetailId(null),
         pendingActressCreateName,
         clearPendingActressCreate: () => setPendingActressCreateName(null),
+        personaChatEntry,
+        openPersonaChat,
+        clearPersonaChatEntry: () => setPersonaChatEntry(null),
       }}
     >
       {children}
