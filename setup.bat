@@ -65,6 +65,12 @@ if errorlevel 1 (
     exit /b 1
 )
 
+REM Harvest 브라우저 단계(Scrapling StealthyFetcher)용 Chromium. 실패해도 HTTP 수집은 동작하므로 경고만.
+python -m patchright install chromium
+if errorlevel 1 (
+    echo [WARN] patchright chromium install failed. Harvest browser fallback will be unavailable.
+)
+
 echo.
 echo ============================================================
 echo Setup complete. Run: start.bat

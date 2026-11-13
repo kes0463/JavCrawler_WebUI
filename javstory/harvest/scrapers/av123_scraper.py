@@ -4,23 +4,15 @@
 """
 from __future__ import annotations
 
-import os
 import re
-import time
 import json
 from dataclasses import asdict, dataclass, field
 from typing import Any, Dict, List, Optional
 from urllib.parse import urljoin
 
-try:
-    from curl_cffi import requests as _cffi_requests
-    _USE_CFFI = True
-except ImportError:
-    import requests as _cffi_requests  # type: ignore[no-redef]
-    _USE_CFFI = False
-
-import requests
 from bs4 import BeautifulSoup
+
+from javstory.harvest.fetching import http_get
 
 BASE_URL = "https://123av.com"
 VIDEO_PATH_TEMPLATE = "/ja/v/{product_id}"
@@ -531,56 +523,6 @@ def parse_video_html(
     return info
 
 
-def _http_get(
-    url: str,
-    *,
-    headers: dict,
-    timeout: float,
-    session=None,
-    disable_cffi: bool,
-) -> Optional[Any]:
-    # 재시도는 전송 예외(타임아웃·리셋 등 일시적 실패)에만 의미가 있다.
-    # 404/빈 페이지는 예외가 아니라 정상 반환 → 재시도 없이 상위에서 다음 슬러그로 넘어간다.
-    max_tries = 2
-    backoffs = (0.0, 0.7)
-    last_exc: Optional[BaseException] = None
-    for i in range(max_tries):
-        if i > 0:
-            try:
-                time.sleep(backoffs[min(i, len(backoffs) - 1)])
-            except Exception:
-                pass
-        try:
-            if _USE_CFFI and (session is None) and (not disable_cffi):
-                r = _cffi_requests.get(
-                    url,
-                    headers=headers,
-                    timeout=timeout,
-                    impersonate="chrome131",
-                )
-            else:
-                sess = session or requests.Session()
-                r = sess.get(url, headers=headers, timeout=timeout)
-                r.encoding = r.apparent_encoding or "utf-8"
-            return r
-        except Exception as e:
-            last_exc = e
-            msg = str(e)
-            is_curl_reset = ("curl:" in msg.lower()) and ("(35)" in msg or "recv failure" in msg.lower())
-            if is_curl_reset and (_USE_CFFI and (session is None)) and (not disable_cffi):
-                try:
-                    sess = requests.Session()
-                    r = sess.get(url, headers=headers, timeout=timeout)
-                    r.encoding = r.apparent_encoding or "utf-8"
-                    return r
-                except Exception as e2:
-                    last_exc = e2
-            continue
-    if last_exc is not None:
-        raise last_exc
-    return None
-
-
 def fetch_video_info(
     product_id: str,
     *,
@@ -592,22 +534,11 @@ def fetch_video_info(
     product_id = product_id.strip()
     if not product_id:
         raise ValueError("product_id is empty")
-    headers = {
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/120.0.0.0 Safari/537.36"
-        ),
-        "Accept-Language": "ko-KR,ko;q=0.9,ja;q=0.8,en;q=0.7",
-    }
+    headers = {"Accept-Language": "ko-KR,ko;q=0.9,ja;q=0.8,en;q=0.7"}
     last_exc: Optional[BaseException] = None
     candidates = _slug_candidates(product_id)
     if not candidates:
         raise ValueError("product_id is empty")
-
-    disable_cffi = (os.environ.get("JAVSTORY_CURL_CFFI_DISABLED", "") or "").strip().lower() in (
-        "1", "true", "yes", "on",
-    )
 
     for slug in candidates:
         info_ja: Optional[VideoInfo] = None
@@ -616,7 +547,7 @@ def fetch_video_info(
             path = LOCALE_PATH_TEMPLATE.format(locale=locale, product_id=slug)
             url = base_url.rstrip("/") + path
             try:
-                r = _http_get(url, headers=headers, timeout=timeout, session=session, disable_cffi=disable_cffi)
+                r = http_get(url, headers=headers, timeout=timeout, session=session)
             except Exception as e:
                 last_exc = e
                 continue

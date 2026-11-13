@@ -1,46 +1,31 @@
 """
-missav123.to 動画詳細ページ ( /ja/v/{product_id} ) から
+missav123.com 動画詳細ページ ( /ja/{product_id} ) から
 품번·제목·설명·포스터·여배우·장르·출시일·메이커를 HTML から抽出する。
 
+- 예전 주소 `missav123.to/ja/v/{id}` 는 123av.com 이전 안내 페이지만 내려주므로 쓰지 않는다.
+- missav123.com 은 njavtv 와 같은 템플릿이라 파싱은 `njavtv_scraper.parse_njav_html` 을 공유한다.
+- 이 사이트는 좋아요 수를 노출하지 않는다 → favourite_count 는 항상 0
+  (coordinator 는 0 이면 DB 의 기존 사이트별 점수를 유지한다).
+
 참고 샘플:
-- `https://missav123.to/ja/v/jufe-449`
-- `https://missav123.to/ja/v/dazd-264`
+- `https://missav123.com/ja/snos-334`
 """
 
 from __future__ import annotations
 
-import os
 import re
-import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
-from urllib.parse import urljoin
 
-try:
-    from curl_cffi import requests as _cffi_requests
-    _USE_CFFI = True
-except ImportError:
-    import requests as _cffi_requests  # type: ignore[no-redef]
-    _USE_CFFI = False
-
-import requests
-from bs4 import BeautifulSoup
-
+from javstory.harvest.fetching import http_get
 from javstory.harvest.scrapers.av123_scraper import (
     _is_boilerplate_title,
     _normalize_scraped_title,
-    _title_from_soup,
 )
+from javstory.harvest.scrapers.njavtv_scraper import parse_njav_html
 
-BASE_URL = "https://missav123.to"
-VIDEO_PATH_TEMPLATE = "/ja/v/{product_id}"
-
-SELECTORS = {
-    "player": "#player",  # d-tag
-    "title": "#video-info h1.title",
-    "desc": "#video-details .desc .content",
-    "details_meta": "#video-details .meta",
-}
+BASE_URL = "https://missav123.com"
+VIDEO_PATH_TEMPLATE = "/ja/{product_id}"
 
 _TEXT_FIELD_ORDER = [
     "품번",
@@ -52,24 +37,6 @@ _TEXT_FIELD_ORDER = [
     "출시일",
     "메이커",
 ]
-
-
-def _text(el: Any) -> str:
-    if el is None:
-        return ""
-    return re.sub(r"\s+", " ", el.get_text(" ", strip=True) or "").strip()
-
-
-def _norm_label(label: str) -> str:
-    # ex) "コード:" / "発売日:" / "ジャンル:" / "女優:" / "メーカー:"
-    return (label or "").strip().rstrip("：:").strip()
-
-
-def _abs_url(href: str, *, base_url: str) -> str:
-    href = (href or "").strip()
-    if not href:
-        return ""
-    return urljoin(base_url, href)
 
 
 @dataclass
@@ -117,41 +84,6 @@ class MissavVideoInfo:
         return "\n\n".join(blocks) + ("\n" if blocks else "")
 
 
-def _favourite_count_missav(soup: BeautifulSoup) -> int:
-    # 1차: #video-info d-tag.actions[favorites] 어트리뷰트 (현행 DOM)
-    actions = soup.select_one("#video-info d-tag.actions[favorites]")
-    if actions:
-        val = (actions.get("favorites") or "").strip()
-        if val:
-            try:
-                return int(val.replace(",", ""))
-            except (ValueError, TypeError):
-                pass
-
-    # 2차: d-tag.actions[favorites] (id 없이도 탐색)
-    for dtag in soup.select("d-tag.actions[favorites]"):
-        val = (dtag.get("favorites") or "").strip()
-        if val:
-            try:
-                return int(val.replace(",", ""))
-            except (ValueError, TypeError):
-                pass
-
-    # 3차: 구버전 DOM — 버튼 텍스트 fallback
-    for btn in soup.select("div.act button.btn, div.addtolist button, button.btn"):
-        icon = btn.select_one(".fa-heart, .fa-thumbs-up")
-        if not icon:
-            continue
-        text = btn.get_text(separator=" ", strip=True)
-        m = re.search(r"\d[\d,]*", text)
-        if m:
-            try:
-                return int(m.group(0).replace(",", ""))
-            except (ValueError, TypeError):
-                pass
-    return 0
-
-
 def _slug_candidates(product_id: str) -> List[str]:
     """
     상세 URL이 품번만이 아니라 `-uncensored-leaked` 등 접미를 붙는 경우가 있다.
@@ -191,94 +123,31 @@ def _missav_detail_has_content(info: MissavVideoInfo) -> bool:
     return bool(title or code)
 
 
+def _strip_code_prefix(title: str, code: str) -> str:
+    t = _normalize_scraped_title(title, code)
+    if code:
+        t = re.sub(rf"^{re.escape(code)}\s+", "", t, flags=re.I).strip()
+    return t
+
+
 def parse_video_html(html: str, *, base_url: str = BASE_URL) -> MissavVideoInfo:
-    soup = BeautifulSoup(html, "lxml")
+    d = parse_njav_html(html, base_url=base_url)
     info = MissavVideoInfo()
-
-    raw_title = _title_from_soup(soup)
-    if raw_title:
-        m = re.match(r"^([A-Za-z0-9]+-\d+)\b", raw_title)
-        if m and not info.code:
-            info.code = m.group(1)
-    info.title = _normalize_scraped_title(raw_title, info.code)
-    if _is_boilerplate_title(info.title):
-        info.title = ""
-
-    # player attrs: code / cover
-    player = soup.select_one(SELECTORS["player"])
-    if player:
-        info.code = (player.get("code") or "").strip() or info.code
-        cover = (player.get("cover") or "").strip()
-        if cover:
-            info.poster_url = _abs_url(cover, base_url=base_url)
-
-    # description
-    desc = soup.select_one(SELECTORS["desc"])
-    if desc:
-        info.description = _text(desc)
-
-    # details meta rows: <div><label>発売日:</label> <span>...</span></div>
-    meta = soup.select_one(SELECTORS["details_meta"])
-    if meta:
-        for row in meta.find_all("div", recursive=False):
-            label_el = row.find("label")
-            label = _norm_label(_text(label_el))
-            if not label:
-                continue
-
-            if label in ("コード",):
-                span = row.find("span")
-                t = _text(span)
-                if t:
-                    info.code = t
-                continue
-
-            if label in ("発売日",):
-                span = row.find("span")
-                info.release_date = _text(span)
-                continue
-
-            if label in ("女優",):
-                actresses: List[str] = []
-                for a in row.find_all("a", href=True):
-                    name = _text(a)
-                    if name:
-                        actresses.append(name)
-                info.actresses = actresses
-                continue
-
-            if label in ("ジャンル",):
-                genres: List[str] = []
-                for a in row.find_all("a", href=True):
-                    t = _text(a)
-                    if t:
-                        genres.append(t)
-                info.genres = genres
-                continue
-
-            if label in ("メーカー",):
-                a = row.find("a", href=True)
-                info.maker = _text(a) if a else _text(row)
-                continue
-
-    # fallback code: try from title prefix "CODE - ..." or redirect title
-    if not info.code and info.title:
-        m = re.match(r"^([A-Za-z0-9]+-\d+)\b", info.title)
+    raw_title = str(d.get("title") or "").strip()
+    code = str(d.get("product_code") or "").strip()
+    if not code and raw_title:
+        m = re.match(r"^([A-Za-z0-9]+-[0-9]+)(?![0-9])", raw_title)
         if m:
-            info.code = m.group(1)
-        else:
-            # For redirect pages like "SIRO-2735 — ..."
-            m2 = re.search(r"(SIRO|siro)-?(\d+)", info.title, re.I)
-            if m2:
-                info.code = f"SIRO-{m2.group(2)}"
-
-    # If title was updated from redirect, try to set code from it too
-    if not info.code and info.title and "SIRO" in info.title.upper():
-        m3 = re.search(r"SIRO-?(\d+)", info.title, re.I)
-        if m3:
-            info.code = f"SIRO-{m3.group(1)}"
-
-    info.favourite_count = _favourite_count_missav(soup)
+            code = m.group(1)
+    info.code = code.upper()
+    title = _strip_code_prefix(raw_title, info.code)
+    info.title = "" if _is_boilerplate_title(title) else title
+    info.description = str(d.get("synopsis") or "").strip()
+    info.poster_url = str(d.get("cover_url") or "").strip()
+    info.actresses = [str(x) for x in (d.get("actors") or []) if str(x).strip()]
+    info.genres = [str(x) for x in (d.get("genres") or []) if str(x).strip()]
+    info.release_date = str(d.get("release_date") or "").strip()
+    info.maker = str(d.get("maker") or "").strip()
     return info
 
 
@@ -293,14 +162,7 @@ def fetch_video_info(
     product_id = (product_id or "").strip()
     if not product_id:
         raise ValueError("product_id is empty")
-    headers = {
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/120.0.0.0 Safari/537.36"
-        ),
-        "Accept-Language": "ja,en-US;q=0.9,en;q=0.8",
-    }
+    headers = {"Accept-Language": "ja,en-US;q=0.9,en;q=0.8"}
     last_exc: Optional[BaseException] = None
     candidates = _slug_candidates(product_id)
     if not candidates:
@@ -308,52 +170,13 @@ def fetch_video_info(
 
     for slug in candidates:
         url = base_url.rstrip("/") + path_template.format(product_id=slug)
-        # 재시도는 전송 예외(일시적 실패)에만. 404/빈 페이지는 예외가 아니라 다음 슬러그로.
-        max_tries = 2
-        backoffs = (0.0, 0.7)
-        disable_cffi = (os.environ.get("JAVSTORY_CURL_CFFI_DISABLED", "") or "").strip().lower() in (
-            "1",
-            "true",
-            "yes",
-            "on",
-        )
-
-        r = None
-        for i in range(max_tries):
-            if i > 0:
-                try:
-                    time.sleep(backoffs[min(i, len(backoffs) - 1)])
-                except Exception:
-                    pass
-            try:
-                if _USE_CFFI and (session is None) and (not disable_cffi):
-                    r = _cffi_requests.get(
-                        url,
-                        headers=headers,
-                        timeout=timeout,
-                        impersonate="chrome131",
-                    )
-                else:
-                    sess = session or requests.Session()
-                    r = sess.get(url, headers=headers, timeout=timeout)
-                    r.encoding = r.apparent_encoding or "utf-8"
-                break
-            except Exception as e:
-                last_exc = e
-                msg = str(e)
-                is_curl_reset = ("curl:" in msg.lower()) and ("(35)" in msg or "recv failure" in msg.lower())
-                if is_curl_reset and (_USE_CFFI and (session is None)) and (not disable_cffi):
-                    try:
-                        sess = requests.Session()
-                        r = sess.get(url, headers=headers, timeout=timeout)
-                        r.encoding = r.apparent_encoding or "utf-8"
-                        break
-                    except Exception as e2:
-                        last_exc = e2
-                continue
-
-        if r is None:
+        # 재시도·연결 리셋 폴백은 fetching.http_get 이 담당. 404/빈 페이지는 다음 슬러그로.
+        try:
+            r = http_get(url, headers=headers, timeout=timeout, session=session)
+        except Exception as e:
+            last_exc = e
             continue
+
         if r.status_code == 404:
             continue
         try:

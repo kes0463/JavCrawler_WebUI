@@ -15,9 +15,8 @@ openai
 requests
 python-dotenv
 keyring
-DrissionPage
-playwright
-curl-cffi
+# Harvest 요청/브라우저 계층 (curl_cffi·patchright 포함). 브라우저: python -m patchright install chromium
+scrapling[fetchers]>=0.5.1,<0.6
 beautifulsoup4
 SQLAlchemy
 alembic>=1.13,<2

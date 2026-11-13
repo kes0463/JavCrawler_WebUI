@@ -5,9 +5,9 @@ av-wiki.net ("AV女優の名前が知りたい！") — 배우 식별 전문 블
 발매일·커버 이미지 보완용 **최종 폴백** 전용. 특히 VR 레이블(MadonnaVR, kawaii* VR 등)
 표기가 상세해 VR 작품 배우 식별에 강함.
 
-URL 슬러그가 품번을 그대로 변환한 값이 아니라 워드프레스 퍼머링크라 품번→URL을
-직접 유추할 수 없음(예: JUVR-141 → /juvr-141/, KAVR-146 → /kavr00146/). 대신
-사이트 자체 검색(`?s={code}`)으로 기사 링크를 찾은 뒤 그 페이지를 파싱한다.
+URL 슬러그는 워드프레스 퍼머링크라 대부분 `/{품번 소문자}/` 지만 항상 그렇지는 않다
+(예: JUVR-141 → /juvr-141/, KAVR-146 → /kavr00146/). 그래서 직접 주소를 먼저 열고,
+안 되면 사이트 자체 검색(`?s={code}`)에서 품번이 일치하는 기사만 골라 파싱한다.
 
 예)
 - 검색: `https://av-wiki.net/?s=JUVR-141`
@@ -21,8 +21,9 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 from urllib.parse import urljoin, urlparse
 
-import requests
 from bs4 import BeautifulSoup
+
+from javstory.harvest.fetching import http_get
 
 BASE_URL = "https://av-wiki.net"
 SEARCH_PATH_TEMPLATE = "/?s={product_id}"
@@ -38,14 +39,7 @@ _NON_ARTICLE_PATH_PREFIXES = (
     "/page/",
 )
 
-_HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/120.0.0.0 Safari/537.36"
-    ),
-    "Accept-Language": "ja,en-US;q=0.9,en;q=0.8",
-}
+_HEADERS = {"Accept-Language": "ja,en-US;q=0.9,en;q=0.8"}
 
 
 def _text(el: Any) -> str:
@@ -81,16 +75,50 @@ def _is_article_permalink(href: str, *, base_url: str) -> bool:
     return True
 
 
-def find_article_url(html: str, *, base_url: str = BASE_URL) -> str:
-    """검색 결과 HTML에서 첫 번째 실제 기사(작품 페이지) 퍼머링크를 찾는다."""
+_NO_RESULT_RE = re.compile(r"(?<!\d)0件|一致する(?:記事|投稿)は見つかりませんでした|一致する投稿がありませんでした")
+
+
+def _search_has_no_results(soup: BeautifulSoup) -> bool:
+    main = soup.select_one("main") or soup
+    return bool(_NO_RESULT_RE.search(_text(main)[:600]))
+
+
+def _slug_matches_code(href: str, code_key: str) -> bool:
+    """퍼머링크 마지막 경로 조각이 품번과 같은지 (`/kavr00146/` == KAVR-146)."""
+    parts = [p for p in (urlparse(href).path or "").split("/") if p]
+    return bool(parts) and len(parts) == 1 and _normalize_code(parts[0]) == code_key
+
+
+def find_article_url(html: str, *, base_url: str = BASE_URL, product_id: str = "") -> str:
+    """검색 결과 HTML에서 요청 품번의 기사 퍼머링크를 찾는다.
+
+    검색 결과 페이지에는 시리즈/카테고리/페이지 링크와 사이드바 "최근 글"이 섞여 있어
+    첫 링크를 고르면 엉뚱한 페이지가 잡힌다. 그래서
+    - 검색 결과가 0건이면 바로 "" 를 돌려주고,
+    - `product_id` 가 있으면 퍼머링크(1단 경로) 또는 링크 텍스트가 품번과 일치하는 것만 고른다.
+    `product_id` 없이 부르면 예전처럼 <article> 안 첫 퍼머링크(호환용).
+    """
     soup = BeautifulSoup(html, "lxml")
-    for article in soup.select("article"):
-        for a in article.find_all("a", href=True):
+    if _search_has_no_results(soup):
+        return ""
+    code_key = _normalize_code(product_id)
+    anchors = [a for art in soup.select("article") for a in art.find_all("a", href=True)]
+    anchors += soup.find_all("a", href=True)
+    if code_key:
+        for a in anchors:
             href = str(a.get("href") or "").strip()
-            if _is_article_permalink(href, base_url=base_url):
+            if _is_article_permalink(href, base_url=base_url) and _slug_matches_code(href, code_key):
                 return href
-    # article 태그가 없는 테마일 경우 페이지 전체에서 탐색(오탐 줄이려 첫 매치만)
-    for a in soup.find_all("a", href=True):
+        for a in anchors:
+            href = str(a.get("href") or "").strip()
+            if not _is_article_permalink(href, base_url=base_url):
+                continue
+            if len([p for p in (urlparse(href).path or "").split("/") if p]) != 1:
+                continue  # /mgstage/…/series-id-…/ 같은 다단 경로는 기사가 아님
+            if code_key in _normalize_code(_text(a)):
+                return href
+        return ""
+    for a in anchors:
         href = str(a.get("href") or "").strip()
         if _is_article_permalink(href, base_url=base_url):
             return href
@@ -156,10 +184,12 @@ def parse_article_html(html: str, *, base_url: str = BASE_URL) -> AvWikiNetInfo:
                 info.actresses = names or ([_text(dd)] if _text(dd) else [])
             break
 
+    # 지연 로딩 이미지는 src 가 1px data: GIF 이고 실제 주소는 data-src 에 있다.
     thumb_img = soup.select_one(".article-thumbnail img, article img")
     if thumb_img:
-        src = str(thumb_img.get("src") or thumb_img.get("data-src") or "").strip()
-        info.cover_url = _abs_url(src, base_url=base_url)
+        cands = [str(thumb_img.get(k) or "").strip() for k in ("data-src", "src")]
+        src = next((c for c in cands if c and not c.startswith("data:")), "")
+        info.cover_url = _abs_url(src, base_url=base_url) if src else ""
 
     return info
 
@@ -170,9 +200,13 @@ def fetch_actress_info(
     base_url: str = BASE_URL,
     search_path_template: str = SEARCH_PATH_TEMPLATE,
     timeout: float = 12.0,
-    session: Optional[requests.Session] = None,
+    session: Any = None,
 ) -> AvWikiNetInfo:
-    """품번으로 av-wiki.net을 검색해 기사 페이지를 찾아 파싱한다.
+    """품번으로 av-wiki.net 기사 페이지를 찾아 파싱한다.
+
+    1) 대부분 기사 주소가 `/{품번 소문자}/` 라 먼저 직접 연다(요청 1회로 끝).
+    2) 404 이거나 다른 작품이면 사이트 검색(`?s={code}`)에서 품번이 일치하는 기사만 고른다
+       (`KAVR-146 → /kavr00146/` 처럼 슬러그가 다른 경우 대비).
 
     시놉시스는 이 소스에 존재하지 않으므로 채워지지 않는다 — 배우/메이커/
     발매일/커버 보완용으로만 사용할 것.
@@ -180,33 +214,38 @@ def fetch_actress_info(
     product_id = (product_id or "").strip()
     if not product_id:
         raise ValueError("product_id is empty")
-
-    sess = session or requests.Session()
-    search_url = base_url.rstrip("/") + search_path_template.format(product_id=product_id)
-    r = sess.get(search_url, headers=_HEADERS, timeout=timeout)
-    r.raise_for_status()
-
-    article_url = find_article_url(r.text, base_url=base_url)
-    if not article_url:
-        return AvWikiNetInfo(code=product_id.upper())
-
-    r2 = sess.get(article_url, headers=_HEADERS, timeout=timeout)
-    r2.raise_for_status()
-    info = parse_article_html(r2.text, base_url=base_url)
-    info.source_url = article_url
-
-    # 오탐 방지: 검색이 무결과일 때 워드프레스는 사이드바의 "최근 글" 링크를 노출하고,
-    # find_article_url 폴백이 그 링크(품번과 무관한 기사)를 잡을 수 있다. 파싱한 기사의
-    # 품번이 요청 품번과 일치할 때만 신뢰하고, 아니면 배우 정보를 채우지 않는다.
     requested = _normalize_code(product_id)
-    parsed = _normalize_code(info.code)
-    if requested and parsed:
-        if requested != parsed:
-            return AvWikiNetInfo(code=product_id.upper(), source_url=article_url)
-    elif requested and requested not in _normalize_code(r2.text):
-        # 품번을 파싱하지 못한 경우, 본문에 품번이 등장하는지로 최소 검증한다.
-        return AvWikiNetInfo(code=product_id.upper(), source_url=article_url)
+    empty = AvWikiNetInfo(code=product_id.upper())
 
-    if not info.code:
-        info.code = product_id.upper()
-    return info
+    def _load(url: str) -> Optional[AvWikiNetInfo]:
+        r = http_get(url, headers=_HEADERS, timeout=timeout, session=session)
+        if r.status_code == 404:
+            return None
+        r.raise_for_status()
+        info = parse_article_html(r.text, base_url=base_url)
+        info.source_url = str(r.url or url)
+        # 오탐 방지: 파싱한 기사의 품번이 요청 품번과 일치할 때만 신뢰한다. 품번을 못
+        # 읽었으면 배우가 있고 본문에 품번이 나올 때만 인정(시리즈/카테고리 페이지 배제).
+        parsed = _normalize_code(info.code)
+        if parsed:
+            if parsed != requested:
+                return None
+        elif not (info.actresses and requested in _normalize_code(r.text)):
+            return None
+        if not info.code:
+            info.code = product_id.upper()
+        return info
+
+    slug = re.sub(r"[^a-z0-9-]", "", product_id.lower())
+    if slug:
+        direct = _load(base_url.rstrip("/") + f"/{slug}/")
+        if direct is not None:
+            return direct
+
+    search_url = base_url.rstrip("/") + search_path_template.format(product_id=product_id)
+    r = http_get(search_url, headers=_HEADERS, timeout=timeout, session=session)
+    r.raise_for_status()
+    article_url = find_article_url(r.text, base_url=base_url, product_id=product_id)
+    if not article_url or article_url.rstrip("/").endswith(f"/{slug}"):
+        return empty  # 0건 / 일치 기사 없음 / 이미 시도한 직접 주소
+    return _load(article_url) or AvWikiNetInfo(code=product_id.upper(), source_url=article_url)

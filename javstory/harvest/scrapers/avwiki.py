@@ -6,12 +6,10 @@ avwikidb.com 작품 페이지 ( /work/{품번}/ ) 에서
 - `https://avwikidb.com/work/SW-1051/`
 
 중요:
-- avwikidb.com 은 환경에 따라 `requests`로 접근 시 403(봇 차단)이 발생할 수 있습니다.
-- 그 경우 Playwright 우회 옵션을 사용하세요.
-  - 실행: `python .\avwiki.py --pw SW-1051`
-  - (최초 1회) 설치:
-    - `pip install playwright`
-    - `python -m playwright install chromium`
+- 요청은 `javstory.harvest.fetching` (Scrapling) 을 쓴다. 그래도 403(봇 차단)이면
+  - 실행: `python avwiki.py --pw SW-1051`
+  - 실행: `python .vwiki.py --pw SW-1051`
+  - (최초 1회) 브라우저 설치: `python -m patchright install chromium`
 """
 
 from __future__ import annotations
@@ -22,8 +20,9 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, List, Optional
 from urllib.parse import urljoin
 
-import requests
 from bs4 import BeautifulSoup
+
+from javstory.harvest.fetching import browser_get, http_get
 
 BASE_URL = "https://avwikidb.com"
 WORK_PATH_TEMPLATE = "/work/{product_id}/"
@@ -101,21 +100,43 @@ def _pick_poster_from_movie_ld(movie: Dict[str, Any]) -> str:
 
 
 def _pick_actor_names_from_movie_ld(movie: Dict[str, Any]) -> List[str]:
+    """JSON-LD `actor` 에는 출연男優도 섞여 있다. 여배우는 url 이 `/actor/…`,
+    남배우는 `/histrion/…` 이므로 `/histrion/` 항목은 뺀다(url 없는 항목은 유지)."""
     actor = movie.get("actor")
+    items = actor if isinstance(actor, list) else ([actor] if actor else [])
     out: List[str] = []
-    if isinstance(actor, list):
-        for it in actor:
-            if isinstance(it, dict):
-                name = str(it.get("name") or "").strip()
-                if name:
-                    out.append(name)
-            elif isinstance(it, str) and it.strip():
-                out.append(it.strip())
-    elif isinstance(actor, dict):
-        name = str(actor.get("name") or "").strip()
-        if name:
+    for it in items:
+        if isinstance(it, dict):
+            if "/histrion/" in str(it.get("url") or ""):
+                continue
+            name = str(it.get("name") or "").strip()
+        elif isinstance(it, str):
+            name = it.strip()
+        else:
+            continue
+        if name and name not in out:
             out.append(name)
     return out
+
+
+def _pick_male_names_from_body(soup: BeautifulSoup) -> set[str]:
+    """`<dt id="histrion">出演男優</dt>` 아래 링크 이름 — LD 필터의 이중 안전장치."""
+    names: set[str] = set()
+    for dt in soup.find_all("dt"):
+        if dt.get("id") == "histrion" or _text(dt) == "出演男優":
+            dd = dt.find_next_sibling("dd")
+            if dd:
+                names.update(t for t in (_text(a) for a in dd.find_all("a", href=True)) if t)
+    return names
+
+
+# JSON-LD description 은 실제 줄거리가 아니라 사이트 자동 요약이다.
+# 예) "出演女優 = 深月めい、…｜SW-1051（1sw01051） / SWITCH / 2026年05月21日配信。…画像20枚・一部視聴可。"
+_AUTO_SUMMARY_RE = re.compile(r"^\s*出演(?:女優|男優)\s*=|画像\d+枚|一部視聴可")
+
+
+def _is_auto_summary(text: str) -> bool:
+    return bool(_AUTO_SUMMARY_RE.search(text or ""))
 
 
 def _pick_genres_from_movie_ld(movie: Dict[str, Any]) -> List[str]:
@@ -280,13 +301,20 @@ def parse_work_html(html: str, *, base_url: str = BASE_URL) -> AvwikiInfo:
             y, mo, da = m.group(1), int(m.group(2)), int(m.group(3))
             info.release_date = f"{y}-{mo:02d}-{da:02d}"
 
-    # fallback: description from body
+    # 자동 요약은 시놉시스로 쓰지 않는다 → 본문 "作品内容" 이 있으면 그것, 없으면 빈 값
+    # (빈 값이면 crawler 가 다른 소스에서 실제 줄거리를 계속 찾는다)
+    if _is_auto_summary(info.description):
+        info.description = ""
     if not info.description:
-        info.description = _pick_description_from_body(soup)
+        body_desc = _pick_description_from_body(soup)
+        info.description = "" if _is_auto_summary(body_desc) else body_desc
 
-    # fallback: actresses from cards
+    # fallback: actresses from cards (화면 카드는 일부만 노출될 수 있어 LD 우선)
     if not info.actresses:
         info.actresses = _pick_actresses_from_cards(soup)
+    males = _pick_male_names_from_body(soup)
+    if males:
+        info.actresses = [n for n in info.actresses if n not in males]
 
     # fallback: genres from body
     if not info.genres:
@@ -301,90 +329,45 @@ def fetch_work_info(
     base_url: str = BASE_URL,
     path_template: str = WORK_PATH_TEMPLATE,
     timeout: float = 12.0,
-    session: Optional[requests.Session] = None,
+    session: Any = None,
     use_playwright: bool = False,
     playwright_headless: bool = True,
     playwright_wait_ms: int = 1500,
 ) -> AvwikiInfo:
+    """`use_playwright=True` 는 이제 Scrapling StealthyFetcher(브라우저)를 뜻한다(이름은 호환용)."""
     product_id = (product_id or "").strip()
     if not product_id:
         raise ValueError("product_id is empty")
     url = base_url.rstrip("/") + path_template.format(product_id=product_id)
-    sess = session or requests.Session()
-    headers = {
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/120.0.0.0 Safari/537.36"
-        ),
-        "Accept-Language": "ja,en-US;q=0.9,en;q=0.8",
-    }
     if use_playwright:
-        html = _fetch_html_with_playwright(
+        html = _fetch_html_with_browser(
             url, headless=playwright_headless, wait_ms=playwright_wait_ms
         )
         return parse_work_html(html, base_url=base_url)
 
-    r = sess.get(url, headers=headers, timeout=timeout)
-    try:
-        r.raise_for_status()
-    except requests.HTTPError as e:
-        # avwikidb.com は環境によって 403(Cloudflare等)が返ることがある
-        # その場合は fetch を諦め、保存した HTML 스냅샷을 parse_work_html 로 처리하도록 유도한다.
-        if r.status_code == 403:
-            raise requests.HTTPError(
-                f"{e}\n"
-                f"- 이 사이트는 403(봇 차단)으로 막히는 경우가 많아서 `requests`로는 불가할 수 있습니다.\n"
-                f"- 해결 1) 브라우저에서 HTML 저장 후: `python avwiki.py --html SW-1051.html`\n"
-                f"- 해결 2) Playwright로 브라우저 우회: `python avwiki.py --pw SW-1051`\n"
-                f"  (설치: `pip install playwright` 후 `python -m playwright install chromium`)\n"
-            ) from e
-        raise requests.HTTPError(
-            f"{e}\n"
-            f"- 직접 접속이 403이면, 브라우저에서 페이지 HTML을 저장한 뒤\n"
-            f"  `python avwiki.py --html SW-1051.html` 로 파싱하세요.\n"
-            f"- 또는 네트워크/봇 차단 정책을 확인하세요."
-        ) from e
-    r.encoding = r.apparent_encoding or "utf-8"
+    headers = {"Accept-Language": "ja,en-US;q=0.9,en;q=0.8"}
+    r = http_get(url, headers=headers, timeout=timeout, session=session)
+    # avwikidb.com 은 환경에 따라 403(Cloudflare 등)을 준다. 메시지에 "403" 이 들어가므로
+    # 상위(crawler)가 브라우저 우회(use_playwright=True)로 재시도한다.
+    r.raise_for_status()
     return parse_work_html(r.text, base_url=base_url)
 
 
-def _fetch_html_with_playwright(url: str, *, headless: bool, wait_ms: int) -> str:
-    """
-    Cloudflare/봇차단(403) 우회용. Playwright가 설치되어 있을 때만 동작.
+def _fetch_html_with_browser(url: str, *, headless: bool, wait_ms: int) -> str:
+    """Cloudflare/봇차단(403) 우회용 — Scrapling StealthyFetcher.
 
-    - headless=False 로 실행하면 브라우저 창이 떠서, 만약 사람 확인(체크/캡차)이 나오면 직접 통과 가능.
-    - wait_ms 는 페이지 로딩 후 추가 대기 시간.
+    headless=False 로 실행하면 브라우저 창이 떠서 사람 확인(체크/캡차)을 직접 통과할 수 있다.
+    wait_ms 는 페이지 로딩 후 추가 대기 시간.
     """
-    try:
-        from playwright.sync_api import sync_playwright  # type: ignore
-    except Exception as e:  # pragma: no cover
-        raise RuntimeError(
-            "Playwright가 설치되어 있지 않습니다. 아래 순서로 설치 후 다시 시도하세요.\n"
-            "1) pip install playwright\n"
-            "2) python -m playwright install chromium\n"
-        ) from e
-
     wait_ms = max(0, int(wait_ms))
 
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=headless)
-        context = browser.new_context(
-            user_agent=(
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/120.0.0.0 Safari/537.36"
-            ),
-            locale="ja-JP",
-        )
-        page = context.new_page()
-        page.goto(url, wait_until="domcontentloaded", timeout=60000)
+    def _settle(page: Any) -> None:
         if wait_ms:
             page.wait_for_timeout(wait_ms)
-        html = page.content()
-        context.close()
-        browser.close()
-        return html
+
+    res = browser_get(url, timeout=60.0, page_action=_settle, headless=headless, solve_cloudflare=True)
+    res.raise_for_status()
+    return res.text
 
 
 if __name__ == "__main__":

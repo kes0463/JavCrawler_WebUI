@@ -1,6 +1,6 @@
 """
 하이브리드 크롤러 엔진 (Harvest/crawler.py): 
-Playwright와 DrissionPage를 이용한 순수 데이터 추출 기능만 담당합니다.
+Scrapling(javstory.harvest.fetching) 기반 순수 데이터 추출 기능만 담당합니다.
 DB 저장이나 번역 등 다른 레이어와는 완전히 격리되어 있습니다.
 """
 from __future__ import annotations
@@ -8,24 +8,17 @@ from __future__ import annotations
 import asyncio
 import os
 import re
-import socket
 import time
 import sys
+import unicodedata
 from pathlib import Path
 from typing import Any, Callable
-from urllib.parse import urljoin, urlparse
 
-from bs4 import BeautifulSoup
-from curl_cffi import requests as curl_requests
-from DrissionPage import ChromiumPage, ChromiumOptions
-import tempfile
-import shutil
 
 _ROOT = Path(__file__).resolve().parent.parent.parent
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-from javstory.utils.njav_playwright import njavtv_detail_urls, scrape_njavtv_playwright_async
 from javstory.utils.common import log_ts
 
 try:
@@ -44,38 +37,15 @@ try:
     from javstory.harvest.scrapers import av_wiki_net_scraper
 except Exception:  # pragma: no cover
     av_wiki_net_scraper = None  # type: ignore
+try:
+    from javstory.harvest.scrapers import njavtv_scraper
+except Exception:  # pragma: no cover
+    njavtv_scraper = None  # type: ignore
 
-# njavtv.com 정밀 셀렉터 (nth-child 체인 금지)
-NJAV_TITLE_SELECTORS = ("css:h1.text-nord6", "tag:h1")
-NJAV_SYNOPSIS_SELECTORS = ("css:div.text-secondary.break-all", "css:div.break-all.text-secondary", "tag:div@class=break-all")
-NJAV_COVER_SELECTOR = ".plyr__poster"
-
-LABELS_TO_PROBE = {
-    "product_code": "品番",
-    "release_date": "配信開始日",
-    "actors": "女優",
-    "genres": "ジャンル",
-    "maker": "メーカー"
-}
-
-_MAKER_HREF_MARKERS = ("/makers/", "/maker/")
-_NJAV_UA = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-)
 _PLACEHOLDER_TITLE_LOWER = frozenset(
     {"njavtv.com", "njavtv", "njav", "njav tv", "just a moment...", "attention required"}
 )
 
-
-def _env_timeout_seconds(name: str, default: float, *, minimum: float = 5.0) -> float:
-    raw = (os.environ.get(name, "") or "").strip()
-    if not raw:
-        return default
-    try:
-        return max(minimum, float(raw))
-    except (TypeError, ValueError):
-        return default
 
 # 에러 페이지(title) 시그니처 — 정상 메타로 저장되면 안 됨
 _ERROR_TITLE_PATTERNS = (
@@ -94,50 +64,6 @@ _ERROR_TITLE_PATTERNS = (
     r"일시적(으로)?\s*사용\s*불가",
 )
 
-def _tcp_free_port() -> int:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(("127.0.0.1", 0))
-        return int(s.getsockname()[1])
-
-
-def _slug_for_url(product_code: str | None) -> str:
-    if not product_code: return ""
-    return product_code.strip().lower().replace("_", "-")
-
-def _njav_path_is_dm_detail(href: str) -> bool:
-    try:
-        parts = [p for p in urlparse(href).path.split("/") if p]
-        if len(parts) < 3: return False
-        return parts[0].lower().startswith("dm") and parts[1] == "ja"
-    except: return False
-
-def _curl_resolve_njav_http_redirect(entry_url: str) -> str | None:
-    try:
-        r = curl_requests.get(
-            entry_url, headers={"User-Agent": _NJAV_UA},
-            timeout=12, impersonate="chrome120", allow_redirects=True,
-        )
-        u = str(r.url).strip()
-        if u and "njavtv.com" in u.lower() and _njav_path_is_dm_detail(u):
-            return u
-    except: pass
-    return None
-
-def _wait_njav_detail_url(page: Any, *, slug: str, max_wait: float) -> str:
-    deadline = time.time() + max_wait
-    slug_l = _slug_for_url(slug)
-    while time.time() < deadline:
-        href = (_page_location_href(page) or (getattr(page, "url", None) or "").strip() or "")
-        if href and _njav_path_is_dm_detail(href):
-            if slug_l:
-                parts = [p for p in urlparse(href).path.split("/") if p]
-                tail = (parts[-1] if parts else "").lower().replace("_", "-")
-                if tail == slug_l or tail.replace("-", "") == slug_l.replace("-", ""):
-                    return href
-            else: return href
-        time.sleep(0.35)
-    return (_page_location_href(page) or (getattr(page, "url", None) or "").strip() or "")
-
 def _title_looks_placeholder(title: str | None) -> bool:
     s = (title or "").strip().lower()
     if len(s) < 4: return True
@@ -153,53 +79,6 @@ def _title_looks_placeholder(title: str | None) -> bool:
 def _norm_product_code(val: str | None) -> str:
     if not val or not isinstance(val, str): return ""
     return re.sub(r"\s+", "", val.strip()).upper()
-
-def _extract_njav_head_meta(html: str, base_url: str) -> dict[str, Any]:
-    out: dict[str, Any] = {}
-    if not (html and html.strip()): return out
-    soup = BeautifulSoup(html, "html.parser")
-    head = soup.find("head")
-    if not head: return out
-    def _content(sel: dict[str, str]) -> str | None:
-        tag = head.find("meta", attrs=sel)
-        return (tag.get("content") or "").strip() if tag and (tag.get("content") or "").strip() else None
-    
-    og_img = _content({"property": "og:image"}) or _content({"name": "og:image"})
-    if og_img: out["cover_url"] = urljoin(base_url, og_img)
-    title = _content({"property": "og:title"}) or _content({"name": "og:title"})
-    if title: out["title"] = title
-    if not out.get("title") and soup.title and soup.title.string:
-        out["title"] = soup.title.string.strip()
-    desc = _content({"name": "description"}) or _content({"property": "og:description"}) or _content({"name": "twitter:description"})
-    if desc: out["synopsis"] = desc
-    actors = []
-    for m in head.find_all("meta", attrs={"property": "og:video:actor"}):
-        c = (m.get("content") or "").strip()
-        if c and c not in actors: actors.append(c)
-    if actors: out["actors"] = actors
-    rd = _content({"property": "og:video:release_date"})
-    if rd: out["release_date"] = rd
-    return out
-
-def _merge_njav_body_head(body: dict[str, Any], head: dict[str, Any]) -> dict[str, Any]:
-    merged = dict(body)
-    if not head: return merged
-    if not (merged.get("cover_url") or "").strip() and head.get("cover_url"): merged["cover_url"] = head["cover_url"]
-    if not (merged.get("title") or "").strip() and head.get("title"): merged["title"] = head["title"]
-    if not (merged.get("synopsis") or "").strip() and head.get("synopsis"): merged["synopsis"] = head["synopsis"]
-    b_actors = merged.get("actors")
-    if not (isinstance(b_actors, list) and b_actors) and not (isinstance(b_actors, str) and b_actors.strip()) and head.get("actors"):
-        merged["actors"] = head["actors"]
-    _rd = merged.get("release_date")
-    if not (isinstance(_rd, str) and _rd.strip()) and head.get("release_date"): merged["release_date"] = head["release_date"]
-    return merged
-
-def _page_location_href(page: Any) -> str | None:
-    try:
-        u = page.run_js("return location.href")
-        if isinstance(u, str) and u.startswith("http"): return u.strip()
-    except: pass
-    return None
 
 def _raw_has_any_content(raw: dict[str, Any]) -> bool:
     if not raw: return False
@@ -394,7 +273,7 @@ def _merge_empty_only(base: dict[str, Any], extra: dict[str, Any], *, source: st
 
 
 def _browser_chases_synopsis() -> bool:
-    """njavtv 브라우저 단계(건당 수십 초~수 분)를 synopsis만 누락일 때도 돌릴지.
+    """njavtv 브라우저 단계(건당 수 초~수십 초)를 synopsis만 누락일 때도 돌릴지.
 
     기본 켜짐 — 값싼 소스(123av/missav123/avwiki) 3곳이 다 synopsis를 못 주면
     njavtv까지 가서 채운다(단계별 재시도는 추가하지 않음 — 각 단계는 여전히 1회만
@@ -539,180 +418,52 @@ def _scrape_avwikinet(product_code: str) -> dict[str, Any]:
     }
 
 
+_WIDTH_NORMALIZED_KEYS = ("actors", "genres", "maker")
+
+
+def _nfkc(s: str) -> str:
+    return re.sub(r"\s+", " ", unicodedata.normalize("NFKC", s)).strip()
+
+
+def _normalize_name_width(out: dict[str, Any]) -> None:
+    """배우·장르·메이커 표기를 NFKC 로 통일한다(반각 가나 → 전각, 전각 영숫자·괄호 → 반각).
+
+    123av(ja)는 DMM 원문 그대로 `佐野ﾅﾂ`·`中出ｼ`·`ﾀﾞｽｯ!` 같은 반각 가나를 주고 다른 소스는
+    전각이라, 정규화하지 않으면 같은 배우/장르/메이커가 DB 에 별도 행으로 갈라진다.
+    정규화 후 같아진 항목은 순서를 유지하며 합친다. (대소문자 `OL`/`Ol` 은 건드리지 않음)
+    """
+    for key in _WIDTH_NORMALIZED_KEYS:
+        v = out.get(key)
+        if isinstance(v, str):
+            out[key] = _nfkc(v)
+        elif isinstance(v, list):
+            seen: set[str] = set()
+            items: list[str] = []
+            for x in v:
+                n = _nfkc(str(x))
+                if n and n not in seen:
+                    seen.add(n)
+                    items.append(n)
+            out[key] = items
+
+
+def _scrape_njavtv(product_code: str, use_browser: bool = False) -> dict[str, Any]:
+    """njavtv 수집 → DB 저장용 dict. 내용이 없으면 {} (상위 `_merge_empty_only` 가 무시)."""
+    if njavtv_scraper is None:
+        return {}
+    raw = njavtv_scraper.fetch_njavtv(product_code, use_browser=use_browser)
+    if raw.get("error"):
+        log_ts(f"[Hybrid] njavtv({'browser' if use_browser else 'http'}) 실패: {raw['error']}")
+    if not _raw_has_any_content(raw):
+        return {}
+    out = _scrape_dict_for_db(raw, product_code)
+    out["_final_url"] = raw.get("final_url")
+    return out
+
+
 class HybridJavCrawler:
     def __init__(self) -> None:
         pass
-
-    def get_local_page_data(self, url: str, expected_product_code: str | None = None, force_visible: bool = False) -> dict[str, Any]:
-        log_ts(f"[Hybrid] 요청 URL: {url} (Visible: {force_visible})")
-        nav_timeout = _env_timeout_seconds("JAVSTORY_DRISSION_NAV_TIMEOUT", 25.0)
-        # [개선] 동영상 자동 재생 방지 및 음소거 설정
-        co = ChromiumOptions().set_argument('--no-sandbox')
-        co.set_argument('--autoplay-policy=user-gesture-required') 
-        co.set_argument('--mute-audio')                            
-        
-        # [핵심] 병렬 실행 충돌 방지: OS가 할당한 실제 포트 사용(set_local_port(0)은 127.0.0.1:0으로 남는 경우가 있음)
-        co.set_local_port(_tcp_free_port())
-        
-        slug = expected_product_code or f"tmp_{int(time.time())}"
-        # 각 품번별로 독립된 임시 사용자 데이터 경로 할당 (잠금 에러 방지)
-        tmp_user_dir = Path(tempfile.gettempdir()) / f"javstory_dp_{slug}"
-        if tmp_user_dir.exists():
-            try: shutil.rmtree(tmp_user_dir, ignore_errors=True)
-            except: pass
-        co.set_user_data_path(str(tmp_user_dir))
-
-        if force_visible:
-            co.set_paths(browser_path=None) # 시스템 기본 브라우저 사용 시도
-            co.headless(False)
-        else:
-            co.headless(True)
-
-        page = None
-        browser_pid = None
-        data: dict[str, Any] = {}
-        slug = expected_product_code or ""
-        try:
-            page = ChromiumPage(co)
-            try: browser_pid = page.process_id
-            except: pass
-            try:
-                # DrissionPage 기본 로딩 대기가 길어지면 워커가 한 품번에서 멈춰 보일 수 있다.
-                page.set.timeouts(
-                    base=min(10.0, nav_timeout),
-                    page_load=nav_timeout,
-                    script=min(15.0, nav_timeout),
-                )
-            except Exception:
-                pass
-            
-            # 유저 에이전트 및 핑거프린트 노출 최소화
-            page.set.user_agent(_NJAV_UA)
-            
-            open_url = url
-            http_final = _curl_resolve_njav_http_redirect(url)
-            if http_final: open_url = http_final
-            
-            try:
-                page.get(open_url, timeout=nav_timeout)
-            except TypeError:
-                page.get(open_url)
-            
-            # Cloudflare 챌린지 대기 — 챌린지 타이틀일 때만 짧게 재확인(없으면 즉시 탈출)
-            for _ in range(3):
-                if any(term in (page.title or "") for term in ["Access Denied", "403 Forbidden", "Attention Required", "Cloudflare", "Just a moment"]):
-                    log_ts(f"[Hybrid] 보안 확인 중... 대기 ({_ + 1}/3)")
-                    time.sleep(3)
-                else: break
-            href = _page_location_href(page) or (page.url or "").strip() or open_url
-            final_url = href or open_url
-            for _ in range(2):
-                if ("Just a moment" in page.title or "잠시만 기다려" in page.title) and not page.ele('tag:h1'): time.sleep(3)
-                else: break
-            for s in ['text:18歳以上', 'text:확인', 'text:Enter', 'text:Yes']:
-                btn = page.ele(s, timeout=1)
-                if btn: btn.click(); time.sleep(2); break
-            final_url = _wait_njav_detail_url(page, slug=slug, max_wait=12.0) or final_url
-            
-            # [개선] 상세 정보(詳細) 탭 활성화 시도 (탭이 숨겨져 있어도 텍스트 추출을 보장하기 위함)
-            for tab_text in ['text:詳細', 'text:Details', 'tag:span@text=詳細']:
-                tab = page.ele(tab_text, timeout=2)
-                if tab:
-                    try: 
-                        tab.click(by_js=True)
-                        time.sleep(1.5)
-                        log_ts("[Hybrid] 상세 정보 탭 활성화 완료")
-                        break
-                    except: pass
-            for sel in NJAV_TITLE_SELECTORS:
-                ele = page.ele(sel, timeout=1)
-                if ele and (ele.text or "").strip() and not _title_looks_placeholder(ele.text.strip()):
-                    data["title"] = ele.text.strip(); break
-            for sel in NJAV_SYNOPSIS_SELECTORS:
-                ele = page.ele(sel, timeout=1)
-                if ele and (ele.text or "").strip(): data["synopsis"] = ele.text.strip(); break
-            poster = page.ele(NJAV_COVER_SELECTOR, timeout=2)
-            if poster:
-                m = re.search(r'url\(["\']?(.+?)["\']?\)', poster.attr('style') or "")
-                if m: data["cover_url"] = m.group(1).replace("&quot;", "").strip('"').strip("'")
-            # [개선] 상세 정보 영역(div.space-y-2)의 하위 로우(div.text-secondary)들만 독립적으로 루프하며 추출
-            meta_container = page.ele('css:div.space-y-2', timeout=3)
-            if meta_container:
-                meta_rows = meta_container.eles('css:div.text-secondary')
-                for row in meta_rows:
-                    row_text = row.text or ""
-                    
-                    # 1. 품번 (品番) - span.font-medium에서 정확히 추출
-                    if "品番" in row_text:
-                        code_val = row.ele('css:span.font-medium', timeout=1)
-                        if code_val: data["product_code"] = code_val.text.strip()
-                    
-                    # 2. 출시일 (配信開始日) - time 또는 span.font-medium에서 추출
-                    elif "配信開始" in row_text or "発売日" in row_text:
-                        rd_val = row.ele('tag:time') or row.ele('css:span.font-medium')
-                        if rd_val: data["release_date"] = rd_val.text.strip()
-
-                    # 3. 여배우 (女優) - 모든 a 태그를 리스트로 수집 (다수 대응) + 괄호 제거(예외 처리)
-                    elif "女優" in row_text or "出演자" in row_text or "出演者" in row_text:
-                        from javstory.utils.actress_profile import dedupe_crawled_actor_tokens
-
-                        raw_actors = [a.text.strip() for a in row.eles('tag:a') if a.text.strip()]
-                        actors = dedupe_crawled_actor_tokens(raw_actors)
-                        if actors:
-                            data["actors"] = actors
-
-                    # 4. 장르 (ジャンル) - 모든 a 태그를 리스트로 수집 (누락 방지)
-                    elif "ジャンル" in row_text or "カテゴリー" in row_text:
-                        from javstory.utils.common import dedupe_preserve_order
-
-                        genres = dedupe_preserve_order(
-                            [a.text.strip() for a in row.eles('tag:a') if a.text.strip()]
-                        )
-                        if genres:
-                            data["genres"] = genres
-
-                    # 5. 메이커 (メーカー) - 첫 번째 a 태그 추출
-                    elif "メーカー" in row_text or "브랜드" in row_text or "ブランド" in row_text:
-                        maker_link = row.ele('tag:a')
-                        if maker_link: data["maker"] = maker_link.text.strip()
-                    
-                    # 6. 감독 (監督) / 레이블 (レー벨) 등 추가 정보
-                    elif "監督" in row_text:
-                        director_val = row.ele('tag:a')
-                        if director_val: data["director"] = director_val.text.strip()
-                    elif "レーベル" in row_text:
-                        label_val = row.ele('tag:a')
-                        if label_val: data["label"] = label_val.text.strip()
-
-            final_url = _page_location_href(page) or final_url
-            data = _merge_njav_body_head(data, _extract_njav_head_meta(page.html or "", final_url))
-            data["_final_url"] = final_url
-            return data
-        except Exception as e:
-            # raw print는 Windows cp949 콘솔에서 중·일 문자가 있으면 UnicodeEncodeError를
-            # 재발생시켜 return {} 에 도달하지 못하고 상위 wait_for가 실패한다.
-            log_ts(f"[Hybrid] 추출 중 에러: {type(e).__name__}: {e}")
-            return {}
-        finally: 
-            try: 
-                if page:
-                    page.quit()
-            except: pass
-            
-            # [강력 조치] 프로세스 잔류 방지 (특히 Headless 모드 좀비 방어)
-            if browser_pid:
-                try:
-                    import psutil
-                    proc = psutil.Process(browser_pid)
-                    if proc.is_running():
-                        proc.kill() # 확실한 종료
-                        log_ts(f"[Hybrid] 브라우저 프로세스(PID:{browser_pid}) 강제 종료 완료")
-                except: pass
-
-            # 작업 종료 후 임시 폴더 삭제 시도 (용량 관리)
-            if 'tmp_user_dir' in locals() and tmp_user_dir.exists():
-                try: shutil.rmtree(tmp_user_dir, ignore_errors=True)
-                except: pass
 
     async def fetch_metadata_smart(
         self,
@@ -732,25 +483,25 @@ class HybridJavCrawler:
                     pass
 
         # 1) 123av
-        _stage(f"[Hybrid] 1순위(123av): requests 수집 시도: {code}", 26)
+        _stage(f"[Hybrid] 1순위(123av): HTTP 수집 시도: {code}", 26)
         try:
-            d = await asyncio.wait_for(asyncio.to_thread(_scrape_123av, code), timeout=20.0)
+            d = await asyncio.wait_for(asyncio.to_thread(_scrape_123av, code), timeout=60.0)
             out = _merge_empty_only(out, d, source="123av")
         except Exception:
             pass
 
         # 2) missav123 — 값싼 HTTP라 synopsis·favorite_score 보완까지 계속 시도
         if _needs_fallback(out, require_synopsis=True):
-            _stage(f"[Hybrid] 2순위(missav123): requests 수집 시도: {code}", 28)
+            _stage(f"[Hybrid] 2순위(missav123): HTTP 수집 시도: {code}", 28)
             try:
-                d = await asyncio.wait_for(asyncio.to_thread(_scrape_missav123, code), timeout=20.0)
+                d = await asyncio.wait_for(asyncio.to_thread(_scrape_missav123, code), timeout=45.0)
                 out = _merge_empty_only(out, d, source="missav123")
             except Exception:
                 pass
 
-        # 3) avwiki (아마추어 보루 / 403 시 Playwright) — 값싼 HTTP라 synopsis 도 계속 시도
+        # 3) avwiki (아마추어 보루 / 403 시 브라우저) — 값싼 HTTP라 synopsis 도 계속 시도
         if _needs_fallback(out, require_synopsis=True):
-            _stage(f"[Hybrid] 3순위(avwiki): requests 수집 시도: {code}", 30)
+            _stage(f"[Hybrid] 3순위(avwiki): HTTP 수집 시도: {code}", 30)
             try:
                 d = await asyncio.wait_for(
                     asyncio.to_thread(_scrape_avwiki, code, False), timeout=25.0
@@ -759,7 +510,7 @@ class HybridJavCrawler:
             except Exception as e:
                 if "403" in str(e):
                     try:
-                        _stage(f"[Hybrid] 3순위(avwiki): 403 감지 → Playwright 우회 시도: {code}", 31)
+                        _stage(f"[Hybrid] 3순위(avwiki): 403 감지 → 브라우저 우회 시도: {code}", 31)
                         d2 = await asyncio.wait_for(
                             asyncio.to_thread(_scrape_avwiki, code, True), timeout=60.0
                         )
@@ -767,43 +518,25 @@ class HybridJavCrawler:
                     except Exception:
                         pass
 
-        # 4) njavtv (Playwright -> DrissionPage)
-        #  - 브라우저 자동화라 건당 수십 초~수 분. title/cover 가 이미 있으면(=synopsis 만
-        #    누락) 기본적으로 건너뛴다(_browser_chases_synopsis / env 로 복원 가능).
-        #  - "최종 재시도" 단계는 제거: 같은 URL을 DrissionPage로 다시 여는 순수 중복이라,
-        #    앞선 Playwright/DP 가 404·빈 페이지를 받은 코드에서는 결과가 동일하다.
-        _njav_require_syn = _browser_chases_synopsis()
-        if _needs_fallback(out, require_synopsis=_njav_require_syn):
-            _stage(f"[Hybrid] 4순위(njavtv): Playwright(Headless) 수집 시도: {code}", 33)
+        # 4) njavtv — 서버 렌더링이라 HTTP(Scrapling)로 대부분 끝난다. 값싸므로 synopsis
+        #    보완까지 시도. 막히면(Cloudflare 등) 브라우저(StealthyFetcher)로 한 번 더.
+        #  - 브라우저 단계는 건당 수 초~수십 초. title/cover 가 이미 있으면(=synopsis 만 누락)
+        #    _browser_chases_synopsis() 설정을 따른다.
+        if _needs_fallback(out, require_synopsis=True):
+            _stage(f"[Hybrid] 4순위(njavtv): HTTP 수집 시도: {code}", 33)
             try:
-                raw = await asyncio.wait_for(scrape_njavtv_playwright_async(code), timeout=75.0)
+                d = await asyncio.wait_for(asyncio.to_thread(_scrape_njavtv, code, False), timeout=30.0)
+                out = _merge_empty_only(out, d, source="njavtv")
             except Exception:
-                raw = {}
-            if _raw_has_any_content(raw):
-                nj = _scrape_dict_for_db(raw, code)
-                nj["_final_url"] = raw.get("_final_url") or raw.get("final_url")
-                out = _merge_empty_only(out, nj, source="njavtv")
+                pass
 
-        if _needs_fallback(out, require_synopsis=_njav_require_syn):
-            _stage(f"[Hybrid] 4순위(njavtv): DrissionPage(Headless) 정밀 수집 시도: {code}", 35)
-            for nj_url in njavtv_detail_urls(code):
-                try:
-                    raw2 = await asyncio.wait_for(
-                        asyncio.to_thread(
-                            self.get_local_page_data,
-                            nj_url,
-                            code,
-                            False,
-                        ),
-                        timeout=45.0,
-                    )
-                except Exception:
-                    raw2 = {}
-                if _raw_has_any_content(raw2):
-                    nj2 = _scrape_dict_for_db(raw2, code)
-                    nj2["_final_url"] = raw2.get("_final_url") or raw2.get("final_url")
-                    out = _merge_empty_only(out, nj2, source="njavtv_dp")
-                    break
+        if _needs_fallback(out, require_synopsis=_browser_chases_synopsis()):
+            _stage(f"[Hybrid] 4순위(njavtv): 브라우저(Stealth) 수집 시도: {code}", 35)
+            try:
+                d = await asyncio.wait_for(asyncio.to_thread(_scrape_njavtv, code, True), timeout=100.0)
+                out = _merge_empty_only(out, d, source="njavtv_browser")
+            except Exception:
+                pass
 
         # 5) av-wiki.net (배우 식별 전문 — 최종 폴백, 시놉시스 없음)
         if _needs_actress_fallback(out):
@@ -818,6 +551,7 @@ class HybridJavCrawler:
         if not _raw_has_any_content(out):
             return {}
         out.setdefault("_source", "fallback_chain")
+        _normalize_name_width(out)
         if out.get("actors"):
             from javstory.utils.actress_profile import dedupe_crawled_actor_tokens
 
