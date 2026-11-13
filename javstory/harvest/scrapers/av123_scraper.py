@@ -228,18 +228,39 @@ def _poster_from_soup(soup: BeautifulSoup, *, base_url: str) -> str:
     return ""
 
 
+_SAVE_COUNT_RE = re.compile(r"\bcount\s*:\s*(\d+)")
+_ABBREV_COUNT_RE = re.compile(r"^(\d+(?:[.,]\d+)?)\s*([KkMm万千]?)$")
+_ABBREV_MULT = {"": 1, "k": 1_000, "m": 1_000_000, "千": 1_000, "万": 10_000}
+
+
+def _parse_count_label(raw: str) -> Optional[int]:
+    """화면 표기 → 정수. '77' / '1,716' / '1.7K' / '2.3M' / '1.2万'.
+    (예전엔 '.' 을 지워 '1.7K'→'17K' 로 int 변환에 실패해 1,000 이상이 모두 0 이 됐다.)"""
+    s = (raw or "").strip().replace(" ", "")
+    if re.fullmatch(r"\d{1,3}(?:,\d{3})+|\d+", s):
+        return int(s.replace(",", ""))
+    m = _ABBREV_COUNT_RE.match(s)
+    if not m:
+        return None
+    num = float(m.group(1).replace(",", "."))
+    return int(round(num * _ABBREV_MULT[m.group(2).lower()]))
+
+
 def _favourite_count_from_soup(soup: BeautifulSoup) -> int:
+    # 1순위: 저장 버튼 Alpine 데이터의 정확한 값 — x-data="save({ ..., count: 1716, ... })"
+    # (화면 텍스트는 1,000 이상이면 '1.7K' 처럼 반올림돼 정확하지 않다)
+    btn = soup.select_one("button.watch__save[x-data]")
+    if btn:
+        m = _SAVE_COUNT_RE.search(btn.get("x-data") or "")
+        if m:
+            return int(m.group(1))
     for sel in (SELECTORS["favourite_watch"], "button.btn-action.favourite[data-code] span"):
         span = soup.select_one(sel)
         if not span:
             continue
-        raw = span.get_text(strip=True).replace(",", "").replace(".", "")
-        if not raw:
-            continue
-        try:
-            return int(raw)
-        except (ValueError, TypeError):
-            continue
+        val = _parse_count_label(span.get_text(strip=True))
+        if val is not None:
+            return val
     return 0
 
 

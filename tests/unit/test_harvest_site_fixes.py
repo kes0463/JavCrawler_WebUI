@@ -290,3 +290,37 @@ def test_123av_transport_error_does_not_fall_through(monkeypatch):
     with pytest.raises(ConnectionResetError):
         a.fetch_video_info("ABC-123")
     assert not any("uncensored" in c for c in calls)
+
+
+# ---------------------------------------------------------------- 123av 좋아요 수
+
+
+def _save_button(count_attr: str, label: str) -> str:
+    xdata = f"save({{ type: 'title', id: 1, preload: true, {count_attr} saveLabel: '保存' }})" if count_attr else ""
+    attr = f' x-data="{xdata}"' if xdata else ""
+    return f'<html><body><button class="watch__save" type="button"{attr}><span x-text="followLabel">{label}</span></button></body></html>'
+
+
+def test_123av_favourite_reads_exact_count_over_1000():
+    from bs4 import BeautifulSoup
+    from javstory.harvest.scrapers import av123_scraper as a
+
+    soup = BeautifulSoup(_save_button("count: 1716,", "1.7K"), "lxml")
+    assert a._favourite_count_from_soup(soup) == 1716
+
+
+def test_123av_favourite_falls_back_to_abbreviated_label():
+    from bs4 import BeautifulSoup
+    from javstory.harvest.scrapers import av123_scraper as a
+
+    assert a._favourite_count_from_soup(BeautifulSoup(_save_button("", "1.7K"), "lxml")) == 1700
+    assert a._favourite_count_from_soup(BeautifulSoup(_save_button("", "77"), "lxml")) == 77
+    assert a._favourite_count_from_soup(BeautifulSoup(_save_button("", "1,234"), "lxml")) == 1234
+
+
+def test_parse_count_label_variants():
+    from javstory.harvest.scrapers import av123_scraper as a
+
+    assert [a._parse_count_label(x) for x in ("0", "999", "1.7K", "12k", "2.3M", "1.2万", "x", "")] == [
+        0, 999, 1700, 12000, 2300000, 12000, None, None,
+    ]
