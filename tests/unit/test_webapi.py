@@ -74,3 +74,31 @@ def test_dashboard_summary_shape(monkeypatch):
     body = r.json()
     assert body["library"]["total"] == 10
     assert body["metadata_match_rate"] == 80.0
+
+
+def test_foreign_origin_is_rejected_before_handler():
+    from fastapi.testclient import TestClient
+    from webapi.main import app
+
+    client = TestClient(app)
+    # 다른 사이트가 보낸 본문 없는 POST — 핸들러까지 가면 안 된다
+    r = client.post("/api/playback/cache/clear", headers={"Origin": "https://evil.example"})
+    assert r.status_code == 403
+    assert client.get("/health", headers={"Origin": "http://localhost:5173"}).status_code == 200
+    assert client.get("/health").status_code == 200  # Origin 없는 요청(CLI 등)은 통과
+
+
+def test_cover_upload_rejects_path_traversal_code(tmp_path, monkeypatch):
+    from fastapi.testclient import TestClient
+    import javstory.utils.image_handler as ih
+    from webapi.main import app
+
+    # 미디어 루트를 두 단계 아래에 둬서 `..\..\` 탈출이 tmp_path 안에 떨어지게 한다
+    monkeypatch.setattr(ih, "E_MEDIA_ROOT", str(tmp_path / "a" / "media"))
+    client = TestClient(app)
+    r = client.post(
+        "/api/library/..%5C..%5Cescaped/cover",
+        files={"file": ("x.jpg", b"\xff\xd8\xff", "image/jpeg")},
+    )
+    assert r.status_code == 400
+    assert not any(tmp_path.rglob("*.jpg"))

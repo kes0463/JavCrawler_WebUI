@@ -3,9 +3,18 @@
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
 
 _ENV_LIBRARY_ROOT = "JAVSTORY_LIBRARY_ROOT"
+_SAFE_CODE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]*")
+
+
+def require_safe_code(code: str) -> str:
+    """품번을 폴더 이름으로 쓰기 전 검사 — URL 의 `..\\` 등으로 미디어 루트 밖을 가리키지 못하게."""
+    if not _SAFE_CODE.fullmatch(code or ""):
+        raise ValueError(f"잘못된 품번: {code!r}")
+    return code
 
 
 def default_library_root() -> Path:
@@ -30,7 +39,7 @@ def work_library_dir(product_code: str, *, root: Path | None = None) -> Path:
     if not code:
         raise ValueError("product_code가 비어 있습니다.")
     base = root if root is not None else library_root()
-    return base / code
+    return base / require_safe_code(code)
 
 
 def library_state_path(product_code: str, *, root: Path | None = None) -> Path:

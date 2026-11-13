@@ -24,9 +24,11 @@ from javstory.utils.ffmpeg_path import bootstrap_path_env
 bootstrap_path_env()
 
 import asyncio
+import re
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from webapi.routes import (
     actress,
@@ -191,10 +193,23 @@ _CORS_ORIGINS: list[str] = (
     ]
 )
 
+_LOCAL_ORIGIN_RE = r"https?://(localhost|127\.0\.0\.1)(:\d+)?"
+
+
+@app.middleware("http")
+async def _reject_foreign_origin(request: Request, call_next):
+    # CORS 는 응답 '읽기'만 막는다. 본문 없는 POST·폼 업로드는 다른 사이트에서도 실행되므로
+    # 브라우저가 붙이는 Origin 이 CORS 허용 목록 밖이면 처리 전에 거부한다(Origin 없는 요청=CLI 등은 통과).
+    origin = request.headers.get("origin")
+    if origin and origin not in _CORS_ORIGINS and not re.fullmatch(_LOCAL_ORIGIN_RE, origin):
+        return JSONResponse({"detail": "forbidden origin"}, status_code=403)
+    return await call_next(request)
+
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_CORS_ORIGINS,
-    allow_origin_regex=r"https?://(localhost|127\.0\.0\.1)(:\d+)?",
+    allow_origin_regex=_LOCAL_ORIGIN_RE,
     allow_methods=["GET", "HEAD", "POST", "DELETE", "PATCH", "OPTIONS"],
     allow_headers=["Content-Type", "Range"],
     expose_headers=["Accept-Ranges", "Content-Length", "Content-Range"],

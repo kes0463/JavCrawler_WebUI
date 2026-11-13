@@ -407,7 +407,7 @@ async def run_crawler_for_video_path(
             approved_terms = {
                 "ko": {
                     **{ja: ko for ja, ko in zip(resolved_actors["ja"], resolved_actors["ko"]) if ja != ko},
-                    **{ja: ko for ja, ko in zip(resolved_genres["ja"], resolved_genres["ko"]) if ja != ko},
+                    **{ja: ko for ja, ko in resolved_genres.get("terms", {}).items() if ja != ko},
                     **({resolved_maker["ja"]: resolved_maker["ko"]} if resolved_maker["ja"] != resolved_maker["ko"] else {}),
                 }
             }
@@ -860,6 +860,8 @@ def _resolve_genres(japanese_genres: str | list) -> dict:
     ja_list = dedupe_preserve_order(ja_list)
         
     ko_list, en_list = [], []
+    # ko_list 는 한국어 중복을 빼므로 ja_list 와 길이가 다르다 → 번역 용어 짝은 여기서 따로 기록
+    terms: dict[str, str] = {}
     seen_ja: set[str] = set()
     seen_ko: set[str] = set()
     with get_db_session_ctx() as session:
@@ -879,6 +881,7 @@ def _resolve_genres(japanese_genres: str | list) -> dict:
                     commit_with_retry(session)
                     ko_val = name
                     en_val = name
+                terms[name] = ko_val
                 ko_key = str(ko_val or "").casefold()
                 if ko_key and ko_key in seen_ko:
                     seen_ja.add(ja_key)
@@ -896,7 +899,7 @@ def _resolve_genres(japanese_genres: str | list) -> dict:
             print(f"[Coordinator] Genre Resolve Error: {e}")
     
     # ZH(중국어)는 요청에 따라 EN(영어) 필드를 그대로 사용
-    return {"ja": ja_list, "ko": ko_list, "en": en_list, "zh_cn": en_list, "zh_tw": en_list}
+    return {"ja": ja_list, "ko": ko_list, "en": en_list, "zh_cn": en_list, "zh_tw": en_list, "terms": terms}
 
 def _resolve_maker(japanese_maker: str) -> dict:
     """makers 마스터 테이블 매핑 (JA -> KO, EN, ZH) | 미매핑 시 pending 상태로 저장"""

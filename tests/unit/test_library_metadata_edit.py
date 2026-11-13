@@ -163,7 +163,7 @@ def test_coordinator_preserves_manual_metadata_on_crawl_fail(monkeypatch) -> Non
         return SimpleNamespace()
 
     class FakeCrawler:
-        async def fetch_metadata_smart(self, code):
+        async def fetch_metadata_smart(self, code, **kwargs):
             return None
 
     monkeypatch.setattr(coordinator, "get_db_session_ctx", lambda: FakeCtx())
@@ -231,7 +231,7 @@ def test_coordinator_preserves_manual_actors_on_successful_empty_crawl(monkeypat
         return SimpleNamespace(id=1)
 
     class FakeCrawler:
-        async def fetch_metadata_smart(self, code):
+        async def fetch_metadata_smart(self, code, **kwargs):
             return {
                 "title": "크롤 제목",
                 "synopsis": "크롤 시놉",

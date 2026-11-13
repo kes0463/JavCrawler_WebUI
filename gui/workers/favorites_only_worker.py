@@ -114,7 +114,6 @@ class FavoritesOnlyWorker(QThread):
         반환: (결과 종류, 품번). 종류: "updated" | "zero" | "failed"
         """
         from javstory.harvest.scrapers.av123_scraper import fetch_video_info as av123_fetch
-        from javstory.harvest.scrapers.missav123_scraper import fetch_video_info as missav_fetch
         from javstory.harvest.database import get_db_session_ctx, JAVMetadata, clear_favorite_crawl_failed
 
         if self._stop:
@@ -122,26 +121,20 @@ class FavoritesOnlyWorker(QThread):
 
         self.itemUpdate.emit(pc, "running", 5, "좋아요 수집 중…")
 
-        score1, score2 = 0, 0
+        # missav123.com 은 좋아요 수를 노출하지 않아(항상 0) 조회하지 않는다.
+        score1 = 0
         d1, ok1, diag1 = self._fetch_with_case_fallback(av123_fetch, pc, label="123av")
-        d2, ok2, diag2 = self._fetch_with_case_fallback(missav_fetch, pc, label="missav123")
-
         if d1 is not None:
             try:
                 score1 = int(getattr(d1, "favourite_count", 0) or 0)
             except Exception:
                 score1 = 0
-        if d2 is not None:
-            try:
-                score2 = int(getattr(d2, "favourite_count", 0) or 0)
-            except Exception:
-                score2 = 0
 
-        self._dbg(f"[FavOnly][DBG] {pc} {diag1} fav={score1} | {diag2} fav={score2}")
+        self._dbg(f"[FavOnly][DBG] {pc} {diag1} fav={score1}")
 
-        total_score = score1 + score2
+        total_score = score1
         if total_score == 0:
-            if ok1 or ok2:
+            if ok1:
                 clear_favorite_crawl_failed(pc)
                 self.itemUpdate.emit(pc, "done", 100, "0점수 (기존 값 유지)")
                 return "zero", pc
@@ -149,7 +142,7 @@ class FavoritesOnlyWorker(QThread):
             _record_favorite_crawl_failed(pc)
             return "failed", pc
 
-        sources = f"123av:{score1},missav123:{score2}"
+        sources = f"123av:{score1}"
         with get_db_session_ctx() as session:
             row = session.query(JAVMetadata).filter_by(product_code=pc).first()
             if row:

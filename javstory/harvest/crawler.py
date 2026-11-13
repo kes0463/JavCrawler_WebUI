@@ -76,10 +76,6 @@ def _title_looks_placeholder(title: str | None) -> bool:
         pass
     return False
 
-def _norm_product_code(val: str | None) -> str:
-    if not val or not isinstance(val, str): return ""
-    return re.sub(r"\s+", "", val.strip()).upper()
-
 def _raw_has_any_content(raw: dict[str, Any]) -> bool:
     if not raw: return False
     # 단순 요청 정보나 URL 외에 실제 데이터가 있는지 확인

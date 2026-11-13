@@ -15,6 +15,9 @@ class ImageHandler:
         self.ssl_context = ssl._create_unverified_context()
 
     def get_product_dir(self, product_code: str) -> Path:
+        from javstory.library.paths import require_safe_code
+
+        require_safe_code(product_code)
         base = Path(E_MEDIA_ROOT)
         try:
             base.mkdir(parents=True, exist_ok=True)

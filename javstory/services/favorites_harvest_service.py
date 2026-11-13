@@ -49,23 +49,17 @@ def process_favorite_one(pc: str) -> tuple[str, str]:
         record_favorite_score_snapshot,
     )
     from javstory.harvest.scrapers.av123_scraper import fetch_video_info as av123_fetch
-    from javstory.harvest.scrapers.missav123_scraper import fetch_video_info as missav_fetch
 
-    score1, score2 = 0, 0
+    # missav123.com 은 좋아요 수를 노출하지 않아(항상 0) 조회하지 않는다.
     d1, ok1 = _fetch_with_case_fallback(av123_fetch, pc)
-    d2, ok2 = _fetch_with_case_fallback(missav_fetch, pc)
-    if d1 is not None:
-        score1 = int(getattr(d1, "favourite_count", 0) or 0)
-    if d2 is not None:
-        score2 = int(getattr(d2, "favourite_count", 0) or 0)
-    total = score1 + score2
+    total = int(getattr(d1, "favourite_count", 0) or 0) if d1 is not None else 0
     if total == 0:
-        if ok1 or ok2:
+        if ok1:
             clear_favorite_crawl_failed(pc)
             return "zero", pc
         record_favorite_crawl_failed(pc)
         return "failed", pc
-    sources = f"123av:{score1},missav123:{score2}"
+    sources = f"123av:{total}"
     with get_db_session_ctx() as session:
         row = session.query(JAVMetadata).filter_by(product_code=pc).first()
         if not row:
