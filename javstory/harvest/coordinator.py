@@ -817,6 +817,38 @@ async def run_crawler_for_video_path(
             except Exception:
                 pass
 
+def _width_key(name: str | None) -> str:
+    """마스터 테이블 대조 키 — NFKC(반각↔전각) + 공백 정리 + casefold."""
+    import unicodedata
+
+    return re.sub(r"\s+", " ", unicodedata.normalize("NFKC", name or "")).strip().casefold()
+
+
+def _find_master_row(session, model, name: str):
+    """genres/makers 행 찾기. 정확히 같은 이름이 없으면 표기 폭·대소문자만 다른 기존 행을 쓴다.
+
+    크롤러가 이름을 NFKC 로 정규화(`中出ｼ`→`中出シ`)하므로, 반각으로 저장돼 번역까지 붙은
+    기존 행을 정확 일치로만 찾으면 번역 없는 중복 행이 새로 생긴다. 후보가 여럿이면
+    번역(korean)이 있는 행을 우선한다.
+    """
+    def _translated(r) -> bool:
+        return r is not None and bool(str(r.korean or "").strip())
+
+    exact = session.query(model).filter_by(japanese=name).first()
+    if _translated(exact):
+        return exact
+    key = _width_key(name)
+    if not key:
+        return exact
+    cands = [r for r in session.query(model).all() if _width_key(r.japanese) == key]
+    translated = sorted((r for r in cands if _translated(r)), key=lambda r: r.id or 0)
+    if translated:
+        return translated[0]
+    if exact is not None:
+        return exact
+    return min(cands, key=lambda r: r.id or 0) if cands else None
+
+
 def _resolve_genres(japanese_genres: str | list) -> dict:
     """genres 마스터 테이블 매핑 (JA -> KO, EN, ZH) | 미매핑 시 pending 상태로 저장"""
     from javstory.utils.common import dedupe_preserve_order
@@ -836,7 +868,7 @@ def _resolve_genres(japanese_genres: str | list) -> dict:
                 ja_key = name.casefold()
                 if ja_key in seen_ja:
                     continue
-                row = session.query(Genre).filter_by(japanese=name).first()
+                row = _find_master_row(session, Genre, name)
                 if row:
                     ko_val = row.korean or name
                     en_val = row.english or name
@@ -871,7 +903,7 @@ def _resolve_maker(japanese_maker: str) -> dict:
     name = (japanese_maker or "").strip()
     with get_db_session_ctx() as session:
         try:
-            row = session.query(Maker).filter_by(japanese=name).first()
+            row = _find_master_row(session, Maker, name)
             if row:
                 ko_val = row.korean or name   # None이면 일본어 폴백
                 en_val = row.english or name  # None이면 일본어 폴백
